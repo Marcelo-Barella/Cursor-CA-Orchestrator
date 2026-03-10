@@ -136,7 +136,7 @@ def parse_task_plan(plan_json: str, config: OrchestratorConfig) -> list[TaskConf
 
         repo_alias = entry["repo"]
         is_create_repo = entry.get("create_repo", False)
-        if not is_create_repo and repo_alias not in config.repositories:
+        if not is_create_repo and repo_alias != "__new__" and repo_alias not in config.repositories:
             raise ValueError(
                 f"Task '{task_id}' references unknown repository '{repo_alias}'. "
                 f"Valid aliases: {sorted(config.repositories.keys())}"
@@ -145,6 +145,12 @@ def parse_task_plan(plan_json: str, config: OrchestratorConfig) -> list[TaskConf
         depends_on = entry.get("depends_on", [])
         if not isinstance(depends_on, list):
             raise ValueError(f"Task '{task_id}': 'depends_on' must be a list")
+
+        if repo_alias == "__new__" and not is_create_repo and not depends_on:
+            raise ValueError(
+                f"Task '{task_id}' uses repo '__new__' without create_repo=true "
+                f"and has no dependencies. It must depend on a repo-creation task."
+            )
 
         timeout = entry.get("timeout_minutes", 30)
         if not isinstance(timeout, int) or timeout <= 0:

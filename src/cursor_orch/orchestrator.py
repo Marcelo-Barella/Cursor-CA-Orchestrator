@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 30
 BLOCKED_TIMEOUT_SECONDS = 300
+PLANNING_LOCK_TTL_SECONDS = 600
 MAX_RETRY_COUNT = 1
 MAX_WORKER_OUTPUT_BYTES = 512 * 1024
 MAX_SUMMARY_BYTES = 4096
@@ -475,12 +476,49 @@ def _resolve_github_username(gh_token: str) -> str:
     return resp.json()["login"]
 
 
+def _acquire_planning_lock(gist_client: GistClient, gist_id: str) -> bool:
+    content = gist_client.read_file(gist_id, "planning.lock")
+    if content:
+        try:
+            lock_data = json.loads(content)
+            locked_at = datetime.fromisoformat(lock_data["locked_at"])
+            elapsed = (datetime.now(timezone.utc) - locked_at).total_seconds()
+            if elapsed < PLANNING_LOCK_TTL_SECONDS:
+                logger.info("Planning lock held (%.0fs ago), deferring to existing run", elapsed)
+                return False
+            logger.warning("Planning lock stale (%.0fs), taking over", elapsed)
+        except (json.JSONDecodeError, KeyError, ValueError):
+            logger.warning("Corrupt planning.lock, overwriting")
+    gist_client.write_file(
+        gist_id, "planning.lock", json.dumps({"locked_at": _now_iso()}),
+    )
+    return True
+
+
+def _release_planning_lock(gist_client: GistClient, gist_id: str) -> None:
+    try:
+        gist_client.delete_file(gist_id, "planning.lock")
+    except Exception:
+        logger.warning("Failed to delete planning.lock")
+
+
 def _run_planning_phase(
     config: OrchestratorConfig,
     gist_id: str,
     cursor_client: CursorClient,
     gist_client: GistClient,
 ) -> None:
+    acquired = _acquire_planning_lock(gist_client, gist_id)
+
+    if not acquired:
+        logger.info("Waiting for plan from another orchestrator run")
+        plan_content = wait_for_plan(gist_client, gist_id)
+        if plan_content is None:
+            raise RuntimeError("Timed out waiting for task plan from another planning run")
+        parsed_tasks = parse_task_plan(plan_content, config)
+        config.tasks = parsed_tasks
+        return
+
     append_event(gist_client, gist_id, _make_event("planning_started", "Planning phase started"))
     try:
         gh_token = os.environ["GH_TOKEN"]
@@ -513,6 +551,8 @@ def _run_planning_phase(
     except Exception as exc:
         append_event(gist_client, gist_id, _make_event("planning_failed", str(exc)))
         raise
+    finally:
+        _release_planning_lock(gist_client, gist_id)
 
 
 def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: GistClient) -> None:
@@ -521,6 +561,8 @@ def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: Gi
 
     if config.prompt and not config.tasks:
         _run_planning_phase(config, gist_id, cursor_client, gist_client)
+        config_str = gist_client.read_file(gist_id, "config.yaml")
+        config = parse_config(config_str)
 
     try:
         state = sync_from_gist(gist_client, gist_id)

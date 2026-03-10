@@ -198,7 +198,7 @@ def _validate_unique_ids(tasks: list[TaskConfig]) -> set[str]:
 
 def _validate_repo_refs(tasks: list[TaskConfig], repositories: dict[str, RepoConfig]) -> None:
     for task in tasks:
-        if not task.create_repo and task.repo not in repositories:
+        if not task.create_repo and task.repo != "__new__" and task.repo not in repositories:
             raise ValueError(f"Task '{task.id}' references unknown repository '{task.repo}'")
 
 
