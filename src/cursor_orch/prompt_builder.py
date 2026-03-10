@@ -57,6 +57,14 @@ def _section_repo_creation(task: TaskConfig) -> str:
         "set to the full HTTPS URL of the newly created repository (e.g. https://github.com/owner/repo-name).",
         "Downstream tasks depend on this value to locate the repository.",
     ])
+    lines.extend([
+        "",
+        "CRITICAL: You are running in a read-only bootstrap repository. Do NOT write any code "
+        "or files into this repository. To create the new repo and populate it with code, use "
+        "the GitHub API or `gh` CLI to: (1) create the repo, (2) clone it to a temporary "
+        "directory, (3) write code there, (4) commit and push. All code MUST go to the new "
+        "repo, not to the current working directory.",
+    ])
     return "\n".join(lines)
 
 

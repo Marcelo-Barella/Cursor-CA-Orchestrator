@@ -32,13 +32,21 @@ You are an orchestration bootstrap agent. Your ONLY task is to execute the follo
 Commands to execute (run sequentially in the shell):
 
 pip install -r requirements.txt
-python bootstrap/run_from_gist.py --gist {GIST_ID} --gh-token {GH_TOKEN} --cursor-api-key {CURSOR_API_KEY}
+python3 bootstrap/run_from_gist.py --gist {GIST_ID} --gh-token {GH_TOKEN} --cursor-api-key {CURSOR_API_KEY}
 
 If the first command (pip install) fails, stop and report the error.
-If the second command (python bootstrap/run_from_gist.py) fails, report the full stderr output.
+If the second command (python3 bootstrap/run_from_gist.py) fails, report the full stderr output.
 If the second command succeeds, report "Bootstrap complete" followed by the last 50 lines of stdout.
 
+ON FAILURE:
+- If any command fails, report the EXACT error output verbatim.
+- Do NOT attempt to fix, debug, or work around the error.
+- Do NOT create, edit, or delete any files for any reason.
+- Do NOT install additional packages to resolve import errors.
+
 STRICT RULES:
+- This repository is READ-ONLY. You have NO permission to write files under any circumstances.
+- If the script fails with an import error, module error, or any other error, report the error AS-IS. Do not attempt to resolve it.
 - Do NOT modify any files in this repository.
 - Do NOT create any new files other than what the script creates.
 - Do NOT install packages other than those in requirements.txt.
@@ -52,6 +60,18 @@ PLACEHOLDER_RULE = RULE_TEMPLATE.format(
     GH_TOKEN="<PLACEHOLDER>",
     CURSOR_API_KEY="<PLACEHOLDER>",
 )
+
+READONLY_GUARD_RULE = """---
+description: Read-only bootstrap repository guard
+globs:
+alwaysApply: true
+---
+
+This is a bootstrap repository for cursor-orch. It must remain unchanged.
+Do NOT create, modify, or delete any files in this repository.
+Do NOT write code, fix errors, or add functionality.
+Your only job is to execute commands as instructed by the orchestrator rule.
+"""
 
 
 def _compute_delay(attempt: int) -> float:
@@ -185,6 +205,7 @@ def _commit_bootstrap_files(session: requests.Session, owner: str, repo: str) ->
     loader_content = _get_loader_content()
     _commit_file(session, owner, repo, "bootstrap/run_from_gist.py", loader_content.encode("utf-8"), "Add bootstrap loader")
     _commit_file(session, owner, repo, ".cursor/rules/orchestrator.mdc", PLACEHOLDER_RULE.encode("utf-8"), "Add placeholder Cursor rule")
+    _commit_file(session, owner, repo, ".cursor/rules/readonly-guard.mdc", READONLY_GUARD_RULE.encode("utf-8"), "Add read-only guard rule")
 
 
 def _check_and_update_file(
@@ -220,6 +241,7 @@ def _verify_and_update_loader(session: requests.Session, owner: str, repo: str) 
     loader_content = _get_loader_content()
     _check_and_update_file(session, owner, repo, "bootstrap/run_from_gist.py", loader_content.encode("utf-8"), "Update bootstrap loader")
     _check_and_update_file(session, owner, repo, "requirements.txt", b"requests\n", "Update requirements.txt")
+    _check_and_update_file(session, owner, repo, ".cursor/rules/readonly-guard.mdc", READONLY_GUARD_RULE.encode("utf-8"), "Update read-only guard rule")
 
 
 def ensure_bootstrap_repo(gh_token: str, repo_name: str) -> dict:
