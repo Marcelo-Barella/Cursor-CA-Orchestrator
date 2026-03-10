@@ -80,7 +80,8 @@ def _build_header(state: OrchestrationState, config: OrchestratorConfig) -> Text
     color = STATUS_COLORS.get(state.status, "white")
     text = Text()
     text.append(f"cursor-orch: {config.name}  ", style="bold")
-    text.append(f"[{finished}/{total} tasks]  ", style="dim")
+    tasks_label = "[planning...]" if total == 0 and getattr(config, "prompt", "") else f"[{finished}/{total} tasks]"
+    text.append(f"{tasks_label}  ", style="dim")
     text.append("status: ", style="dim")
     text.append(f"{state.status}  ", style=color)
     text.append(f"elapsed: {elapsed}", style="dim")

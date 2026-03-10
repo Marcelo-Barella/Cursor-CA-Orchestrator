@@ -22,6 +22,8 @@ class TaskConfig:
     model: str | None = None
     depends_on: list[str] = field(default_factory=list)
     timeout_minutes: int = 30
+    create_repo: bool = False
+    repo_config: dict | None = None
 
 
 @dataclass
@@ -34,9 +36,10 @@ class TargetConfig:
 class OrchestratorConfig:
     name: str
     model: str
-    repositories: dict[str, RepoConfig]
-    tasks: list[TaskConfig]
-    target: TargetConfig
+    prompt: str = ""
+    repositories: dict[str, RepoConfig] = field(default_factory=dict)
+    tasks: list[TaskConfig] = field(default_factory=list)
+    target: TargetConfig = field(default_factory=lambda: TargetConfig(auto_create_pr=True, branch_prefix="cursor-orch"))
     bootstrap_repo_name: str = "cursor-orch-bootstrap"
 
 
@@ -50,11 +53,48 @@ def parse_config(yaml_str: str) -> OrchestratorConfig:
     return OrchestratorConfig(
         name=raw.get("name", "unnamed"),
         model=raw.get("model", "default"),
+        prompt=raw.get("prompt", ""),
         repositories=repositories,
         tasks=tasks,
         target=target,
         bootstrap_repo_name=raw.get("bootstrap_repo_name", "cursor-orch-bootstrap"),
     )
+
+
+def to_yaml(config: OrchestratorConfig) -> str:
+    data: dict = {
+        "name": config.name,
+        "model": config.model,
+    }
+    if config.prompt:
+        data["prompt"] = config.prompt
+    if config.repositories:
+        data["repositories"] = {
+            k: {"url": v.url, "ref": v.ref} for k, v in config.repositories.items()
+        }
+    if config.tasks:
+        tasks_list = []
+        for t in config.tasks:
+            td: dict = {"id": t.id, "repo": t.repo, "prompt": t.prompt}
+            if t.model is not None:
+                td["model"] = t.model
+            if t.depends_on:
+                td["depends_on"] = t.depends_on
+            if t.timeout_minutes != 30:
+                td["timeout_minutes"] = t.timeout_minutes
+            if t.create_repo:
+                td["create_repo"] = t.create_repo
+            if t.repo_config is not None:
+                td["repo_config"] = t.repo_config
+            tasks_list.append(td)
+        data["tasks"] = tasks_list
+    data["target"] = {
+        "auto_create_pr": config.target.auto_create_pr,
+        "branch_prefix": config.target.branch_prefix,
+    }
+    if config.bootstrap_repo_name != "cursor-orch-bootstrap":
+        data["bootstrap_repo_name"] = config.bootstrap_repo_name
+    return yaml.dump(data, default_flow_style=False, sort_keys=False)
 
 
 def _parse_repositories(raw: dict) -> dict[str, RepoConfig]:
@@ -70,6 +110,8 @@ def _parse_tasks(raw: list) -> list[TaskConfig]:
             model=t.get("model"),
             depends_on=t.get("depends_on", []),
             timeout_minutes=t.get("timeout_minutes", 30),
+            create_repo=t.get("create_repo", False),
+            repo_config=t.get("repo_config"),
         )
         for t in raw
     ]
@@ -156,7 +198,7 @@ def _validate_unique_ids(tasks: list[TaskConfig]) -> set[str]:
 
 def _validate_repo_refs(tasks: list[TaskConfig], repositories: dict[str, RepoConfig]) -> None:
     for task in tasks:
-        if task.repo not in repositories:
+        if not task.create_repo and task.repo not in repositories:
             raise ValueError(f"Task '{task.id}' references unknown repository '{task.repo}'")
 
 
@@ -180,6 +222,11 @@ def _validate_branch_names(config: OrchestratorConfig) -> None:
 
 
 def validate_config(config: OrchestratorConfig) -> None:
+    if not config.prompt and not config.tasks:
+        raise ValueError("Config must specify either 'prompt' or 'tasks'")
+    _validate_branch_name(config.target.branch_prefix, "branch_prefix")
+    if config.prompt and not config.tasks:
+        return
     _validate_task_count(config.tasks)
     task_ids = _validate_unique_ids(config.tasks)
     _validate_repo_refs(config.tasks, config.repositories)
