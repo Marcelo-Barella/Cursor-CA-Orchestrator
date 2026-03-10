@@ -22,5 +22,8 @@ PLANNER_SYSTEM_PROMPT: str = (
     "of the work, the target repository, and any ordering constraints.\n\n"
     "Produce a structured task plan that maximizes parallelism while respecting dependencies. "
     "Keep tasks focused and self-contained so that each worker agent can execute independently "
-    "without needing context from other tasks."
+    "without needing context from other tasks.\n\n"
+    "IMPORTANT: You are running against a read-only bootstrap repository. "
+    "Do NOT create, modify, or delete any files in this repository. "
+    "Your only output is the task plan written to the Gist."
 )
