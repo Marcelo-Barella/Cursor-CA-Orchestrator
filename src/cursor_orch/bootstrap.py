@@ -60,6 +60,14 @@ def _compute_delay(attempt: int) -> float:
     return delay + random.uniform(-jitter, jitter)
 
 
+def _compute_429_delay(attempt: int, resp: requests.Response) -> float:
+    delay = _compute_delay(attempt)
+    retry_after = resp.headers.get("Retry-After")
+    if retry_after is not None:
+        delay = max(delay, float(retry_after))
+    return delay
+
+
 def _github_api(session: requests.Session, method: str, url: str, **kwargs: object) -> requests.Response:
     retries_429 = 0
     retries_transient = 0
@@ -67,26 +75,25 @@ def _github_api(session: requests.Session, method: str, url: str, **kwargs: obje
     while True:
         resp = session.request(method, url, **kwargs)
 
-        if resp.status_code == 429:
+        if resp.status_code == 429 and retries_429 < MAX_RETRIES_429:
+            delay = _compute_429_delay(retries_429, resp)
             retries_429 += 1
-            if retries_429 > MAX_RETRIES_429:
-                raise RuntimeError(f"GitHub rate limit exceeded for {url}")
-            delay = _compute_delay(retries_429 - 1)
-            retry_after = resp.headers.get("Retry-After")
-            if retry_after is not None:
-                delay = max(delay, float(retry_after))
             logger.warning(f"Rate limited. Retry {retries_429}/{MAX_RETRIES_429} in {delay:.1f}s")
             time.sleep(delay)
             continue
 
-        if resp.status_code in TRANSIENT_CODES:
+        if resp.status_code == 429:
+            raise RuntimeError(f"GitHub rate limit exceeded for {url}")
+
+        if resp.status_code in TRANSIENT_CODES and retries_transient < MAX_RETRIES_TRANSIENT:
+            delay = _compute_delay(retries_transient)
             retries_transient += 1
-            if retries_transient > MAX_RETRIES_TRANSIENT:
-                raise RuntimeError(f"Transient error {resp.status_code} for {url}")
-            delay = _compute_delay(retries_transient - 1)
             logger.warning(f"Transient error ({resp.status_code}). Retry {retries_transient}/{MAX_RETRIES_TRANSIENT}")
             time.sleep(delay)
             continue
+
+        if resp.status_code in TRANSIENT_CODES:
+            raise RuntimeError(f"Transient error {resp.status_code} for {url}")
 
         return resp
 
@@ -126,10 +133,7 @@ def _commit_file(
     sha: str | None = None,
 ) -> None:
     encoded = base64.b64encode(content_bytes).decode("ascii")
-    payload: dict[str, object] = {
-        "message": message,
-        "content": encoded,
-    }
+    payload: dict[str, object] = {"message": message, "content": encoded}
     if sha is not None:
         payload["sha"] = sha
     resp = _github_api(session, "PUT", f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}", json=payload)
@@ -157,66 +161,44 @@ def _create_repo(session: requests.Session, name: str) -> dict:
         raise RuntimeError(f"Failed to create repo: HTTP {resp.status_code} {resp.text[:300]}")
     data = resp.json()
     logger.info(f"Created bootstrap repo: {data['html_url']}")
-    # brief pause for GitHub to initialize repo
     time.sleep(2)
     return data
 
 
 def _commit_bootstrap_files(session: requests.Session, owner: str, repo: str) -> None:
-    _commit_file(
-        session, owner, repo,
-        "requirements.txt",
-        b"requests\n",
-        "Add requirements.txt",
-    )
+    _commit_file(session, owner, repo, "requirements.txt", b"requests\n", "Add requirements.txt")
     loader_content = _get_loader_content()
-    _commit_file(
-        session, owner, repo,
-        "bootstrap/run_from_gist.py",
-        loader_content.encode("utf-8"),
-        "Add bootstrap loader",
-    )
-    _commit_file(
-        session, owner, repo,
-        ".cursor/rules/orchestrator.mdc",
-        PLACEHOLDER_RULE.encode("utf-8"),
-        "Add placeholder Cursor rule",
-    )
+    _commit_file(session, owner, repo, "bootstrap/run_from_gist.py", loader_content.encode("utf-8"), "Add bootstrap loader")
+    _commit_file(session, owner, repo, ".cursor/rules/orchestrator.mdc", PLACEHOLDER_RULE.encode("utf-8"), "Add placeholder Cursor rule")
+
+
+def _check_and_update_file(
+    session: requests.Session,
+    owner: str,
+    repo: str,
+    path: str,
+    expected_content: bytes,
+    message: str,
+) -> None:
+    resp = _github_api(session, "GET", f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}")
+    if resp.status_code == 404:
+        _commit_file(session, owner, repo, path, expected_content, message)
+        return
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to check {path}: HTTP {resp.status_code}")
+    file_data = resp.json()
+    remote_content = base64.b64decode(file_data.get("content", ""))
+    remote_sha256 = hashlib.sha256(remote_content).hexdigest()
+    expected_sha256 = hashlib.sha256(expected_content).hexdigest()
+    if remote_sha256 != expected_sha256:
+        logger.info(f"Updating {path} (content changed)")
+        _commit_file(session, owner, repo, path, expected_content, message, sha=file_data["sha"])
 
 
 def _verify_and_update_loader(session: requests.Session, owner: str, repo: str) -> None:
-    bundled = _get_loader_content()
-    bundled_sha256 = hashlib.sha256(bundled.encode("utf-8")).hexdigest()
-
-    resp = _github_api(session, "GET", f"{GITHUB_API}/repos/{owner}/{repo}/contents/bootstrap/run_from_gist.py")
-    if resp.status_code == 404:
-        _commit_file(session, owner, repo, "bootstrap/run_from_gist.py", bundled.encode("utf-8"), "Add bootstrap loader")
-        return
-    if resp.status_code != 200:
-        raise RuntimeError(f"Failed to check loader: HTTP {resp.status_code}")
-
-    file_data = resp.json()
-    remote_content = base64.b64decode(file_data.get("content", "")).decode("utf-8")
-    remote_sha256 = hashlib.sha256(remote_content.encode("utf-8")).hexdigest()
-
-    if remote_sha256 != bundled_sha256:
-        logger.info("Loader script outdated, updating")
-        _commit_file(
-            session, owner, repo,
-            "bootstrap/run_from_gist.py",
-            bundled.encode("utf-8"),
-            "Update bootstrap loader",
-            sha=file_data["sha"],
-        )
-
-    req_resp = _github_api(session, "GET", f"{GITHUB_API}/repos/{owner}/{repo}/contents/requirements.txt")
-    if req_resp.status_code == 404:
-        _commit_file(session, owner, repo, "requirements.txt", b"requests\n", "Add requirements.txt")
-    elif req_resp.status_code == 200:
-        req_data = req_resp.json()
-        remote_req = base64.b64decode(req_data.get("content", "")).decode("utf-8")
-        if remote_req.strip() != "requests":
-            _commit_file(session, owner, repo, "requirements.txt", b"requests\n", "Update requirements.txt", sha=req_data["sha"])
+    loader_content = _get_loader_content()
+    _check_and_update_file(session, owner, repo, "bootstrap/run_from_gist.py", loader_content.encode("utf-8"), "Update bootstrap loader")
+    _check_and_update_file(session, owner, repo, "requirements.txt", b"requests\n", "Update requirements.txt")
 
 
 def ensure_bootstrap_repo(gh_token: str, repo_name: str) -> dict:
@@ -254,11 +236,5 @@ def update_cursor_rule(
     )
     path = ".cursor/rules/orchestrator.mdc"
     sha = _get_file_sha(session, owner, repo_name, path)
-    _commit_file(
-        session, owner, repo_name,
-        path,
-        rule_content.encode("utf-8"),
-        "Update Cursor rule for orchestration run",
-        sha=sha,
-    )
+    _commit_file(session, owner, repo_name, path, rule_content.encode("utf-8"), "Update Cursor rule for orchestration run", sha=sha)
     logger.info("Updated Cursor rule in bootstrap repo")

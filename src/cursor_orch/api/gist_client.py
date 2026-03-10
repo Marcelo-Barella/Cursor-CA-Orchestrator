@@ -51,6 +51,14 @@ def _compute_delay(attempt: int) -> float:
     return delay + random.uniform(-jitter, jitter)
 
 
+def _compute_429_delay(attempt: int, resp: requests.Response) -> float:
+    delay = _compute_delay(attempt)
+    retry_after = resp.headers.get("Retry-After")
+    if retry_after is not None:
+        delay = max(delay, float(retry_after))
+    return delay
+
+
 class GistClient:
     def __init__(self, token: str):
         self._session = requests.Session()
@@ -85,26 +93,25 @@ class GistClient:
             resp = self._session.request(method, url, **kwargs)
             self._track_rate_limit(resp)
 
-            if resp.status_code == 429:
+            if resp.status_code == 429 and retries_429 < MAX_RETRIES_429:
+                delay = _compute_429_delay(retries_429, resp)
                 retries_429 += 1
-                if retries_429 > MAX_RETRIES_429:
-                    raise RateLimitError("GitHub API rate limit exceeded after max retries")
-                delay = _compute_delay(retries_429 - 1)
-                retry_after = resp.headers.get("Retry-After")
-                if retry_after is not None:
-                    delay = max(delay, float(retry_after))
                 logger.warning(f"Rate limited (429). Retry {retries_429}/{MAX_RETRIES_429} in {delay:.1f}s")
                 time.sleep(delay)
                 continue
 
-            if resp.status_code in TRANSIENT_CODES:
+            if resp.status_code == 429:
+                raise RateLimitError("GitHub API rate limit exceeded after max retries")
+
+            if resp.status_code in TRANSIENT_CODES and retries_transient < MAX_RETRIES_TRANSIENT:
+                delay = _compute_delay(retries_transient)
                 retries_transient += 1
-                if retries_transient > MAX_RETRIES_TRANSIENT:
-                    raise GistAPIError(f"Transient error {resp.status_code} after max retries", resp.status_code)
-                delay = _compute_delay(retries_transient - 1)
                 logger.warning(f"Transient error ({resp.status_code}). Retry {retries_transient}/{MAX_RETRIES_TRANSIENT} in {delay:.1f}s")
                 time.sleep(delay)
                 continue
+
+            if resp.status_code in TRANSIENT_CODES:
+                raise GistAPIError(f"Transient error {resp.status_code} after max retries", resp.status_code)
 
             if resp.status_code == 404:
                 raise GistNotFound()
@@ -121,8 +128,7 @@ class GistClient:
             "files": {name: {"content": content} for name, content in files.items()},
         }
         resp = self._request("POST", f"{BASE_URL}/gists", json=payload)
-        data = resp.json()
-        return _parse_gist_info(data)
+        return _parse_gist_info(resp.json())
 
     def read_gist(self, gist_id: str) -> GistInfo:
         resp = self._request("GET", f"{BASE_URL}/gists/{gist_id}")
