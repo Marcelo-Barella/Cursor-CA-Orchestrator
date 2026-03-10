@@ -75,14 +75,19 @@ def _github_api(session: requests.Session, method: str, url: str, **kwargs: obje
     while True:
         resp = session.request(method, url, **kwargs)
 
-        if resp.status_code == 429 and retries_429 < MAX_RETRIES_429:
+        is_secondary_rate_limit = (
+            resp.status_code == 403
+            and ("rate limit" in resp.text.lower() or resp.headers.get("Retry-After"))
+        )
+
+        if (resp.status_code == 429 or is_secondary_rate_limit) and retries_429 < MAX_RETRIES_429:
             delay = _compute_429_delay(retries_429, resp)
             retries_429 += 1
-            logger.warning(f"Rate limited. Retry {retries_429}/{MAX_RETRIES_429} in {delay:.1f}s")
+            logger.warning(f"Rate limited ({resp.status_code}). Retry {retries_429}/{MAX_RETRIES_429} in {delay:.1f}s")
             time.sleep(delay)
             continue
 
-        if resp.status_code == 429:
+        if resp.status_code == 429 or is_secondary_rate_limit:
             raise RuntimeError(f"GitHub rate limit exceeded for {url}")
 
         if resp.status_code in TRANSIENT_CODES and retries_transient < MAX_RETRIES_TRANSIENT:
@@ -109,6 +114,10 @@ def _make_session(gh_token: str) -> requests.Session:
 
 def resolve_github_user(session: requests.Session) -> str:
     resp = _github_api(session, "GET", f"{GITHUB_API}/user")
+    if resp.status_code == 401:
+        raise RuntimeError("GitHub token is invalid or expired (HTTP 401). Check your GH_TOKEN.")
+    if resp.status_code == 403:
+        raise RuntimeError("GitHub API forbidden (HTTP 403). Your token may lack required scopes or you are rate-limited.")
     if resp.status_code != 200:
         raise RuntimeError(f"Failed to resolve GitHub user: HTTP {resp.status_code}")
     return resp.json()["login"]
@@ -137,6 +146,12 @@ def _commit_file(
     if sha is not None:
         payload["sha"] = sha
     resp = _github_api(session, "PUT", f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}", json=payload)
+    if resp.status_code == 403:
+        raise RuntimeError(
+            f"Failed to commit {path}: HTTP 403 - token lacks required permissions. "
+            "Ensure your fine-grained PAT has 'Contents: Read and write' under Repository permissions "
+            "and that Repository access includes the target repo (or is set to 'All repositories')."
+        )
     if resp.status_code not in (200, 201):
         raise RuntimeError(f"Failed to commit {path}: HTTP {resp.status_code} {resp.text[:300]}")
 
@@ -184,6 +199,12 @@ def _check_and_update_file(
     if resp.status_code == 404:
         _commit_file(session, owner, repo, path, expected_content, message)
         return
+    if resp.status_code == 403:
+        raise RuntimeError(
+            f"Permission denied checking {path}: HTTP 403. "
+            "Ensure your GitHub token has 'contents:write' scope (classic) "
+            "or 'Contents > Read and write' permission (fine-grained)."
+        )
     if resp.status_code != 200:
         raise RuntimeError(f"Failed to check {path}: HTTP {resp.status_code}")
     file_data = resp.json()

@@ -6,10 +6,13 @@ import os
 import time
 from datetime import datetime, timezone
 
+import requests
+
 from cursor_orch.api.cursor_client import CursorClient
 from cursor_orch.api.gist_client import GistClient
-from cursor_orch.config import OrchestratorConfig, TaskConfig, parse_config
-from cursor_orch.prompt_builder import build_worker_prompt
+from cursor_orch.config import OrchestratorConfig, TaskConfig, parse_config, to_yaml
+from cursor_orch.planner import build_planner_prompt, parse_task_plan, wait_for_plan
+from cursor_orch.prompt_builder import build_repo_creation_prompt, build_worker_prompt
 from cursor_orch.state import (
     AgentState,
     OrchestrationEvent,
@@ -326,6 +329,28 @@ def _handle_blocked(
         _handle_single_blocked(agent, now, cursor_client, gist_client, gist_id, graph, state)
 
 
+def _resolve_repo_for_task(
+    task: TaskConfig,
+    config: OrchestratorConfig,
+    dep_outputs: dict[str, dict],
+    gh_token: str,
+) -> tuple[str, str]:
+    if task.create_repo:
+        gh_user = _resolve_github_username(gh_token)
+        bootstrap_url = f"https://github.com/{gh_user}/{config.bootstrap_repo_name}"
+        return bootstrap_url, "main"
+
+    if task.repo in config.repositories:
+        rc = config.repositories[task.repo]
+        return rc.url, rc.ref
+
+    for dep_id, outputs in dep_outputs.items():
+        if "repo_url" in outputs:
+            return outputs["repo_url"], "main"
+
+    raise ValueError(f"Cannot resolve repository for task {task.id}: repo alias '{task.repo}' not found and no upstream repo_url")
+
+
 def _launch_single_task(
     task_id: str,
     state: OrchestrationState,
@@ -338,11 +363,14 @@ def _launch_single_task(
     task = task_map[task_id]
     gh_token = os.environ["GH_TOKEN"]
     dep_outputs = _gather_dep_outputs(task, gist_client, gist_id)
-    prompt = build_worker_prompt(task, gist_id, gh_token, dep_outputs)
+    repo_url, ref = _resolve_repo_for_task(task, config, dep_outputs, gh_token)
+    if task.create_repo:
+        prompt = build_repo_creation_prompt(task, gist_id, gh_token, dep_outputs)
+    else:
+        prompt = build_worker_prompt(task, gist_id, gh_token, dep_outputs)
     branch = compute_branch_name(config.target.branch_prefix, task_id, state.agents[task_id].retry_count)
-    repo_config = config.repositories[task.repo]
     model = task.model or config.model
-    info = _try_launch_agent(cursor_client, prompt, repo_config.url, repo_config.ref, model, branch, config.target.auto_create_pr)
+    info = _try_launch_agent(cursor_client, prompt, repo_url, ref, model, branch, config.target.auto_create_pr)
     if info is None:
         state.agents[task_id].status = "failed"
         state.agents[task_id].summary = "Failed to launch agent"
@@ -438,9 +466,61 @@ def _compute_sleep_time(gist_client: GistClient) -> int:
     return POLL_INTERVAL
 
 
+def _resolve_github_username(gh_token: str) -> str:
+    resp = requests.get(
+        "https://api.github.com/user",
+        headers={"Authorization": f"Bearer {gh_token}"},
+    )
+    resp.raise_for_status()
+    return resp.json()["login"]
+
+
+def _run_planning_phase(
+    config: OrchestratorConfig,
+    gist_id: str,
+    cursor_client: CursorClient,
+    gist_client: GistClient,
+) -> None:
+    append_event(gist_client, gist_id, _make_event("planning_started", "Planning phase started"))
+    try:
+        gh_token = os.environ["GH_TOKEN"]
+        planner_prompt = build_planner_prompt(config, gist_id, gh_token)
+
+        gh_user = _resolve_github_username(gh_token)
+        bootstrap_url = f"https://github.com/{gh_user}/{config.bootstrap_repo_name}"
+
+        cursor_client.launch_agent(
+            prompt=planner_prompt,
+            repository=bootstrap_url,
+            ref="main",
+            model=config.model,
+            branch_name=f"cursor-orch-planner-{gist_id[:8]}",
+            auto_pr=False,
+        )
+
+        plan_content = wait_for_plan(gist_client, gist_id)
+        if plan_content is None:
+            raise RuntimeError("Timed out waiting for task plan from planner agent")
+
+        parsed_tasks = parse_task_plan(plan_content, config)
+        config.tasks = parsed_tasks
+        gist_client.write_file(gist_id, "config.yaml", to_yaml(config))
+
+        append_event(
+            gist_client, gist_id,
+            _make_event("planning_completed", f"Planning completed: {len(parsed_tasks)} tasks"),
+        )
+    except Exception as exc:
+        append_event(gist_client, gist_id, _make_event("planning_failed", str(exc)))
+        raise
+
+
 def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: GistClient) -> None:
     config_str = gist_client.read_file(gist_id, "config.yaml")
     config = parse_config(config_str)
+
+    if config.prompt and not config.tasks:
+        _run_planning_phase(config, gist_id, cursor_client, gist_client)
 
     try:
         state = sync_from_gist(gist_client, gist_id)

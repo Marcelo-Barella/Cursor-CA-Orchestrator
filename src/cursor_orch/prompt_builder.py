@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cursor_orch.system_prompt import WORKER_SYSTEM_PROMPT
+
 if TYPE_CHECKING:
     from cursor_orch.config import TaskConfig
 
@@ -16,12 +18,46 @@ def build_worker_prompt(
     dependency_outputs: dict[str, dict],
 ) -> str:
     sections = [
+        WORKER_SYSTEM_PROMPT,
         _section_task(task),
         _section_dependencies(task, dependency_outputs),
         _section_output_protocol(task, gist_id, gh_token),
         _section_rules(),
     ]
     return "\n\n".join(s for s in sections if s)
+
+
+def build_repo_creation_prompt(
+    task: TaskConfig,
+    gist_id: str,
+    gh_token: str,
+    dependency_outputs: dict[str, dict],
+) -> str:
+    sections = [
+        WORKER_SYSTEM_PROMPT,
+        _section_task(task),
+        _section_repo_creation(task),
+        _section_dependencies(task, dependency_outputs),
+        _section_output_protocol(task, gist_id, gh_token),
+        _section_rules(),
+    ]
+    return "\n\n".join(s for s in sections if s)
+
+
+def _section_repo_creation(task: TaskConfig) -> str:
+    lines = [
+        "REPO CREATION TASK:",
+        "You must create a new GitHub repository as part of this task.",
+    ]
+    if task.repo_config:
+        lines.append(f"Repository configuration: {json.dumps(task.repo_config)}")
+    lines.extend([
+        "",
+        'IMPORTANT: After creating the repo, include "repo_url" in your output\'s "outputs" dict,',
+        "set to the full HTTPS URL of the newly created repository (e.g. https://github.com/owner/repo-name).",
+        "Downstream tasks depend on this value to locate the repository.",
+    ])
+    return "\n".join(lines)
 
 
 def _section_task(task: TaskConfig) -> str:

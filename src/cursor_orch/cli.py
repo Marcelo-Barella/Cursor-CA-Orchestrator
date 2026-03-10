@@ -3,18 +3,19 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 import click
-import yaml
 from rich.console import Console
 
 from cursor_orch.api.cursor_client import CursorClient
 from cursor_orch.api.gist_client import GistClient
 from cursor_orch.bootstrap import ensure_bootstrap_repo, update_cursor_rule
-from cursor_orch.config import OrchestratorConfig, parse_config, validate_config
+from cursor_orch.config import OrchestratorConfig, parse_config, to_yaml, validate_config
 from cursor_orch.dashboard import render_live, render_snapshot
 from cursor_orch.packager import create_manifest, package_runtime, validate_payload_size
+from cursor_orch.repl import run_repl
 from cursor_orch.state import (
     create_initial_state,
     deserialize,
@@ -25,9 +26,6 @@ from cursor_orch.state import (
 logger = logging.getLogger(__name__)
 console = Console()
 
-CONFIG_DIR = Path.home() / ".cursor-orch"
-CONFIG_PATH = CONFIG_DIR / "config.yaml"
-
 
 def _get_env(name: str) -> str:
     value = os.environ.get(name)
@@ -37,19 +35,13 @@ def _get_env(name: str) -> str:
     return value
 
 
-def _load_template() -> str:
-    template_path = Path(__file__).parent / "templates" / "config_template.yaml"
-    return template_path.read_text(encoding="utf-8")
-
-
 def _resolve_config(config_path: str | None) -> OrchestratorConfig:
-    if config_path:
-        path = Path(config_path)
-    else:
-        path = CONFIG_PATH
+    if not config_path:
+        console.print("[red]Error: --config is required for non-interactive mode[/red]")
+        sys.exit(1)
+    path = Path(config_path)
     if not path.exists():
         console.print(f"[red]Config not found: {path}[/red]")
-        console.print("Run 'cursor-orch init' first or provide --config PATH")
         sys.exit(1)
     content = path.read_text(encoding="utf-8")
     config = parse_config(content)
@@ -65,52 +57,32 @@ def _resolve_bootstrap_name(cli_name: str | None, config: OrchestratorConfig | N
     return "cursor-orch-bootstrap"
 
 
-@click.group()
-@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
-def main(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
-
-@main.command()
-@click.option("--config", "config_path", type=click.Path(exists=False), default=None, help="Path to config YAML")
-@click.option("--bootstrap-repo", default=None, help="Bootstrap repo name")
-def init(config_path: str | None, bootstrap_repo: str | None) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    if config_path:
-        source = Path(config_path)
-        if not source.exists():
-            console.print(f"[red]Config file not found: {source}[/red]")
-            sys.exit(1)
-        content = source.read_text(encoding="utf-8")
-        config = parse_config(content)
-        validate_config(config)
-        CONFIG_PATH.write_text(content, encoding="utf-8")
-    else:
-        template = _load_template()
-        CONFIG_PATH.write_text(template, encoding="utf-8")
-        config = None
-
-    console.print(f"Config written to {CONFIG_PATH}")
-
+def _run_prompt_only(config: OrchestratorConfig, config_yaml: str, bootstrap_repo: str | None = None) -> None:
+    cursor_api_key = _get_env("CURSOR_API_KEY")
     gh_token = _get_env("GH_TOKEN")
+
     repo_name = _resolve_bootstrap_name(bootstrap_repo, config)
-    result = ensure_bootstrap_repo(gh_token, repo_name)
-    console.print(f"Bootstrap repo: {result['url']}")
-    console.print("Ready. Run 'cursor-orch run' to start an orchestration.")
+    repo_info = ensure_bootstrap_repo(gh_token, repo_name)
+    console.print(f"Bootstrap repo verified: {repo_info['owner']}/{repo_info['name']}")
+
+    cursor_client = CursorClient(api_key=cursor_api_key)
+    repo_url = f"https://github.com/{repo_info['owner']}/{repo_info['name']}"
+
+    console.print(f"Launching prompt-only agent against {repo_info['owner']}/{repo_info['name']}...")
+    agent = cursor_client.launch_agent(
+        prompt=config.prompt,
+        repository=repo_url,
+        ref="main",
+        model=config.model,
+        branch_name=f"{config.target.branch_prefix}/prompt-run",
+        auto_pr=config.target.auto_create_pr,
+    )
+    console.print(f"Agent {agent.id} launched ({agent.status}).")
+
+    _poll_agent(cursor_client, agent.id)
 
 
-@main.command()
-@click.option("--config", "config_path", type=click.Path(exists=False), default=None, help="Path to config YAML")
-@click.option("--bootstrap-repo", default=None, help="Bootstrap repo name")
-def run(config_path: str | None, bootstrap_repo: str | None) -> None:
-    config = _resolve_config(config_path)
-    console.print(f"Validating config: {config.name} ({len(config.tasks)} tasks, {len(config.repositories)} repos)...")
-
+def _run_orchestration(config: OrchestratorConfig, config_yaml: str, bootstrap_repo: str | None = None) -> None:
     cursor_api_key = _get_env("CURSOR_API_KEY")
     gh_token = _get_env("GH_TOKEN")
 
@@ -123,8 +95,6 @@ def run(config_path: str | None, bootstrap_repo: str | None) -> None:
     manifest_str = create_manifest(runtime_files)
 
     initial_state = create_initial_state(config, "placeholder")
-
-    config_yaml = Path(config_path).read_text(encoding="utf-8") if config_path else CONFIG_PATH.read_text(encoding="utf-8")
 
     gist_client = GistClient(token=gh_token)
     gist_files: dict[str, str] = {
@@ -171,6 +141,39 @@ def run(config_path: str | None, bootstrap_repo: str | None) -> None:
     gist_client.write_file(gist_id, "state.json", serialize(initial_state))
 
     render_live(gist_client, gist_id, config)
+
+
+def _run_interactive() -> None:
+    config = run_repl()
+    if config is None:
+        console.print("Exiting.")
+        return
+    console.print(f"Validating config: {config.name} ({len(config.tasks)} tasks, {len(config.repositories)} repos)...")
+    config_yaml = to_yaml(config)
+    _run_orchestration(config, config_yaml)
+
+
+@click.group(invoke_without_command=True)
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.pass_context
+def main(ctx: click.Context, verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    if ctx.invoked_subcommand is None:
+        _run_interactive()
+
+
+@main.command()
+@click.option("--config", "config_path", type=click.Path(exists=False), default=None, help="Path to config YAML")
+@click.option("--bootstrap-repo", default=None, help="Bootstrap repo name")
+def run(config_path: str | None, bootstrap_repo: str | None) -> None:
+    config = _resolve_config(config_path)
+    console.print(f"Validating config: {config.name} ({len(config.tasks)} tasks, {len(config.repositories)} repos)...")
+    config_yaml = Path(config_path).read_text(encoding="utf-8")
+    _run_orchestration(config, config_yaml, bootstrap_repo)
 
 
 @main.command()
@@ -294,3 +297,28 @@ def logs(gist_id: str, task_id: str | None) -> None:
         role_style = "bold cyan" if msg.role == "user" else "bold green"
         console.print(f"[{role_style}][{msg.role}][/{role_style}] {msg.text}")
         console.print()
+
+
+def _poll_agent(cursor_client: CursorClient, agent_id: str) -> None:
+    terminal_states = {"finished", "stopped", "failed", "error"}
+    last_status = None
+
+    try:
+        while True:
+            agent = cursor_client.get_agent(agent_id)
+            current_status = agent.status.lower()
+
+            if current_status != last_status:
+                console.print(f"Agent status: {agent.status}")
+                last_status = current_status
+
+            if current_status in terminal_states:
+                if agent.summary:
+                    console.print(f"Summary: {agent.summary}")
+                if agent.pr_url:
+                    console.print(f"PR: {agent.pr_url}")
+                return
+
+            time.sleep(10)
+    except KeyboardInterrupt:
+        console.print("Detached. Agent continues running in cloud.")

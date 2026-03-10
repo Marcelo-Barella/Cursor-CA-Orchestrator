@@ -1,6 +1,6 @@
 # cursor-orch
 
-A Python CLI that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, creates a per-run Gist as a coordination bulletin board, and launches an orchestrator Cloud Agent that manages worker agents targeting your repositories -- all from a single YAML configuration file.
+A Python CLI that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, creates a per-run Gist as a coordination bulletin board, and launches an orchestrator Cloud Agent that manages worker agents targeting your repositories.
 
 ## Prerequisites
 
@@ -21,13 +21,10 @@ pip install -e .
 export CURSOR_API_KEY=key_abc...
 export GH_TOKEN=ghp_xyz...
 
-# Initialize config and bootstrap repo
-cursor-orch init --config ./my-project.yaml
+# Launch the interactive REPL
+cursor-orch
 
-# Start an orchestration run
-cursor-orch run
-
-# Check status (one-shot)
+# Check status of a running orchestration (one-shot)
 cursor-orch status --gist GIST_ID
 
 # Watch live dashboard
@@ -41,35 +38,104 @@ cursor-orch logs --gist GIST_ID --task my-task-id
 cursor-orch stop --gist GIST_ID
 ```
 
+## Interactive REPL
+
+Running `cursor-orch` with no arguments launches an interactive REPL where you configure repositories, set a prompt, and start an orchestration run -- all from a single session.
+
+The REPL persists your session to `~/.cursor-orch/session.yaml` so you can resume where you left off.
+
+### Example Session
+
+```
+$ cursor-orch
+
+  cursor-orch v0.1.0
+  Type /help for available commands.
+
+> /name jwt-migration
+  Name set: jwt-migration
+
+> /repo auth-svc https://github.com/acme/auth-service main
+  Repository added: auth-svc
+
+> /prompt
+  Enter orchestration prompt (end with empty line):
+  | Migrate from session-based auth to JWT across all services.
+  |
+  Prompt set (57 characters)
+
+> /run
+  Validating config...
+```
+
+## Slash Commands
+
+| Command | Usage | Description |
+|---------|-------|-------------|
+| `/name` | `/name <session-name>` | Set the session name |
+| `/model` | `/model <model-name>` | Set the AI model to use |
+| `/repo` | `/repo <alias> <url> [ref]` | Add or replace a repository |
+| `/repo remove` | `/repo remove <alias>` | Remove a repository by alias |
+| `/repos` | `/repos` | List all configured repositories |
+| `/prompt` | `/prompt` | Enter a multi-line prompt interactively |
+| `/branch-prefix` | `/branch-prefix <prefix>` | Set the branch name prefix |
+| `/auto-pr` | `/auto-pr [on\|off]` | Toggle or set automatic PR creation |
+| `/bootstrap-repo` | `/bootstrap-repo <name>` | Set the bootstrap repository name |
+| `/config` | `/config` | Show current configuration summary |
+| `/save` | `/save [path]` | Save config to file or session |
+| `/load` | `/load <path>` | Load config from a YAML file |
+| `/run` | `/run` | Validate and start the orchestration |
+| `/help` | `/help` | Show available commands |
+| `/clear` | `/clear` | Clear the terminal |
+| `/exit` | `/exit` | Exit the REPL |
+
+## Single-Prompt Mode
+
+In single-prompt mode you provide a high-level prompt describing what you want done, along with the set of repositories involved. The orchestrator decomposes the prompt into individual tasks using a planner agent and dispatches them to worker agents targeting the appropriate repos.
+
+1. Add repositories with `/repo`.
+2. Describe the goal with `/prompt`.
+3. Run with `/run` -- the planner agent breaks the prompt into tasks and assigns each to a repository.
+
+This lets you express cross-repo changes in a single natural-language statement instead of writing individual task definitions by hand.
+
+## CI / Non-Interactive Mode
+
+For CI pipelines or scripted usage, pass a pre-built YAML config directly:
+
+```bash
+cursor-orch run --config orchestration.yaml
+```
+
+The config file must contain the full orchestration definition including repositories, tasks, and target settings. See the Configuration Reference below.
+
 ## Configuration Reference
 
 ```yaml
-# Name for this orchestration run
 name: "my-orchestration"
 
-# Default model for all agents
 model: "default"
 
-# Bootstrap repo name (created in your GitHub account)
 bootstrap_repo_name: "cursor-orch-bootstrap"
 
-# Repositories involved in this orchestration
+prompt: |
+  Describe the high-level goal for the orchestrator.
+  The planner agent will decompose this into individual tasks.
+
 repositories:
   my-repo:
     url: "https://github.com/your-org/your-repo"
     ref: "main"
 
-# Tasks to execute
 tasks:
   - id: "example-task"
     repo: "my-repo"
     prompt: |
       Describe what this task should accomplish.
-    depends_on: []          # list of task IDs this depends on
-    model: "default"        # optional per-task model override
-    timeout_minutes: 30     # optional timeout
+    depends_on: []
+    model: "default"
+    timeout_minutes: 30
 
-# Target branch and PR settings
 target:
   auto_create_pr: true
   branch_prefix: "cursor-orch"
@@ -82,6 +148,7 @@ target:
 | `name` | string | yes | Human-readable name for the orchestration |
 | `model` | string | no | Default model for agents (default: "default") |
 | `bootstrap_repo_name` | string | no | Name of bootstrap repo (default: "cursor-orch-bootstrap") |
+| `prompt` | string | no | High-level goal for single-prompt mode; the planner decomposes this into tasks |
 | `repositories` | map | yes | Map of repo aliases to URL + ref |
 | `tasks` | list | yes | List of task definitions (max 20) |
 | `tasks[].id` | string | yes | Unique task identifier (alphanumeric, dots, hyphens) |
@@ -121,7 +188,7 @@ User Terminal                     GitHub                          Cursor Cloud
 
 ### Three Components
 
-1. **Local CLI** -- Runs in your terminal. Creates config, provisions the bootstrap repo, creates a per-run Gist with runtime code, launches the orchestrator agent, and provides a dashboard.
+1. **Local CLI** -- Runs in your terminal. Provides the interactive REPL, creates config, provisions the bootstrap repo, creates a per-run Gist with runtime code, launches the orchestrator agent, and provides a dashboard.
 
 2. **Bootstrap Repo** -- A minimal private repo in your GitHub account (`cursor-orch-bootstrap`). Contains a loader script and a Cursor rule. The rule is dynamically generated before each run with credentials. The loader fetches and verifies runtime code from the Gist.
 

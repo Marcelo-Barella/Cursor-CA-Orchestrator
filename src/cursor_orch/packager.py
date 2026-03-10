@@ -22,6 +22,7 @@ SOURCE_MAP: list[tuple[str, str]] = [
     ("config.py", "runtime__config.py"),
     ("state.py", "runtime__state.py"),
     ("prompt_builder.py", "runtime__prompt_builder.py"),
+    ("system_prompt.py", "runtime__system_prompt.py"),
 ]
 
 IMPORT_REWRITES: list[tuple[str, str]] = [
@@ -37,6 +38,8 @@ IMPORT_REWRITES: list[tuple[str, str]] = [
     ("import cursor_orch.orchestrator", "import runtime__orchestrator"),
     ("import cursor_orch.config", "import runtime__config"),
     ("import cursor_orch.state", "import runtime__state"),
+    ("from cursor_orch.system_prompt import", "from runtime__system_prompt import"),
+    ("import cursor_orch.system_prompt", "import runtime__system_prompt"),
 ]
 
 IMPORT_REWRITES.sort(key=lambda pair: len(pair[0]), reverse=True)
