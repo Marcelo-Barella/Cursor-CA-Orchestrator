@@ -7,5 +7,5 @@ build/
 .env
 .venv/
 
-.cursor/plans/
+.cursor/
 coordination/
