@@ -9,3 +9,5 @@ build/
 
 .cursor/
 coordination/
+artifacts/
+uv.lock

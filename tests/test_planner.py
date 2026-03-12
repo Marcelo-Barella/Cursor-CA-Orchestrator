@@ -59,3 +59,85 @@ def test_parse_task_plan_rejects_unknown_repo_without_create_repo():
     })
     with pytest.raises(ValueError, match="unknown repository"):
         parse_task_plan(plan, config)
+
+
+def test_parse_task_plan_links_transitive_create_repo_dependency_for_new_repo_task():
+    config = _make_config()
+    plan = json.dumps({
+        "tasks": [
+            {
+                "id": "create-repo-a",
+                "repo": "__new__",
+                "prompt": "Create repo A",
+                "depends_on": [],
+                "timeout_minutes": 30,
+                "create_repo": True,
+            },
+            {
+                "id": "implement-repo-a",
+                "repo": "__new__",
+                "prompt": "Implement feature in repo A",
+                "depends_on": ["create-repo-a"],
+                "timeout_minutes": 30,
+            },
+            {
+                "id": "test-repo-a",
+                "repo": "__new__",
+                "prompt": "Run tests in repo A",
+                "depends_on": ["implement-repo-a"],
+                "timeout_minutes": 30,
+            },
+            {
+                "id": "create-repo-b",
+                "repo": "__new__",
+                "prompt": "Create repo B",
+                "depends_on": [],
+                "timeout_minutes": 30,
+                "create_repo": True,
+            },
+        ]
+    })
+    tasks = parse_task_plan(plan, config)
+    test_task = next(task for task in tasks if task.id == "test-repo-a")
+    assert "create-repo-a" in test_task.depends_on
+    assert "create-repo-b" not in test_task.depends_on
+
+
+def test_parse_task_plan_rejects_ambiguous_transitive_create_repo_dependency():
+    config = _make_config()
+    plan = json.dumps({
+        "tasks": [
+            {
+                "id": "create-repo-a",
+                "repo": "__new__",
+                "prompt": "Create repo A",
+                "depends_on": [],
+                "timeout_minutes": 30,
+                "create_repo": True,
+            },
+            {
+                "id": "create-repo-b",
+                "repo": "__new__",
+                "prompt": "Create repo B",
+                "depends_on": [],
+                "timeout_minutes": 30,
+                "create_repo": True,
+            },
+            {
+                "id": "fan-in-task",
+                "repo": "__new__",
+                "prompt": "Task with ambiguous upstream repo origin",
+                "depends_on": ["create-repo-a", "create-repo-b"],
+                "timeout_minutes": 30,
+            },
+            {
+                "id": "downstream-task",
+                "repo": "__new__",
+                "prompt": "Task that inherits ambiguity",
+                "depends_on": ["fan-in-task"],
+                "timeout_minutes": 30,
+            },
+        ]
+    })
+    with pytest.raises(ValueError, match="does not depend on a create_repo task"):
+        parse_task_plan(plan, config)

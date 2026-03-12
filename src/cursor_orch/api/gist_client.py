@@ -16,8 +16,13 @@ BACKOFF_MULTIPLIER = 2.0
 MAX_DELAY = 60.0
 MAX_RETRIES_429 = 5
 MAX_RETRIES_TRANSIENT = 3
+MAX_RETRIES_409 = 3
 JITTER_FACTOR = 0.2
 TRANSIENT_CODES = (502, 503, 504)
+GIST_409_HINT = (
+    "Ensure GH_TOKEN belongs to the gist owner and has the gist OAuth scope. "
+    "See https://docs.github.com/rest/gists/gists#update-a-gist"
+)
 
 
 class GistAPIError(Exception):
@@ -88,6 +93,7 @@ class GistClient:
     def _request(self, method: str, url: str, **kwargs: object) -> requests.Response:
         retries_429 = 0
         retries_transient = 0
+        retries_409 = 0
 
         while True:
             resp = self._session.request(method, url, **kwargs)
@@ -103,6 +109,18 @@ class GistClient:
             if resp.status_code == 429:
                 raise RateLimitError("GitHub API rate limit exceeded after max retries")
 
+            if resp.status_code == 409 and method == "PATCH" and retries_409 < MAX_RETRIES_409:
+                delay = _compute_delay(retries_409)
+                retries_409 += 1
+                logger.warning(
+                    "Gist update conflict (409). Retry %s/%s in %.1fs",
+                    retries_409,
+                    MAX_RETRIES_409,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+
             if resp.status_code in TRANSIENT_CODES and retries_transient < MAX_RETRIES_TRANSIENT:
                 delay = _compute_delay(retries_transient)
                 retries_transient += 1
@@ -117,7 +135,10 @@ class GistClient:
                 raise GistNotFound()
 
             if resp.status_code >= 400:
-                raise GistAPIError(f"GitHub API error: {resp.status_code} {resp.text[:500]}", resp.status_code)
+                msg = f"GitHub API error: {resp.status_code} {resp.text[:500]}"
+                if resp.status_code == 409:
+                    msg = f"{msg}. {GIST_409_HINT}"
+                raise GistAPIError(msg, resp.status_code)
 
             return resp
 

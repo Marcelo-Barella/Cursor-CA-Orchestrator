@@ -136,7 +136,7 @@ def parse_task_plan(plan_json: str, config: OrchestratorConfig) -> list[TaskConf
 
         repo_alias = entry["repo"]
         is_create_repo = entry.get("create_repo", False)
-        if not is_create_repo and repo_alias not in config.repositories:
+        if repo_alias != "__new__" and not is_create_repo and repo_alias not in config.repositories:
             raise ValueError(
                 f"Task '{task_id}' references unknown repository '{repo_alias}'. "
                 f"Valid aliases: {sorted(config.repositories.keys())}"
@@ -169,8 +169,49 @@ def parse_task_plan(plan_json: str, config: OrchestratorConfig) -> list[TaskConf
                     f"Task '{task.id}' depends on unknown task '{dep}'. "
                     f"Valid IDs: {sorted(task_ids)}"
                 )
+    task_by_id = {task.id: task for task in tasks}
+    create_repo_task_ids = {task.id for task in tasks if task.create_repo}
+    for task in tasks:
+        if task.repo == "__new__" and not task.create_repo:
+            has_create_dep = any(dep in create_repo_task_ids for dep in task.depends_on)
+            if has_create_dep:
+                continue
+            upstream_create_deps = _collect_upstream_create_repo_ids(task, task_by_id, create_repo_task_ids)
+            if len(upstream_create_deps) == 1:
+                task.depends_on.append(next(iter(upstream_create_deps)))
+                continue
+            if len(create_repo_task_ids) == 1:
+                task.depends_on.append(next(iter(create_repo_task_ids)))
+                continue
+            raise ValueError(
+                f"Task '{task.id}' uses '__new__' but does not depend on a create_repo task. "
+                "Add a dependency on the task that creates the target repository."
+            )
 
     return tasks
+
+
+def _collect_upstream_create_repo_ids(
+    task: TaskConfig,
+    task_by_id: dict[str, TaskConfig],
+    create_repo_task_ids: set[str],
+) -> set[str]:
+    upstream_create_ids: set[str] = set()
+    stack: list[str] = list(task.depends_on)
+    visited: set[str] = set()
+    while stack:
+        dep_id = stack.pop()
+        if dep_id in visited:
+            continue
+        visited.add(dep_id)
+        if dep_id in create_repo_task_ids:
+            upstream_create_ids.add(dep_id)
+            continue
+        dep_task = task_by_id.get(dep_id)
+        if dep_task is None:
+            continue
+        stack.extend(dep_task.depends_on)
+    return upstream_create_ids
 
 
 def wait_for_plan(

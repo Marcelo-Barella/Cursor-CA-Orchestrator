@@ -15,12 +15,59 @@ class CommandInfo:
     description: str
 
 
+def validate_model_value(model: str) -> str | None:
+    if not model.strip():
+        return "Model cannot be empty."
+    return None
+
+
+def validate_prompt_value(prompt: str) -> str | None:
+    if not prompt.strip():
+        return "Prompt is required for first run. Enter prompt text or type 'back'/'exit'."
+    return None
+
+
+def prompt_preview(prompt: str, max_chars: int = 120) -> str:
+    text = " ".join(line.strip() for line in prompt.splitlines()).strip()
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}..."
+
+
+def prompt_set_command_text(prompt: str) -> str:
+    escaped = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'/prompt-set "{escaped}"'
+
+
+def setup_summary_lines(session: Session) -> list[str]:
+    cfg = session.config
+    model = cfg.model or "gpt-5"
+    prompt = prompt_preview(cfg.prompt, 120)
+    name = cfg.name if cfg.name else "<empty>"
+    repo_count = len(cfg.repositories)
+    auto_pr = "on" if cfg.target.auto_create_pr else "off"
+    return [
+        f"- Model: {model}",
+        f"- Prompt: {prompt}",
+        f"- Name: {name}",
+        f"- Repositories: {repo_count}",
+        f"- Branch prefix: {cfg.target.branch_prefix}",
+        f"- Auto PR: {auto_pr}",
+        f"- Bootstrap repo: {cfg.bootstrap_repo_name}",
+    ]
+
+
 def cmd_name(session: Session, name: str) -> str:
     session.set_name(name)
     return f"[green]Session name set to[/green] [bold]{name}[/bold]"
 
 
 def cmd_model(session: Session, model: str) -> str:
+    error = validate_model_value(model)
+    if error:
+        return f"[red]{error}[/red]"
     session.set_model(model)
     return f"[green]Model set to[/green] [bold]{model}[/bold]"
 
@@ -58,6 +105,9 @@ def cmd_prompt(session: Session) -> str:
 
 
 def cmd_prompt_set(session: Session, text: str) -> str:
+    error = validate_prompt_value(text)
+    if error:
+        return f"[red]{error}[/red]"
     session.set_prompt(text)
     return f"[green]Prompt set[/green] [dim]({len(text)} characters)[/dim]"
 
