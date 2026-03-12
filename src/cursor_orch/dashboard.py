@@ -25,6 +25,7 @@ STATUS_COLORS = {
     "blocked": "magenta",
     "launching": "cyan",
     "stopped": "dim",
+    "completed": "green",
 }
 
 TERMINAL_STATES = {"completed", "failed", "stopped"}
@@ -127,6 +128,120 @@ def _format_event(ev: OrchestrationEvent) -> str:
     return f"[{ts}] {ev.detail}"
 
 
+def _hierarchy_status_priority(status: str) -> int:
+    if status in ("running", "launching", "blocked"):
+        return 0
+    if status == "pending":
+        return 1
+    if status in ("finished", "completed", "stopped"):
+        return 2
+    if status == "failed":
+        return 3
+    return 4
+
+
+def _build_hierarchy_panel(state: OrchestrationState, config: OrchestratorConfig) -> Panel:
+    from cursor_orch.state import LifecycleAgentState, ensure_lifecycle_agents
+
+    ensure_lifecycle_agents(state)
+    main = state.main_agent
+    if main is None:
+        main = LifecycleAgentState(
+            node_id="main-orchestrator",
+            label=getattr(config, "name", None) or "Orchestrator",
+            kind="main",
+            status=state.status,
+            started_at=state.started_at,
+            finished_at=None,
+        )
+    phases = state.phase_agents or {}
+    phase_order = ("planning", "scheduling", "execution", "finalization")
+    lines: list[str] = []
+    main_color = STATUS_COLORS.get(main.status, "white")
+    main_dur = _duration_str(main.started_at, main.finished_at)
+    lines.append(f"{main.label}  [{main_color}]{main.status}[/{main_color}]  {main_dur}")
+    task_phase_map = getattr(state, "task_phase_map", None) or {}
+    assigned: set[str] = set()
+    for phase_id in phase_order:
+        phase = phases.get(phase_id)
+        if phase is None:
+            continue
+        phase_color = STATUS_COLORS.get(phase.status, "white")
+        phase_dur = _duration_str(phase.started_at, phase.finished_at)
+        lines.append(f"  {phase.label}  [{phase_color}]{phase.status}[/{phase_color}]  {phase_dur}")
+        child_tasks = [(tid, state.agents.get(tid)) for tid, p in task_phase_map.items() if p == phase_id]
+        child_tasks.sort(key=lambda x: (_hierarchy_status_priority(getattr(x[1], "status", "pending") or "pending"), x[0]))
+        for tid, agent in child_tasks:
+            assigned.add(tid)
+            status = getattr(agent, "status", "pending") if agent else "pending"
+            color = STATUS_COLORS.get(status, "white")
+            dur = _duration_str(getattr(agent, "started_at", None), getattr(agent, "finished_at", None)) if agent else "--"
+            lines.append(f"    {tid}  [{color}]{status}[/{color}]  {dur}")
+    unassigned = [(tid, state.agents.get(tid)) for tid in state.agents if tid not in assigned]
+    unassigned.sort(key=lambda x: (_hierarchy_status_priority(getattr(x[1], "status", "pending") or "pending"), x[0]))
+    for tid, agent in unassigned:
+        status = getattr(agent, "status", "pending") if agent else "pending"
+        color = STATUS_COLORS.get(status, "white")
+        dur = _duration_str(getattr(agent, "started_at", None), getattr(agent, "finished_at", None)) if agent else "--"
+        lines.append(f"  {tid}  [{color}]{status}[/{color}]  {dur}")
+    content = "\n".join(lines) if lines else "No hierarchy data."
+    try:
+        renderable = Text.from_markup(content)
+    except Exception:
+        renderable = content
+    return Panel(renderable, title="Hierarchy", border_style="dim")
+
+
+def _timeline_event_status(event_type: str) -> str | None:
+    if "launch" in event_type or "launched" in event_type:
+        return "launching"
+    if "blocked" in event_type:
+        return "blocked"
+    if "retried" in event_type:
+        return "running"
+    if "finished" in event_type or "completed" in event_type:
+        return "finished"
+    if "failed" in event_type:
+        return "failed"
+    if "stopped" in event_type:
+        return "stopped"
+    if "orchestration_completed" in event_type:
+        return "completed"
+    if "orchestration_failed" in event_type:
+        return "failed"
+    if "orchestration_stopped" in event_type:
+        return "stopped"
+    return None
+
+
+def _build_timeline_panel(events: list[OrchestrationEvent], max_items: int = 10) -> Panel:
+    if not events:
+        return Panel("No events yet.", title="Timeline", border_style="dim")
+    sorted_events = sorted(events, key=lambda e: e.timestamp)
+    recent = sorted_events[-max_items:] if len(sorted_events) > max_items else sorted_events
+    lines: list[str] = []
+    for ev in recent:
+        ts = ev.timestamp
+        try:
+            ts = datetime.fromisoformat(ts).strftime("%H:%M:%S")
+        except ValueError:
+            pass
+        entity_label = ev.task_id or getattr(ev, "agent_node_id", None) or "Run"
+        status = _timeline_event_status(ev.event_type)
+        if status:
+            color = STATUS_COLORS.get(status, "dim")
+            status_part = f"  [{color}]{status}[/{color}]"
+        else:
+            status_part = ""
+        detail = ev.detail or ev.event_type
+        lines.append(f"[dim]{ts}[/dim] {entity_label}{status_part}  {detail}")
+    try:
+        renderable = Text.from_markup("\n".join(lines))
+    except Exception:
+        renderable = "\n".join(lines)
+    return Panel(renderable, title="Timeline", border_style="dim")
+
+
 def _build_blocked_section(state: OrchestrationState) -> str | None:
     blocked = [a for a in state.agents.values() if a.status == "blocked"]
     if not blocked:
@@ -146,6 +261,10 @@ def render_snapshot(
     console.print(_build_header(state, config))
     console.print()
     console.print(_build_table(state, config))
+    console.print()
+    console.print(_build_hierarchy_panel(state, config))
+    console.print()
+    console.print(_build_timeline_panel(events))
     blocked_text = _build_blocked_section(state)
     if blocked_text:
         console.print()
@@ -162,6 +281,8 @@ def _build_layout(
     layout = Table.grid(padding=(1, 0))
     layout.add_row(_build_header(state, config))
     layout.add_row(_build_table(state, config))
+    layout.add_row(_build_hierarchy_panel(state, config))
+    layout.add_row(_build_timeline_panel(events))
     blocked_text = _build_blocked_section(state)
     if blocked_text:
         layout.add_row(Text(blocked_text))

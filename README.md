@@ -39,6 +39,14 @@ Expected smoke output includes:
 
 If bootstrap fails due to missing credentials, re-check `.env` values and token scopes in prerequisites.
 
+Immediate next actions:
+
+- Start interactive setup: `cursor-orch`
+- Validate effective config and token discovery first: `cursor-orch config doctor --strict`
+- Run with config in non-interactive mode: `cursor-orch run --config ./orchestrator.yaml`
+- Run with explicit bootstrap repo when needed: `cursor-orch run --config ./orchestrator.yaml --bootstrap-repo cursor-orch-bootstrap`
+- If credentials are missing, run with inline envs: `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch run --config ./orchestrator.yaml`
+
 ## Manual Install and Smoke
 
 ```bash
@@ -56,6 +64,12 @@ cursor-orch --help
 # Launch the interactive REPL
 cursor-orch
 
+# Validate config precedence and required values
+cursor-orch config doctor --strict
+
+# Start a run from YAML config
+cursor-orch run --config ./orchestrator.yaml
+
 # Check status of a running orchestration (one-shot)
 cursor-orch status --gist GIST_ID
 
@@ -68,6 +82,35 @@ cursor-orch logs --gist GIST_ID --task my-task-id
 
 # Stop a running orchestration
 cursor-orch stop --gist GIST_ID
+```
+
+After `cursor-orch run`, copy the printed Gist ID and use it with `status`, `logs`, and `stop`.
+
+If a command fails, use this quick recovery path:
+
+- Error format is standardized as: `[SEVERITY] <CODE> <TITLE>`.
+- `What happened`: read the one-line cause and identify the missing input or inaccessible resource.
+- `Next step`: run the single recommended fix shown in output first.
+- `Non-interactive alternative`: use the script-safe form for CI or shell automation.
+- `Example`: copy the exact command example from output and replace placeholders.
+
+Core command discoverability and immediate next actions:
+
+| Command | Purpose | Immediate next action | Automation-oriented example |
+|---------|---------|-----------------------|-----------------------------|
+| `cursor-orch run --config ./orchestrator.yaml` | Start orchestration | `cursor-orch status --gist <gist_id> --watch` | `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch run --config /workspace/orchestrator.yaml --bootstrap-repo cursor-orch-bootstrap` |
+| `cursor-orch status --gist <gist_id>` | Read current run state | `cursor-orch logs --gist <gist_id>` | `GH_TOKEN=... cursor-orch status --gist <gist_id> --watch` |
+| `cursor-orch logs --gist <gist_id>` | Read orchestrator conversation | `cursor-orch status --gist <gist_id>` | `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch logs --gist <gist_id> --task <task_id>` |
+| `cursor-orch stop --gist <gist_id>` | Request graceful stop | `cursor-orch status --gist <gist_id> --watch` | `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch stop --gist <gist_id>` |
+
+Core command help:
+
+```bash
+cursor-orch run --help
+cursor-orch status --help
+cursor-orch logs --help
+cursor-orch stop --help
+cursor-orch config doctor --help
 ```
 
 ## Interactive REPL

@@ -17,8 +17,12 @@ from cursor_orch.state import (
     AgentState,
     OrchestrationEvent,
     OrchestrationState,
+    assign_task_phase,
     append_event,
     create_initial_state,
+    ensure_lifecycle_agents,
+    seed_main_agent,
+    set_phase_status,
     sync_from_gist,
     sync_to_gist,
 )
@@ -68,12 +72,25 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _make_event(event_type: str, detail: str, task_id: str | None = None) -> OrchestrationEvent:
+def _make_event(
+    event_type: str,
+    detail: str,
+    task_id: str | None = None,
+    *,
+    phase_id: str | None = None,
+    agent_node_id: str | None = None,
+    agent_kind: str | None = None,
+    payload: dict[str, str] | None = None,
+) -> OrchestrationEvent:
     return OrchestrationEvent(
         timestamp=_now_iso(),
         event_type=event_type,
         task_id=task_id,
+        phase_id=phase_id,
+        agent_node_id=agent_node_id,
+        agent_kind=agent_kind,
         detail=detail,
+        payload=payload or {},
     )
 
 
@@ -176,6 +193,7 @@ def _poll_single_agent(
     cursor_client: CursorClient,
     gist_client: GistClient,
     gist_id: str,
+    state: OrchestrationState,
 ) -> None:
     if agent.status not in ("running", "launching") or agent.agent_id is None:
         return
@@ -184,7 +202,7 @@ def _poll_single_agent(
     except Exception:
         logger.exception(f"Failed to poll agent {agent.agent_id} for task {task_id}")
         return
-    _update_agent_from_poll(task_id, agent, info, gist_client, gist_id)
+    _update_agent_from_poll(task_id, agent, info, gist_client, gist_id, state)
 
 
 def _update_agent_from_poll(
@@ -193,27 +211,46 @@ def _update_agent_from_poll(
     info: object,
     gist_client: GistClient,
     gist_id: str,
+    state: OrchestrationState,
 ) -> None:
     if info.status == "FINISHED":
-        _mark_agent_finished(task_id, agent, info, gist_client, gist_id)
+        _mark_agent_finished(task_id, agent, info, gist_client, gist_id, state)
         return
     if info.status == "ERROR":
         _mark_agent_error(task_id, agent, info, gist_client, gist_id)
         return
     if info.status in ("RUNNING", "CREATING"):
         _check_running_agent(task_id, agent, gist_client, gist_id)
+        return
 
 
 def _mark_agent_finished(
-    task_id: str, agent: AgentState, info: object,
-    gist_client: GistClient, gist_id: str,
+    task_id: str,
+    agent: AgentState,
+    info: object,
+    gist_client: GistClient,
+    gist_id: str,
+    state: OrchestrationState,
 ) -> None:
     agent.status = "finished"
     agent.finished_at = _now_iso()
     agent.pr_url = info.pr_url
     agent.summary = info.summary
     _read_worker_output(gist_client, gist_id, task_id)
-    append_event(gist_client, gist_id, _make_event("task_finished", f"Task {task_id} finished", task_id))
+    phase_id = state.task_phase_map.get(task_id)
+    append_event(
+        gist_client,
+        gist_id,
+        _make_event(
+            "task_finished",
+            f"Task {task_id} finished",
+            task_id,
+            phase_id=phase_id,
+            agent_node_id=task_id,
+            agent_kind="task",
+            payload={"status": agent.status},
+        ),
+    )
 
 
 def _mark_agent_error(
@@ -249,7 +286,7 @@ def _poll_agents(
     gist_id: str,
 ) -> None:
     for task_id, agent in state.agents.items():
-        _poll_single_agent(task_id, agent, cursor_client, gist_client, gist_id)
+        _poll_single_agent(task_id, agent, cursor_client, gist_client, gist_id, state)
 
 
 def _handle_single_blocked(
@@ -359,6 +396,8 @@ def _launch_single_task(
     gist_client: GistClient,
     gist_id: str,
 ) -> None:
+    assign_task_phase(state, task_id, "execution")
+    set_phase_status(state, "execution", "running", timestamp=_now_iso())
     task_map = {t.id: t for t in config.tasks}
     task = task_map[task_id]
     gh_token = os.environ["GH_TOKEN"]
@@ -380,7 +419,18 @@ def _launch_single_task(
     agent.agent_id = info.id
     agent.status = "launching"
     agent.started_at = _now_iso()
-    append_event(gist_client, gist_id, _make_event("task_launched", f"Launched {task_id} ({info.id})", task_id))
+    append_event(
+        gist_client,
+        gist_id,
+        _make_event(
+            "task_launched",
+            f"Launched {task_id} ({info.id})",
+            task_id,
+            phase_id="execution",
+            agent_node_id=task_id,
+            agent_kind="task",
+        ),
+    )
 
 
 def _gather_dep_outputs(task: TaskConfig, gist_client: GistClient, gist_id: str) -> dict[str, dict]:
@@ -480,8 +530,12 @@ def _run_planning_phase(
     gist_id: str,
     cursor_client: CursorClient,
     gist_client: GistClient,
-) -> None:
-    append_event(gist_client, gist_id, _make_event("planning_started", "Planning phase started"))
+) -> bool:
+    append_event(
+        gist_client,
+        gist_id,
+        _make_event("planning_started", "Planning phase started", phase_id="planning", agent_kind="phase"),
+    )
     try:
         gh_token = os.environ["GH_TOKEN"]
         planner_prompt = build_planner_prompt(config, gist_id, gh_token)
@@ -507,11 +561,22 @@ def _run_planning_phase(
         gist_client.write_file(gist_id, "config.yaml", to_yaml(config))
 
         append_event(
-            gist_client, gist_id,
-            _make_event("planning_completed", f"Planning completed: {len(parsed_tasks)} tasks"),
+            gist_client,
+            gist_id,
+            _make_event(
+                "planning_completed",
+                f"Planning completed: {len(parsed_tasks)} tasks",
+                phase_id="planning",
+                agent_kind="phase",
+            ),
         )
+        return True
     except Exception as exc:
-        append_event(gist_client, gist_id, _make_event("planning_failed", str(exc)))
+        append_event(
+            gist_client,
+            gist_id,
+            _make_event("planning_failed", str(exc), phase_id="planning", agent_kind="phase"),
+        )
         raise
 
 
@@ -519,8 +584,15 @@ def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: Gi
     config_str = gist_client.read_file(gist_id, "config.yaml")
     config = parse_config(config_str)
 
+    planning_ran = False
+    planning_ok = False
     if config.prompt and not config.tasks:
-        _run_planning_phase(config, gist_id, cursor_client, gist_client)
+        planning_ran = True
+        try:
+            planning_ok = _run_planning_phase(config, gist_id, cursor_client, gist_client)
+        except Exception:
+            planning_ok = False
+            raise
 
     try:
         state = sync_from_gist(gist_client, gist_id)
@@ -530,8 +602,26 @@ def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: Gi
     if state.status == "pending":
         state.status = "running"
         state.started_at = _now_iso()
+        seed_main_agent(state, agent_id=state.orchestrator_agent_id, status="running", started_at=state.started_at)
         sync_to_gist(gist_client, gist_id, state)
-        append_event(gist_client, gist_id, _make_event("orchestration_started", "Orchestration started"))
+        append_event(
+            gist_client,
+            gist_id,
+            _make_event(
+                "orchestration_started",
+                "Orchestration started",
+                agent_node_id="main-orchestrator",
+                agent_kind="main",
+            ),
+        )
+    if planning_ran:
+        set_phase_status(
+            state,
+            "planning",
+            "finished" if planning_ok else "failed",
+            timestamp=_now_iso(),
+        )
+        sync_to_gist(gist_client, gist_id, state)
 
     graph = build_dependency_graph(config.tasks)
 
@@ -582,7 +672,16 @@ def _check_stop_requested(
     state.status = "stopped"
     gist_client.write_file(gist_id, "summary.md", _build_summary_md(config, state))
     sync_to_gist(gist_client, gist_id, state)
-    append_event(gist_client, gist_id, _make_event("orchestration_stopped", "Orchestration stopped by user"))
+    append_event(
+        gist_client,
+        gist_id,
+        _make_event(
+            "orchestration_stopped",
+            "Orchestration stopped by user",
+            agent_node_id="main-orchestrator",
+            agent_kind="main",
+        ),
+    )
     return True
 
 
@@ -602,7 +701,16 @@ def _check_completion(state: OrchestrationState, gist_client: GistClient, gist_i
         return False
     state.status = "completed"
     sync_to_gist(gist_client, gist_id, state)
-    append_event(gist_client, gist_id, _make_event("orchestration_completed", "All tasks completed"))
+    append_event(
+        gist_client,
+        gist_id,
+        _make_event(
+            "orchestration_completed",
+            "All tasks completed",
+            agent_node_id="main-orchestrator",
+            agent_kind="main",
+        ),
+    )
     logger.info("Orchestration completed successfully")
     return True
 
@@ -623,7 +731,16 @@ def _check_failure(
     state.status = "failed"
     state.error = f"Failed tasks: {', '.join(sorted(failed_ids))}"
     sync_to_gist(gist_client, gist_id, state)
-    append_event(gist_client, gist_id, _make_event("orchestration_failed", f"Orchestration failed: {state.error}"))
+    append_event(
+        gist_client,
+        gist_id,
+        _make_event(
+            "orchestration_failed",
+            f"Orchestration failed: {state.error}",
+            agent_node_id="main-orchestrator",
+            agent_kind="main",
+        ),
+    )
     logger.error(f"Orchestration failed: {state.error}")
     return True
 
