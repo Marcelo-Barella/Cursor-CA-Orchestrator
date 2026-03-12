@@ -5,21 +5,53 @@ A Python CLI that orchestrates multiple Cursor Cloud Agents working across diffe
 ## Prerequisites
 
 - Python 3.11+
-- `CURSOR_API_KEY` -- API key for Cursor Cloud Agents
-- `GH_TOKEN` -- GitHub personal access token with `repo` scope (for bootstrap repo) and `gist` scope (for Gist operations)
+- GitHub personal access token for `GH_TOKEN` with:
+  - `repo` scope for bootstrap repository creation and updates
+  - `gist` scope for per-run Gist operations
+- Cursor API key for `CURSOR_API_KEY`
 
-## Installation
+## Onboarding: Clone to First Run
 
 ```bash
-pip install -e .
+git clone https://github.com/<your-org>/cursor-ca-orchestrator.git
+cd cursor-ca-orchestrator
+cp .env.example .env
+```
+
+Edit `.env` and set:
+
+- `CURSOR_API_KEY=...`
+- `GH_TOKEN=...`
+
+Run one-command bootstrap:
+
+```bash
+bash scripts/bootstrap.sh
+source .venv/bin/activate
+```
+
+Expected smoke output includes:
+
+- `Bootstrapping environment`
+- `Installing cursor-orch in editable mode`
+- `Running smoke check: cursor-orch --help`
+- `Bootstrap complete`
+
+If bootstrap fails due to missing credentials, re-check `.env` values and token scopes in prerequisites.
+
+## Manual Install and Smoke
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+cursor-orch --help
 ```
 
 ## Quick Start
 
 ```bash
-# Set environment variables
-export CURSOR_API_KEY=key_abc...
-export GH_TOKEN=ghp_xyz...
 
 # Launch the interactive REPL
 cursor-orch

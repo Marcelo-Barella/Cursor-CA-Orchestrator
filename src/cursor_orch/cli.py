@@ -27,10 +27,35 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+def _load_env_file() -> None:
+    env_path = Path(".env")
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
 def _get_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        console.print(f"[red]Error: {name} environment variable is required[/red]")
+        console.print(
+            f"[red]Error: Missing required environment variable: {name}.[/red]\n"
+            "Create `.env` from `.env.example` and set required values.\n"
+            "See README onboarding section: `Onboarding: Clone to First Run`."
+        )
         sys.exit(1)
     return value
 
@@ -157,6 +182,7 @@ def _run_interactive() -> None:
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 @click.pass_context
 def main(ctx: click.Context, verbose: bool) -> None:
+    _load_env_file()
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
