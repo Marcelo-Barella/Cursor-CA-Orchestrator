@@ -12,7 +12,11 @@ from rich.console import Console
 
 from cursor_orch.api.cursor_client import CursorClient
 from cursor_orch.api.gist_client import GistClient
-from cursor_orch.bootstrap import ensure_bootstrap_repo, update_cursor_rule
+from cursor_orch.bootstrap import (
+    BOOTSTRAP_ENTRYPOINT,
+    BOOTSTRAP_INSTALL_COMMAND,
+    ensure_bootstrap_repo,
+)
 from cursor_orch.config import (
     ConfigResolution,
     DiagnosticFinding,
@@ -24,7 +28,6 @@ from cursor_orch.config import (
     to_yaml,
 )
 from cursor_orch.dashboard import render_live, render_snapshot
-from cursor_orch.packager import create_manifest, package_runtime, validate_payload_size
 from cursor_orch.repl import run_repl
 from cursor_orch.state import (
     create_initial_state,
@@ -267,6 +270,29 @@ def _resolve_bootstrap_name(cli_name: str | None, config: OrchestratorConfig | N
     return "cursor-orch-bootstrap"
 
 
+def _build_orchestration_launch_prompt(
+    *,
+    gist_id: str,
+    gh_token: str,
+    cursor_api_key: str,
+    runtime_ref: str,
+) -> str:
+    return "\n".join([
+        "You are the main agent on a cursor-orch orchestrator workflow.",
+        "Run the following shell commands exactly as written.",
+        f"export GIST_ID='{gist_id}'",
+        f"export GH_TOKEN='{gh_token}'",
+        f"export CURSOR_API_KEY='{cursor_api_key}'",
+        f"export CURSOR_ORCH_RUNTIME_REF='{runtime_ref}'",
+        BOOTSTRAP_INSTALL_COMMAND,
+        BOOTSTRAP_ENTRYPOINT,
+        "If the install command fails, stop and report the exact error output.",
+        "If the orchestrator command fails, report the full stderr output.",
+        'If the orchestrator command succeeds, report "Bootstrap complete" followed by the last 50 lines of stdout.',
+        "Do not modify repository files.",
+    ])
+
+
 def _run_prompt_only(
     config: OrchestratorConfig,
     config_yaml: str,
@@ -285,7 +311,7 @@ def _run_prompt_only(
     agent = cursor_client.launch_agent(
         prompt=config.prompt,
         repository=repo_url,
-        ref="main",
+        ref=repo_info["default_branch"],
         model=config.model,
         branch_name=f"{config.target.branch_prefix}/prompt-run",
         auto_pr=config.target.auto_create_pr,
@@ -304,11 +330,8 @@ def _run_orchestration(
 ) -> None:
     repo_name = _resolve_bootstrap_name(bootstrap_repo, config)
     repo_info = ensure_bootstrap_repo(gh_token, repo_name)
-    console.print(f"Bootstrap repo verified: {repo_info['owner']}/{repo_info['name']}")
-
-    runtime_files = package_runtime()
-    validate_payload_size(runtime_files)
-    manifest_str = create_manifest(runtime_files)
+    runtime_ref = repo_info["runtime_ref"]
+    console.print(f"Bootstrap repo verified: {repo_info['owner']}/{repo_info['name']} @ {runtime_ref}")
 
     initial_state = create_initial_state(config, "placeholder")
 
@@ -332,26 +355,24 @@ def _run_orchestration(
         f"Request stop when needed: cursor-orch stop --gist {gist_id}",
     )
 
-    upload_files = dict(runtime_files)
-    upload_files["runtime_manifest.json"] = manifest_str
-    gist_client.update_gist(gist_id, upload_files)
-    console.print(f"Uploaded runtime payload: {len(runtime_files)} files + manifest")
-
     initial_state.orchestration_id = gist_id
     initial_state.gist_id = gist_id
     gist_client.write_file(gist_id, "state.json", serialize(initial_state))
-
-    update_cursor_rule(gh_token, repo_info["owner"], repo_info["name"], gist_id, cursor_api_key)
-    console.print("Updated Cursor rule in bootstrap repo")
 
     cursor_client = CursorClient(api_key=cursor_api_key)
     repo_url = f"https://github.com/{repo_info['owner']}/{repo_info['name']}"
 
     console.print(f"Launching orchestrator agent against {repo_info['owner']}/{repo_info['name']}...")
+    launch_prompt = _build_orchestration_launch_prompt(
+        gist_id=gist_id,
+        gh_token=gh_token,
+        cursor_api_key=cursor_api_key,
+        runtime_ref=runtime_ref,
+    )
     agent = cursor_client.launch_agent(
-        prompt="Follow the Cursor rule instructions exactly.",
+        prompt=launch_prompt,
         repository=repo_url,
-        ref="main",
+        ref=runtime_ref,
         model=config.model,
         branch_name=f"cursor-orch-run-{gist_id[:8]}",
         auto_pr=False,

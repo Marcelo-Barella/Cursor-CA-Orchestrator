@@ -103,6 +103,112 @@ def test_parse_task_plan_links_transitive_create_repo_dependency_for_new_repo_ta
     assert "create-repo-b" not in test_task.depends_on
 
 
+def test_parse_task_plan_rejects_new_when_no_create_repo_tasks():
+    config = _make_config(repositories={
+        "backend": RepoConfig(url="https://github.com/o/backend", ref="main"),
+        "__bootstrap__": RepoConfig(url="https://github.com/o/bootstrap", ref="main"),
+    })
+    plan = json.dumps({
+        "tasks": [
+            {
+                "id": "generate-tests",
+                "repo": "__new__",
+                "prompt": "Generate tests",
+                "depends_on": [],
+                "timeout_minutes": 30,
+            }
+        ]
+    })
+    with pytest.raises(ValueError, match="does not depend on a create_repo task"):
+        parse_task_plan(plan, config)
+
+
+def test_parse_task_plan_rejects_unresolvable_new_when_multiple_create_repo_tasks():
+    config = _make_config(repositories={
+        "backend": RepoConfig(url="https://github.com/o/backend", ref="main"),
+        "__bootstrap__": RepoConfig(url="https://github.com/o/bootstrap", ref="main"),
+    })
+    plan = json.dumps({
+        "tasks": [
+            {
+                "id": "create-repo-a",
+                "repo": "__new__",
+                "prompt": "Create repo A",
+                "depends_on": [],
+                "timeout_minutes": 30,
+                "create_repo": True,
+            },
+            {
+                "id": "create-repo-b",
+                "repo": "__new__",
+                "prompt": "Create repo B",
+                "depends_on": [],
+                "timeout_minutes": 30,
+                "create_repo": True,
+            },
+            {
+                "id": "unrelated-new-task",
+                "repo": "__new__",
+                "prompt": "Task with no connection to any create_repo task",
+                "depends_on": [],
+                "timeout_minutes": 30,
+            },
+        ]
+    })
+    with pytest.raises(ValueError, match="does not depend on a create_repo task"):
+        parse_task_plan(plan, config)
+
+
+def test_parse_task_plan_strips_markdown_code_fences():
+    config = _make_config()
+    raw_json = json.dumps({
+        "tasks": [
+            {
+                "id": "task-a",
+                "repo": "backend",
+                "prompt": "Do something",
+                "depends_on": [],
+                "timeout_minutes": 30,
+            }
+        ]
+    })
+    wrapped = f"```json\n{raw_json}\n```"
+    tasks = parse_task_plan(wrapped, config)
+    assert len(tasks) == 1
+    assert tasks[0].id == "task-a"
+
+
+def test_parse_task_plan_extracts_json_from_surrounding_text():
+    config = _make_config()
+    raw_json = json.dumps({
+        "tasks": [
+            {
+                "id": "task-b",
+                "repo": "backend",
+                "prompt": "Do something else",
+                "depends_on": [],
+                "timeout_minutes": 30,
+            }
+        ]
+    })
+    surrounded = f"Here is the plan:\n{raw_json}\nDone."
+    tasks = parse_task_plan(surrounded, config)
+    assert len(tasks) == 1
+    assert tasks[0].id == "task-b"
+
+
+def test_parse_task_plan_repairs_malformed_json():
+    config = _make_config()
+    malformed = (
+        '{"tasks": [{"id": "task-a", "repo": "backend", '
+        '"prompt": "Fix the "auth" module and add tests", '
+        '"depends_on": [], "timeout_minutes": 30}]}'
+    )
+    tasks = parse_task_plan(malformed, config)
+    assert len(tasks) == 1
+    assert tasks[0].id == "task-a"
+
+
 def test_parse_task_plan_rejects_ambiguous_transitive_create_repo_dependency():
     config = _make_config()
     plan = json.dumps({
@@ -141,3 +247,10 @@ def test_parse_task_plan_rejects_ambiguous_transitive_create_repo_dependency():
     })
     with pytest.raises(ValueError, match="does not depend on a create_repo task"):
         parse_task_plan(plan, config)
+
+
+def test_planner_prompt_references_gh_cli():
+    config = _make_config()
+    result = build_planner_prompt(config, gist_id="g123", gh_token="tok")
+    assert "gh" in result
+    assert "do NOT have access to the `gh` CLI" not in result

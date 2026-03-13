@@ -17,6 +17,7 @@ MAX_DELAY = 60.0
 MAX_RETRIES_429 = 5
 MAX_RETRIES_TRANSIENT = 3
 MAX_RETRIES_409 = 3
+MAX_RETRIES_NETWORK = 3
 JITTER_FACTOR = 0.2
 TRANSIENT_CODES = (502, 503, 504)
 GIST_409_HINT = (
@@ -94,9 +95,27 @@ class GistClient:
         retries_429 = 0
         retries_transient = 0
         retries_409 = 0
+        retries_network = 0
 
         while True:
-            resp = self._session.request(method, url, **kwargs)
+            try:
+                resp = self._session.request(method, url, **kwargs)
+            except requests.exceptions.RequestException as exc:
+                if retries_network < MAX_RETRIES_NETWORK:
+                    delay = _compute_delay(retries_network)
+                    retries_network += 1
+                    logger.warning(
+                        "GitHub API network error (%s). Retry %s/%s in %.1fs",
+                        type(exc).__name__,
+                        retries_network,
+                        MAX_RETRIES_NETWORK,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise GistAPIError(
+                    f"GitHub API network error after max retries: {type(exc).__name__}: {exc}"
+                ) from exc
             self._track_rate_limit(resp)
 
             if resp.status_code == 429 and retries_429 < MAX_RETRIES_429:
