@@ -12,6 +12,7 @@ dependencies = [
     "rich>=13.0",
     "pyyaml>=6.0",
     "prompt-toolkit>=3.0",
+    "json-repair>=0.30",
 ]
 
 [project.scripts]

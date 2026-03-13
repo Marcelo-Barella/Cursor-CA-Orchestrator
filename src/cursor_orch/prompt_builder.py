@@ -60,10 +60,11 @@ def _section_repo_creation(task: TaskConfig) -> str:
     lines.extend([
         "",
         "CRITICAL: You are running in a read-only bootstrap repository. Do NOT write any code "
-        "or files into this repository. To create the new repo and populate it with code, use "
-        "the GitHub API or `gh` CLI to: (1) create the repo, (2) clone it to a temporary "
-        "directory, (3) write code there, (4) commit and push. All code MUST go to the new "
-        "repo, not to the current working directory.",
+        "or files into this repository. To create the new repo and populate it with code:\n"
+        "  1. Create the repo: `gh repo create <owner>/<repo> --private` (or use --public/--description as needed)\n"
+        "  2. Clone it: `git clone https://x-access-token:<GH_TOKEN>@github.com/<owner>/<repo>.git /tmp/<repo>`\n"
+        "  3. Write code in the cloned directory, commit, and push.\n"
+        "All code MUST go to the new repo, not to the current working directory.",
     ])
     return "\n".join(lines)
 
@@ -101,48 +102,34 @@ def _section_dependencies(task: TaskConfig, dependency_outputs: dict[str, dict])
 
 def _section_output_protocol(task: TaskConfig, gist_id: str, gh_token: str) -> str:
     return f'''WHEN YOU ARE DONE:
-Run the following Python script in the shell to report your results.
+Run the following commands in the shell to report your results.
 Replace the placeholder values with your actual output.
 
-```python
-import json, urllib.request, ssl
-
-gist_id = "{gist_id}"
-task_id = "{task.id}"
-token = "{gh_token}"
+```bash
+python3 - <<'PY'
+import json
 
 output = {{
-    "task_id": task_id,
+    "task_id": "{task.id}",
     "status": "completed",
     "summary": "DESCRIBE WHAT YOU DID HERE",
     "blocked_reason": None,
-    "outputs": {{
-        "key": "PUT ARTIFACTS OTHER TASKS MAY NEED HERE"
+    "outputs": {{"key": "PUT ARTIFACTS OTHER TASKS MAY NEED HERE"}},
+}}
+
+payload = {{
+    "files": {{
+        "agent-{task.id}.json": {{
+            "content": json.dumps(output, indent=2),
+        }}
     }}
 }}
 
-payload = json.dumps({{
-    "files": {{
-        f"agent-{{task_id}}.json": {{
-            "content": json.dumps(output, indent=2)
-        }}
-    }}
-}}).encode()
+with open("/tmp/agent-{task.id}.json", "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
 
-req = urllib.request.Request(
-    f"https://api.github.com/gists/{{gist_id}}",
-    data=payload,
-    method="PATCH",
-    headers={{
-        "Authorization": f"token {{token}}",
-        "Content-Type": "application/json",
-        "Accept": "application/vnd.github+json"
-    }}
-)
-
-ctx = ssl.create_default_context()
-with urllib.request.urlopen(req, context=ctx) as resp:
-    print(f"Output written to Gist (HTTP {{resp.status}})")
+GH_TOKEN="{gh_token}" gh api --method PATCH /gists/{gist_id} --input /tmp/agent-{task.id}.json
 ```
 
 Edit the `output` dict before running:

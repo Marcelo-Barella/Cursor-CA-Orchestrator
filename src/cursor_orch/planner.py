@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
+
+import json_repair
 
 from cursor_orch.config import OrchestratorConfig, TaskConfig
 from cursor_orch.system_prompt import PLANNER_SYSTEM_PROMPT
@@ -23,7 +26,7 @@ You are a task planner for a multi-repository orchestration system.
 ## Available Repositories
 
 {repo_list}
-
+ 
 ## Instructions
 
 Analyze the user request above and decompose it into concrete, actionable tasks. \
@@ -61,9 +64,11 @@ following conventions:
 "https://github.com/{{owner}}/{{repo_name}}", "ref": "main"}}` in the task JSON.
 
 2. Repo-creation tasks must use `"repo": "__new__"` (sentinel value). The prompt \
-should instruct the agent to: (1) create the GitHub repo via the `gh` CLI or GitHub \
-API, (2) initialize it with the requested stack, and (3) report the repo URL in \
-outputs as `{{"repo_url": "https://github.com/..."}}`.
+should instruct the agent to: (1) create the GitHub repo via the GitHub REST API \
+(POST https://api.github.com/user/repos with `Authorization: token <GH_TOKEN>`), \
+(2) clone it using token-based HTTPS auth and initialize it with the requested stack, \
+and (3) report the repo URL in outputs as `{{"repo_url": "https://github.com/..."}}`. \
+Cursor Agents have access to the `gh` CLI for GitHub operations.
 
 3. Implementation tasks that depend on a newly created repo should declare \
 `depends_on` referencing the creation task and use `"repo": "__new__"`. The \
@@ -85,7 +90,10 @@ Use an empty list if there are no dependencies.
 
 Write the JSON output as a file named `task-plan.json` to the gist with ID `{gist_id}`.
 
-Use the GitHub token for authentication: `{gh_token}`
+Use the `gh` CLI to write to the gist:
+```bash
+GH_TOKEN="{gh_token}" gh api --method PATCH /gists/{gist_id} --input <payload-file>
+```
 """
 
 
@@ -105,11 +113,34 @@ def build_planner_prompt(
     )
 
 
+def _extract_json(raw: str) -> str:
+    stripped = re.sub(r"```(?:json)?\s*\n?", "", raw).strip()
+    try:
+        json.loads(stripped)
+        return stripped
+    except json.JSONDecodeError:
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end > start:
+        return raw[start : end + 1]
+    return raw
+
+
 def parse_task_plan(plan_json: str, config: OrchestratorConfig) -> list[TaskConfig]:
     try:
         data = json.loads(plan_json)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON in task plan: {exc}") from exc
+    except json.JSONDecodeError:
+        cleaned = _extract_json(plan_json)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            logger.warning("Strict JSON parsing failed, attempting repair")
+            data = json_repair.loads(cleaned)
+            if not isinstance(data, dict):
+                raise ValueError(
+                    f"JSON repair produced {type(data).__name__}, expected dict"
+                )
 
     if not isinstance(data, dict) or "tasks" not in data:
         raise ValueError("Task plan must be a JSON object with a 'tasks' key")

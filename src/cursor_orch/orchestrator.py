@@ -10,7 +10,7 @@ import requests
 
 from cursor_orch.api.cursor_client import CursorClient
 from cursor_orch.api.gist_client import GistClient
-from cursor_orch.config import OrchestratorConfig, TaskConfig, parse_config, to_yaml
+from cursor_orch.config import OrchestratorConfig, RepoConfig, TaskConfig, parse_config, to_yaml
 from cursor_orch.planner import build_planner_prompt, parse_task_plan, wait_for_plan
 from cursor_orch.prompt_builder import build_repo_creation_prompt, build_worker_prompt
 from cursor_orch.state import (
@@ -375,7 +375,7 @@ def _resolve_repo_for_task(
     if task.create_repo:
         gh_user = _resolve_github_username(gh_token)
         bootstrap_url = f"https://github.com/{gh_user}/{config.bootstrap_repo_name}"
-        return bootstrap_url, "main"
+        return bootstrap_url, _resolve_bootstrap_ref()
 
     if task.repo in config.repositories:
         rc = config.repositories[task.repo]
@@ -489,7 +489,15 @@ def _stop_single_agent(agent: AgentState, cursor_client: CursorClient) -> None:
         logger.warning(f"Failed to stop agent {agent.agent_id}")
 
 
+def _reconcile_agents_from_config(state: OrchestrationState, config: OrchestratorConfig) -> None:
+    for task in config.tasks:
+        if task.id not in state.agents:
+            state.agents[task.id] = AgentState(task_id=task.id)
+
+
 def _check_all_finished(state: OrchestrationState) -> bool:
+    if not state.agents:
+        return False
     return all(a.status == "finished" for a in state.agents.values())
 
 
@@ -525,6 +533,13 @@ def _resolve_github_username(gh_token: str) -> str:
     return resp.json()["login"]
 
 
+def _resolve_bootstrap_ref() -> str:
+    runtime_ref = os.environ.get("CURSOR_ORCH_RUNTIME_REF")
+    if runtime_ref and runtime_ref.strip():
+        return runtime_ref.strip()
+    return "main"
+
+
 def _run_planning_phase(
     config: OrchestratorConfig,
     gist_id: str,
@@ -546,7 +561,7 @@ def _run_planning_phase(
         cursor_client.launch_agent(
             prompt=planner_prompt,
             repository=bootstrap_url,
-            ref="main",
+            ref=_resolve_bootstrap_ref(),
             model=config.model,
             branch_name=f"cursor-orch-planner-{gist_id[:8]}",
             auto_pr=False,
@@ -556,6 +571,8 @@ def _run_planning_phase(
         if plan_content is None:
             raise RuntimeError("Timed out waiting for task plan from planner agent")
 
+        bootstrap_url = f"https://github.com/{gh_user}/{config.bootstrap_repo_name}"
+        config.repositories["__bootstrap__"] = RepoConfig(url=bootstrap_url, ref=_resolve_bootstrap_ref())
         parsed_tasks = parse_task_plan(plan_content, config)
         config.tasks = parsed_tasks
         gist_client.write_file(gist_id, "config.yaml", to_yaml(config))
@@ -580,6 +597,43 @@ def _run_planning_phase(
         raise
 
 
+def _persist_unexpected_failure(
+    state: OrchestrationState,
+    gist_client: GistClient,
+    gist_id: str,
+    exc: Exception,
+) -> None:
+    timestamp = _now_iso()
+    ensure_lifecycle_agents(state)
+    state.status = "failed"
+    state.error = str(exc)
+    if state.main_agent is not None:
+        state.main_agent.status = "failed"
+        state.main_agent.finished_at = timestamp
+    for phase_id in ("planning", "scheduling", "execution", "finalization"):
+        phase = state.phase_agents.get(phase_id)
+        if phase is None or phase.status not in ("running", "launching"):
+            continue
+        set_phase_status(state, phase_id, "failed", timestamp=timestamp)
+    try:
+        append_event(
+            gist_client,
+            gist_id,
+            _make_event(
+                "orchestration_failed",
+                f"Orchestration loop failed: {exc}",
+                agent_node_id="main-orchestrator",
+                agent_kind="main",
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to append orchestration failure event")
+    try:
+        sync_to_gist(gist_client, gist_id, state)
+    except Exception:
+        logger.exception("Failed to sync orchestration failure state")
+
+
 def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: GistClient) -> None:
     config_str = gist_client.read_file(gist_id, "config.yaml")
     config = parse_config(config_str)
@@ -588,16 +642,42 @@ def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: Gi
     planning_ok = False
     if config.prompt and not config.tasks:
         planning_ran = True
-        try:
-            planning_ok = _run_planning_phase(config, gist_id, cursor_client, gist_client)
-        except Exception:
-            planning_ok = False
-            raise
+        plan_content = gist_client.read_file(gist_id, "task-plan.json")
+        if plan_content:
+            try:
+                gh_token = os.environ["GH_TOKEN"]
+                gh_user = _resolve_github_username(gh_token)
+                bootstrap_url = f"https://github.com/{gh_user}/{config.bootstrap_repo_name}"
+                config.repositories["__bootstrap__"] = RepoConfig(url=bootstrap_url, ref=_resolve_bootstrap_ref())
+                parsed_tasks = parse_task_plan(plan_content, config)
+                config.tasks = parsed_tasks
+                gist_client.write_file(gist_id, "config.yaml", to_yaml(config))
+                append_event(
+                    gist_client,
+                    gist_id,
+                    _make_event(
+                        "planning_completed",
+                        f"Planning completed: {len(parsed_tasks)} tasks (reused existing plan)",
+                        phase_id="planning",
+                        agent_kind="phase",
+                    ),
+                )
+                planning_ok = True
+            except Exception:
+                pass
+        if not planning_ok:
+            try:
+                planning_ok = _run_planning_phase(config, gist_id, cursor_client, gist_client)
+            except Exception:
+                planning_ok = False
+                raise
 
     try:
         state = sync_from_gist(gist_client, gist_id)
     except Exception:
         state = create_initial_state(config, gist_id)
+
+    _reconcile_agents_from_config(state, config)
 
     if state.status == "pending":
         state.status = "running"
@@ -629,9 +709,7 @@ def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: Gi
         _orchestration_loop(state, config, graph, cursor_client, gist_client, gist_id)
     except Exception as exc:
         logger.exception("Orchestration loop failed")
-        state.status = "failed"
-        state.error = str(exc)
-        sync_to_gist(gist_client, gist_id, state)
+        _persist_unexpected_failure(state, gist_client, gist_id, exc)
         raise
 
 

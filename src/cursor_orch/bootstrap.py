@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import base64
-import hashlib
 import logging
 import random
 import time
-from pathlib import Path
+from collections.abc import Mapping
 
 import requests
+
+from cursor_orch.packager import build_runtime_ref, package_runtime_snapshot, validate_payload_size
 
 logger = logging.getLogger(__name__)
 
@@ -21,45 +21,29 @@ MAX_RETRIES_TRANSIENT = 3
 JITTER_FACTOR = 0.2
 TRANSIENT_CODES = (502, 503, 504)
 
+BOOTSTRAP_INSTALL_COMMAND = "python3 -m pip install -e ."
+BOOTSTRAP_ENTRYPOINT = "python3 -m cursor_orch.orchestrator"
+RULE_PATH = ".cursor/rules/orchestrator.mdc"
+READONLY_RULE_PATH = ".cursor/rules/readonly-guard.mdc"
+
 RULE_TEMPLATE = """---
 description: Orchestration bootstrap rule
 globs:
 alwaysApply: true
 ---
 
-You are an orchestration bootstrap agent. Your ONLY task is to execute the following commands exactly as written. Do not modify any files. Do not improvise. Do not add features. Do not interpret the output. Execute the commands and report the raw output.
-
-Commands to execute (run sequentially in the shell):
-
-pip install -r requirements.txt
-python3 bootstrap/run_from_gist.py --gist {GIST_ID} --gh-token {GH_TOKEN} --cursor-api-key {CURSOR_API_KEY}
-
-If the first command (pip install) fails, stop and report the error.
-If the second command (python3 bootstrap/run_from_gist.py) fails, report the full stderr output.
-If the second command succeeds, report "Bootstrap complete" followed by the last 50 lines of stdout.
-
-ON FAILURE:
-- If any command fails, report the EXACT error output verbatim.
-- Do NOT attempt to fix, debug, or work around the error.
-- Do NOT create, edit, or delete any files for any reason.
-- Do NOT install additional packages to resolve import errors.
+This is a pinned cursor-orch bootstrap runtime repository.
+The launch prompt defines your task for this run. Follow the launch prompt exactly.
+If the launch prompt instructs you to execute shell commands, run those commands exactly as written and report the requested raw output.
 
 STRICT RULES:
 - This repository is READ-ONLY. You have NO permission to write files under any circumstances.
-- If the script fails with an import error, module error, or any other error, report the error AS-IS. Do not attempt to resolve it.
 - Do NOT modify any files in this repository.
-- Do NOT create any new files other than what the script creates.
-- Do NOT install packages other than those in requirements.txt.
-- Do NOT read or interpret the Python script source code.
-- Do NOT retry failed commands unless the script output explicitly requests it.
+- Do NOT create any new files other than what the executed commands create.
+- Do NOT read or interpret the Python source code.
+- Do NOT retry failed commands unless the output explicitly requests it.
 - Report complete stdout and stderr output.
 """
-
-PLACEHOLDER_RULE = RULE_TEMPLATE.format(
-    GIST_ID="<PLACEHOLDER>",
-    GH_TOKEN="<PLACEHOLDER>",
-    CURSOR_API_KEY="<PLACEHOLDER>",
-)
 
 READONLY_GUARD_RULE = """---
 description: Read-only bootstrap repository guard
@@ -72,6 +56,17 @@ Do NOT create, modify, or delete any files in this repository.
 Do NOT write code, fix errors, or add functionality.
 Your only job is to execute commands as instructed by the orchestrator rule.
 """
+
+
+def build_bootstrap_rule() -> str:
+    return RULE_TEMPLATE
+
+
+def build_bootstrap_snapshot_files(runtime_files: Mapping[str, str] | None = None) -> dict[str, str]:
+    snapshot = package_runtime_snapshot() if runtime_files is None else dict(runtime_files)
+    snapshot[RULE_PATH] = build_bootstrap_rule()
+    snapshot[READONLY_RULE_PATH] = READONLY_GUARD_RULE
+    return snapshot
 
 
 def _compute_delay(attempt: int) -> float:
@@ -143,44 +138,6 @@ def resolve_github_user(session: requests.Session) -> str:
     return resp.json()["login"]
 
 
-def _get_file_sha(session: requests.Session, owner: str, repo: str, path: str) -> str | None:
-    resp = _github_api(session, "GET", f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}")
-    if resp.status_code == 404:
-        return None
-    if resp.status_code != 200:
-        raise RuntimeError(f"Failed to get file sha for {path}: HTTP {resp.status_code}")
-    return resp.json().get("sha")
-
-
-def _commit_file(
-    session: requests.Session,
-    owner: str,
-    repo: str,
-    path: str,
-    content_bytes: bytes,
-    message: str,
-    sha: str | None = None,
-) -> None:
-    encoded = base64.b64encode(content_bytes).decode("ascii")
-    payload: dict[str, object] = {"message": message, "content": encoded}
-    if sha is not None:
-        payload["sha"] = sha
-    resp = _github_api(session, "PUT", f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}", json=payload)
-    if resp.status_code == 403:
-        raise RuntimeError(
-            f"Failed to commit {path}: HTTP 403 - token lacks required permissions. "
-            "Ensure your fine-grained PAT has 'Contents: Read and write' under Repository permissions "
-            "and that Repository access includes the target repo (or is set to 'All repositories')."
-        )
-    if resp.status_code not in (200, 201):
-        raise RuntimeError(f"Failed to commit {path}: HTTP {resp.status_code} {resp.text[:300]}")
-
-
-def _get_loader_content() -> str:
-    loader_path = Path(__file__).parent / "templates" / "run_from_gist.py"
-    return loader_path.read_text(encoding="utf-8")
-
-
 def _create_repo(session: requests.Session, name: str) -> dict:
     payload = {
         "name": name,
@@ -200,84 +157,138 @@ def _create_repo(session: requests.Session, name: str) -> dict:
     return data
 
 
-def _commit_bootstrap_files(session: requests.Session, owner: str, repo: str) -> None:
-    _commit_file(session, owner, repo, "requirements.txt", b"requests\n", "Add requirements.txt")
-    loader_content = _get_loader_content()
-    _commit_file(session, owner, repo, "bootstrap/run_from_gist.py", loader_content.encode("utf-8"), "Add bootstrap loader")
-    _commit_file(session, owner, repo, ".cursor/rules/orchestrator.mdc", PLACEHOLDER_RULE.encode("utf-8"), "Add placeholder Cursor rule")
-    _commit_file(session, owner, repo, ".cursor/rules/readonly-guard.mdc", READONLY_GUARD_RULE.encode("utf-8"), "Add read-only guard rule")
+def _get_repo(session: requests.Session, owner: str, repo: str) -> dict | None:
+    resp = _github_api(session, "GET", f"{GITHUB_API}/repos/{owner}/{repo}")
+    if resp.status_code == 404:
+        return None
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to check repo: HTTP {resp.status_code}")
+    return resp.json()
 
 
-def _check_and_update_file(
+def _get_ref_sha(session: requests.Session, owner: str, repo: str, ref: str) -> str | None:
+    resp = _github_api(session, "GET", f"{GITHUB_API}/repos/{owner}/{repo}/git/ref/heads/{ref}")
+    if resp.status_code == 404:
+        return None
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to resolve ref {ref}: HTTP {resp.status_code}")
+    data = resp.json()
+    return data.get("object", {}).get("sha")
+
+
+def _create_blob(session: requests.Session, owner: str, repo: str, content: str) -> str:
+    resp = _github_api(
+        session,
+        "POST",
+        f"{GITHUB_API}/repos/{owner}/{repo}/git/blobs",
+        json={"content": content, "encoding": "utf-8"},
+    )
+    if resp.status_code != 201:
+        raise RuntimeError(f"Failed to create blob: HTTP {resp.status_code} {resp.text[:300]}")
+    return resp.json()["sha"]
+
+
+def _create_tree(session: requests.Session, owner: str, repo: str, files: Mapping[str, str]) -> str:
+    tree = [
+        {
+            "path": path,
+            "mode": "100644",
+            "type": "blob",
+            "sha": _create_blob(session, owner, repo, content),
+        }
+        for path, content in sorted(files.items())
+    ]
+    resp = _github_api(
+        session,
+        "POST",
+        f"{GITHUB_API}/repos/{owner}/{repo}/git/trees",
+        json={"tree": tree},
+    )
+    if resp.status_code != 201:
+        raise RuntimeError(f"Failed to create tree: HTTP {resp.status_code} {resp.text[:300]}")
+    return resp.json()["sha"]
+
+
+def _create_commit(session: requests.Session, owner: str, repo: str, message: str, tree_sha: str, parent_sha: str) -> str:
+    resp = _github_api(
+        session,
+        "POST",
+        f"{GITHUB_API}/repos/{owner}/{repo}/git/commits",
+        json={"message": message, "tree": tree_sha, "parents": [parent_sha]},
+    )
+    if resp.status_code != 201:
+        raise RuntimeError(f"Failed to create commit: HTTP {resp.status_code} {resp.text[:300]}")
+    return resp.json()["sha"]
+
+
+def _create_ref(session: requests.Session, owner: str, repo: str, ref: str, sha: str) -> None:
+    resp = _github_api(
+        session,
+        "POST",
+        f"{GITHUB_API}/repos/{owner}/{repo}/git/refs",
+        json={"ref": f"refs/heads/{ref}", "sha": sha},
+    )
+    if resp.status_code == 422:
+        logger.info(f"Ref {ref} already exists")
+        return
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"Failed to create ref {ref}: HTTP {resp.status_code} {resp.text[:300]}")
+
+
+def _ensure_runtime_snapshot_ref(
     session: requests.Session,
     owner: str,
     repo: str,
-    path: str,
-    expected_content: bytes,
-    message: str,
-) -> None:
-    resp = _github_api(session, "GET", f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}")
-    if resp.status_code == 404:
-        _commit_file(session, owner, repo, path, expected_content, message)
-        return
-    if resp.status_code == 403:
-        raise RuntimeError(
-            f"Permission denied checking {path}: HTTP 403. "
-            "Ensure your GitHub token has 'contents:write' scope (classic) "
-            "or 'Contents > Read and write' permission (fine-grained)."
-        )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Failed to check {path}: HTTP {resp.status_code}")
-    file_data = resp.json()
-    remote_content = base64.b64decode(file_data.get("content", ""))
-    remote_sha256 = hashlib.sha256(remote_content).hexdigest()
-    expected_sha256 = hashlib.sha256(expected_content).hexdigest()
-    if remote_sha256 != expected_sha256:
-        logger.info(f"Updating {path} (content changed)")
-        _commit_file(session, owner, repo, path, expected_content, message, sha=file_data["sha"])
+    default_branch: str,
+    runtime_files: Mapping[str, str],
+) -> str:
+    runtime_ref = build_runtime_ref(runtime_files)
+    if _get_ref_sha(session, owner, repo, runtime_ref) is not None:
+        logger.info(f"Reusing runtime ref {runtime_ref}")
+        return runtime_ref
 
+    parent_sha = _get_ref_sha(session, owner, repo, default_branch)
+    if parent_sha is None:
+        raise RuntimeError(f"Failed to resolve default branch head for {default_branch}")
 
-def _verify_and_update_loader(session: requests.Session, owner: str, repo: str) -> None:
-    loader_content = _get_loader_content()
-    _check_and_update_file(session, owner, repo, "bootstrap/run_from_gist.py", loader_content.encode("utf-8"), "Update bootstrap loader")
-    _check_and_update_file(session, owner, repo, "requirements.txt", b"requests\n", "Update requirements.txt")
-    _check_and_update_file(session, owner, repo, ".cursor/rules/readonly-guard.mdc", READONLY_GUARD_RULE.encode("utf-8"), "Update read-only guard rule")
+    tree_sha = _create_tree(session, owner, repo, runtime_files)
+    commit_sha = _create_commit(
+        session,
+        owner,
+        repo,
+        f"Pin orchestration runtime {runtime_ref}",
+        tree_sha,
+        parent_sha,
+    )
+    _create_ref(session, owner, repo, runtime_ref, commit_sha)
+    logger.info(f"Created runtime ref {runtime_ref}")
+    return runtime_ref
 
 
 def ensure_bootstrap_repo(gh_token: str, repo_name: str) -> dict:
     session = _make_session(gh_token)
     owner = resolve_github_user(session)
 
-    resp = _github_api(session, "GET", f"{GITHUB_API}/repos/{owner}/{repo_name}")
-    if resp.status_code == 404:
+    repo_data = _get_repo(session, owner, repo_name)
+    if repo_data is None:
         logger.info(f"Bootstrap repo not found. Creating {owner}/{repo_name}...")
-        data = _create_repo(session, repo_name)
-        _commit_bootstrap_files(session, owner, repo_name)
-        return {"owner": owner, "name": repo_name, "url": data["html_url"]}
+        repo_data = _create_repo(session, repo_name)
+    else:
+        logger.info(f"Bootstrap repo exists: {repo_data['html_url']}")
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"Failed to check repo: HTTP {resp.status_code}")
-
-    data = resp.json()
-    logger.info(f"Bootstrap repo exists: {data['html_url']}")
-    _verify_and_update_loader(session, owner, repo_name)
-    return {"owner": owner, "name": repo_name, "url": data["html_url"]}
-
-
-def update_cursor_rule(
-    gh_token: str,
-    owner: str,
-    repo_name: str,
-    gist_id: str,
-    cursor_api_key: str,
-) -> None:
-    session = _make_session(gh_token)
-    rule_content = RULE_TEMPLATE.format(
-        GIST_ID=gist_id,
-        GH_TOKEN=gh_token,
-        CURSOR_API_KEY=cursor_api_key,
+    runtime_files = build_bootstrap_snapshot_files()
+    validate_payload_size(runtime_files)
+    runtime_ref = _ensure_runtime_snapshot_ref(
+        session,
+        owner,
+        repo_name,
+        repo_data.get("default_branch", "main"),
+        runtime_files,
     )
-    path = ".cursor/rules/orchestrator.mdc"
-    sha = _get_file_sha(session, owner, repo_name, path)
-    _commit_file(session, owner, repo_name, path, rule_content.encode("utf-8"), "Update Cursor rule for orchestration run", sha=sha)
-    logger.info("Updated Cursor rule in bootstrap repo")
+    return {
+        "owner": owner,
+        "name": repo_name,
+        "url": repo_data["html_url"],
+        "default_branch": repo_data.get("default_branch", "main"),
+        "runtime_ref": runtime_ref,
+    }
