@@ -11,7 +11,7 @@ from rich.table import Table
 from rich.text import Text
 
 if TYPE_CHECKING:
-    from cursor_orch.api.gist_client import GistClient
+    from cursor_orch.api.repo_store import RepoStoreClient
     from cursor_orch.config import OrchestratorConfig
     from cursor_orch.state import OrchestrationEvent, OrchestrationState
 
@@ -291,13 +291,13 @@ def _build_layout(
     return layout
 
 
-def _poll_and_render(live: Live, gist_client: GistClient, gist_id: str, config: OrchestratorConfig) -> bool:
+def _poll_and_render(live: Live, repo_store: RepoStoreClient, run_id: str, config: OrchestratorConfig) -> bool:
     from cursor_orch.state import deserialize, read_events
 
     try:
-        content = gist_client.read_file(gist_id, "state.json")
+        content = repo_store.read_file(run_id, "state.json")
         state = deserialize(content)
-        events = read_events(gist_client, gist_id)
+        events = read_events(repo_store, run_id)
     except Exception:
         return False
 
@@ -306,36 +306,36 @@ def _poll_and_render(live: Live, gist_client: GistClient, gist_id: str, config: 
     return state.status in TERMINAL_STATES
 
 
-def render_live(gist_client: GistClient, gist_id: str, config: OrchestratorConfig) -> None:
+def render_live(repo_store: RepoStoreClient, run_id: str, config: OrchestratorConfig) -> None:
     console = Console()
     try:
-        _run_live_loop(console, gist_client, gist_id, config)
+        _run_live_loop(console, repo_store, run_id, config)
     except KeyboardInterrupt:
         console.print("\nDetached from dashboard. Orchestration continues in cloud.")
 
 
 def _run_live_loop(
     console: Console,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     config: OrchestratorConfig,
 ) -> None:
     live = Live(console=console, refresh_per_second=1)
     live.start()
     try:
-        _live_poll_loop(live, gist_client, gist_id, config)
+        _live_poll_loop(live, repo_store, run_id, config)
     finally:
         live.stop()
 
 
 def _live_poll_loop(
     live: Live,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     config: OrchestratorConfig,
 ) -> None:
     while True:
-        is_terminal = _poll_and_render(live, gist_client, gist_id, config)
+        is_terminal = _poll_and_render(live, repo_store, run_id, config)
         if is_terminal:
             time.sleep(2)
             break

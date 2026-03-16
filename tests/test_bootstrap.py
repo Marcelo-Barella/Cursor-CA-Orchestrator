@@ -20,6 +20,8 @@ def test_build_bootstrap_rule_runs_checked_in_orchestrator():
     assert "launch prompt defines your task" in rule
     assert "python3 -m pip install -e ." not in rule
     assert "python3 -m cursor_orch.orchestrator" not in rule
+    assert "ALL agents" in rule
+    assert "push changes directly to the assigned branch" in rule
 
 
 def test_build_bootstrap_snapshot_files_adds_static_rules():

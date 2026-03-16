@@ -43,6 +43,7 @@ STRICT RULES:
 - Do NOT read or interpret the Python source code.
 - Do NOT retry failed commands unless the output explicitly requests it.
 - Report complete stdout and stderr output.
+- ALL agents must push changes directly to the assigned branch.
 """
 
 READONLY_GUARD_RULE = """---

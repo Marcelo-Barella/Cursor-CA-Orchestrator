@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import requests
 
 from cursor_orch.api.cursor_client import CursorClient
-from cursor_orch.api.gist_client import GistClient
+from cursor_orch.api.repo_store import RepoStoreClient
 from cursor_orch.config import OrchestratorConfig, RepoConfig, TaskConfig, parse_config, to_yaml
 from cursor_orch.planner import build_planner_prompt, parse_task_plan, wait_for_plan
 from cursor_orch.prompt_builder import build_repo_creation_prompt, build_worker_prompt
@@ -23,8 +23,8 @@ from cursor_orch.state import (
     ensure_lifecycle_agents,
     seed_main_agent,
     set_phase_status,
-    sync_from_gist,
-    sync_to_gist,
+    sync_from_repo,
+    sync_to_repo,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,8 +94,8 @@ def _make_event(
     )
 
 
-def _read_worker_output(gist_client: GistClient, gist_id: str, task_id: str) -> dict | None:
-    content = gist_client.read_file(gist_id, f"agent-{task_id}.json")
+def _read_worker_output(repo_store: RepoStoreClient, run_id: str, task_id: str) -> dict | None:
+    content = repo_store.read_file(run_id, f"agent-{task_id}.json")
     if not content:
         return None
     if len(content.encode("utf-8")) > MAX_WORKER_OUTPUT_BYTES:
@@ -169,8 +169,8 @@ def _cascade_failures(
     state: OrchestrationState,
     failed_task_id: str,
     graph: dict[str, set[str]],
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
 ) -> list[str]:
     cascaded: list[str] = []
     for task_id, deps in graph.items():
@@ -183,7 +183,7 @@ def _cascade_failures(
         agent.summary = f"Upstream task {failed_task_id} failed"
         cascaded.append(task_id)
         event = _make_event("task_failed", f"Task {task_id} failed: upstream {failed_task_id} failed", task_id)
-        append_event(gist_client, gist_id, event)
+        append_event(repo_store, run_id, event)
     return cascaded
 
 
@@ -191,8 +191,8 @@ def _poll_single_agent(
     task_id: str,
     agent: AgentState,
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     state: OrchestrationState,
 ) -> None:
     if agent.status not in ("running", "launching") or agent.agent_id is None:
@@ -202,25 +202,25 @@ def _poll_single_agent(
     except Exception:
         logger.exception(f"Failed to poll agent {agent.agent_id} for task {task_id}")
         return
-    _update_agent_from_poll(task_id, agent, info, gist_client, gist_id, state)
+    _update_agent_from_poll(task_id, agent, info, repo_store, run_id, state)
 
 
 def _update_agent_from_poll(
     task_id: str,
     agent: AgentState,
     info: object,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     state: OrchestrationState,
 ) -> None:
     if info.status == "FINISHED":
-        _mark_agent_finished(task_id, agent, info, gist_client, gist_id, state)
+        _mark_agent_finished(task_id, agent, info, repo_store, run_id, state)
         return
     if info.status == "ERROR":
-        _mark_agent_error(task_id, agent, info, gist_client, gist_id)
+        _mark_agent_error(task_id, agent, info, repo_store, run_id)
         return
     if info.status in ("RUNNING", "CREATING"):
-        _check_running_agent(task_id, agent, gist_client, gist_id)
+        _check_running_agent(task_id, agent, repo_store, run_id)
         return
 
 
@@ -228,19 +228,19 @@ def _mark_agent_finished(
     task_id: str,
     agent: AgentState,
     info: object,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     state: OrchestrationState,
 ) -> None:
     agent.status = "finished"
     agent.finished_at = _now_iso()
     agent.pr_url = info.pr_url
     agent.summary = info.summary
-    _read_worker_output(gist_client, gist_id, task_id)
+    _read_worker_output(repo_store, run_id, task_id)
     phase_id = state.task_phase_map.get(task_id)
     append_event(
-        gist_client,
-        gist_id,
+        repo_store,
+        run_id,
         _make_event(
             "task_finished",
             f"Task {task_id} finished",
@@ -255,46 +255,46 @@ def _mark_agent_finished(
 
 def _mark_agent_error(
     task_id: str, agent: AgentState, info: object,
-    gist_client: GistClient, gist_id: str,
+    repo_store: RepoStoreClient, run_id: str,
 ) -> None:
     agent.status = "failed"
     agent.finished_at = _now_iso()
     agent.summary = info.summary or "Agent error"
-    append_event(gist_client, gist_id, _make_event("task_failed", f"Task {task_id} failed: agent error", task_id))
+    append_event(repo_store, run_id, _make_event("task_failed", f"Task {task_id} failed: agent error", task_id))
 
 
 def _check_running_agent(
     task_id: str, agent: AgentState,
-    gist_client: GistClient, gist_id: str,
+    repo_store: RepoStoreClient, run_id: str,
 ) -> None:
     if agent.status == "launching":
         agent.status = "running"
-    output = _read_worker_output(gist_client, gist_id, task_id)
+    output = _read_worker_output(repo_store, run_id, task_id)
     if not output or output.get("status") != "blocked":
         return
     agent.status = "blocked"
     agent.blocked_reason = output.get("blocked_reason", "Unknown")
     if agent.blocked_since is None:
         agent.blocked_since = _now_iso()
-    append_event(gist_client, gist_id, _make_event("task_blocked", f"Task {task_id} blocked: {agent.blocked_reason}", task_id))
+    append_event(repo_store, run_id, _make_event("task_blocked", f"Task {task_id} blocked: {agent.blocked_reason}", task_id))
 
 
 def _poll_agents(
     state: OrchestrationState,
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
 ) -> None:
     for task_id, agent in state.agents.items():
-        _poll_single_agent(task_id, agent, cursor_client, gist_client, gist_id, state)
+        _poll_single_agent(task_id, agent, cursor_client, repo_store, run_id, state)
 
 
 def _handle_single_blocked(
     agent: AgentState,
     now: datetime,
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     graph: dict[str, set[str]],
     state: OrchestrationState,
 ) -> None:
@@ -304,16 +304,16 @@ def _handle_single_blocked(
     if elapsed <= BLOCKED_TIMEOUT_SECONDS:
         return
     if agent.retry_count < MAX_RETRY_COUNT and agent.agent_id:
-        _retry_blocked_agent(agent, cursor_client, gist_client, gist_id)
+        _retry_blocked_agent(agent, cursor_client, repo_store, run_id)
         return
-    _fail_blocked_agent(agent, cursor_client, gist_client, gist_id, graph, state)
+    _fail_blocked_agent(agent, cursor_client, repo_store, run_id, graph, state)
 
 
 def _retry_blocked_agent(
     agent: AgentState,
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
 ) -> None:
     prompt = (
         f"Your previous attempt was blocked. Reason: {agent.blocked_reason}. "
@@ -328,17 +328,17 @@ def _retry_blocked_agent(
     agent.blocked_reason = None
     agent.blocked_since = None
     try:
-        gist_client.delete_file(gist_id, f"agent-{agent.task_id}.json")
+        repo_store.delete_file(run_id, f"agent-{agent.task_id}.json")
     except Exception:
         logger.warning(f"Failed to delete agent-{agent.task_id}.json for retry")
-    append_event(gist_client, gist_id, _make_event("task_retried", f"Task {agent.task_id} retried", agent.task_id))
+    append_event(repo_store, run_id, _make_event("task_retried", f"Task {agent.task_id} retried", agent.task_id))
 
 
 def _fail_blocked_agent(
     agent: AgentState,
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     graph: dict[str, set[str]],
     state: OrchestrationState,
 ) -> None:
@@ -350,20 +350,20 @@ def _fail_blocked_agent(
             cursor_client.stop_agent(agent.agent_id)
         except Exception:
             logger.warning(f"Failed to stop blocked agent {agent.agent_id}")
-    append_event(gist_client, gist_id, _make_event("task_failed", f"Task {agent.task_id} failed: blocked", agent.task_id))
-    _cascade_failures(state, agent.task_id, graph, gist_client, gist_id)
+    append_event(repo_store, run_id, _make_event("task_failed", f"Task {agent.task_id} failed: blocked", agent.task_id))
+    _cascade_failures(state, agent.task_id, graph, repo_store, run_id)
 
 
 def _handle_blocked(
     state: OrchestrationState,
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     graph: dict[str, set[str]],
 ) -> None:
     now = datetime.now(timezone.utc)
     for agent in get_blocked_tasks(state.agents):
-        _handle_single_blocked(agent, now, cursor_client, gist_client, gist_id, graph, state)
+        _handle_single_blocked(agent, now, cursor_client, repo_store, run_id, graph, state)
 
 
 def _resolve_repo_for_task(
@@ -393,35 +393,35 @@ def _launch_single_task(
     state: OrchestrationState,
     config: OrchestratorConfig,
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
 ) -> None:
     assign_task_phase(state, task_id, "execution")
     set_phase_status(state, "execution", "running", timestamp=_now_iso())
     task_map = {t.id: t for t in config.tasks}
     task = task_map[task_id]
     gh_token = os.environ["GH_TOKEN"]
-    dep_outputs = _gather_dep_outputs(task, gist_client, gist_id)
+    dep_outputs = _gather_dep_outputs(task, repo_store, run_id)
     repo_url, ref = _resolve_repo_for_task(task, config, dep_outputs, gh_token)
     if task.create_repo:
-        prompt = build_repo_creation_prompt(task, gist_id, gh_token, dep_outputs)
+        prompt = build_repo_creation_prompt(task, run_id, gh_token, dep_outputs)
     else:
-        prompt = build_worker_prompt(task, gist_id, gh_token, dep_outputs)
+        prompt = build_worker_prompt(task, run_id, gh_token, dep_outputs)
     branch = compute_branch_name(config.target.branch_prefix, task_id, state.agents[task_id].retry_count)
     model = task.model or config.model
     info = _try_launch_agent(cursor_client, prompt, repo_url, ref, model, branch, config.target.auto_create_pr)
     if info is None:
         state.agents[task_id].status = "failed"
         state.agents[task_id].summary = "Failed to launch agent"
-        append_event(gist_client, gist_id, _make_event("task_failed", f"Task {task_id} failed: launch error", task_id))
+        append_event(repo_store, run_id, _make_event("task_failed", f"Task {task_id} failed: launch error", task_id))
         return
     agent = state.agents[task_id]
     agent.agent_id = info.id
     agent.status = "launching"
     agent.started_at = _now_iso()
     append_event(
-        gist_client,
-        gist_id,
+        repo_store,
+        run_id,
         _make_event(
             "task_launched",
             f"Launched {task_id} ({info.id})",
@@ -433,10 +433,10 @@ def _launch_single_task(
     )
 
 
-def _gather_dep_outputs(task: TaskConfig, gist_client: GistClient, gist_id: str) -> dict[str, dict]:
+def _gather_dep_outputs(task: TaskConfig, repo_store: RepoStoreClient, run_id: str) -> dict[str, dict]:
     dep_outputs: dict[str, dict] = {}
     for dep_id in task.depends_on:
-        output = _read_worker_output(gist_client, gist_id, dep_id)
+        output = _read_worker_output(repo_store, run_id, dep_id)
         dep_outputs[dep_id] = output.get("outputs", {}) if output else {}
     return dep_outputs
 
@@ -465,12 +465,12 @@ def _launch_ready_tasks(
     config: OrchestratorConfig,
     graph: dict[str, set[str]],
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
 ) -> None:
     ready = get_ready_tasks(graph, state.agents)
     for task_id in ready:
-        _launch_single_task(task_id, state, config, cursor_client, gist_client, gist_id)
+        _launch_single_task(task_id, state, config, cursor_client, repo_store, run_id)
 
 
 def _stop_all_running(state: OrchestrationState, cursor_client: CursorClient) -> None:
@@ -512,9 +512,9 @@ def _check_terminal_failure(state: OrchestrationState, graph: dict[str, set[str]
     return len(pending_viable) == 0
 
 
-def _compute_sleep_time(gist_client: GistClient) -> int:
-    remaining = gist_client.rate_limit_remaining
-    limit = gist_client._rate_limit_limit
+def _compute_sleep_time(repo_store: RepoStoreClient) -> int:
+    remaining = repo_store.rate_limit_remaining
+    limit = repo_store._rate_limit_limit
     if remaining is None or limit is None:
         return POLL_INTERVAL
     used_pct = 1.0 - (remaining / limit)
@@ -542,18 +542,18 @@ def _resolve_bootstrap_ref() -> str:
 
 def _run_planning_phase(
     config: OrchestratorConfig,
-    gist_id: str,
+    run_id: str,
     cursor_client: CursorClient,
-    gist_client: GistClient,
+    repo_store: RepoStoreClient,
 ) -> bool:
     append_event(
-        gist_client,
-        gist_id,
+        repo_store,
+        run_id,
         _make_event("planning_started", "Planning phase started", phase_id="planning", agent_kind="phase"),
     )
     try:
         gh_token = os.environ["GH_TOKEN"]
-        planner_prompt = build_planner_prompt(config, gist_id, gh_token)
+        planner_prompt = build_planner_prompt(config, run_id, gh_token)
 
         gh_user = _resolve_github_username(gh_token)
         bootstrap_url = f"https://github.com/{gh_user}/{config.bootstrap_repo_name}"
@@ -563,11 +563,11 @@ def _run_planning_phase(
             repository=bootstrap_url,
             ref=_resolve_bootstrap_ref(),
             model=config.model,
-            branch_name=f"cursor-orch-planner-{gist_id[:8]}",
+            branch_name=f"cursor-orch-planner-{run_id[:8]}",
             auto_pr=False,
         )
 
-        plan_content = wait_for_plan(gist_client, gist_id)
+        plan_content = wait_for_plan(repo_store, run_id)
         if plan_content is None:
             raise RuntimeError("Timed out waiting for task plan from planner agent")
 
@@ -575,11 +575,11 @@ def _run_planning_phase(
         config.repositories["__bootstrap__"] = RepoConfig(url=bootstrap_url, ref=_resolve_bootstrap_ref())
         parsed_tasks = parse_task_plan(plan_content, config)
         config.tasks = parsed_tasks
-        gist_client.write_file(gist_id, "config.yaml", to_yaml(config))
+        repo_store.write_file(run_id, "config.yaml", to_yaml(config))
 
         append_event(
-            gist_client,
-            gist_id,
+            repo_store,
+            run_id,
             _make_event(
                 "planning_completed",
                 f"Planning completed: {len(parsed_tasks)} tasks",
@@ -590,8 +590,8 @@ def _run_planning_phase(
         return True
     except Exception as exc:
         append_event(
-            gist_client,
-            gist_id,
+            repo_store,
+            run_id,
             _make_event("planning_failed", str(exc), phase_id="planning", agent_kind="phase"),
         )
         raise
@@ -599,8 +599,8 @@ def _run_planning_phase(
 
 def _persist_unexpected_failure(
     state: OrchestrationState,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     exc: Exception,
 ) -> None:
     timestamp = _now_iso()
@@ -617,8 +617,8 @@ def _persist_unexpected_failure(
         set_phase_status(state, phase_id, "failed", timestamp=timestamp)
     try:
         append_event(
-            gist_client,
-            gist_id,
+            repo_store,
+            run_id,
             _make_event(
                 "orchestration_failed",
                 f"Orchestration loop failed: {exc}",
@@ -629,20 +629,20 @@ def _persist_unexpected_failure(
     except Exception:
         logger.exception("Failed to append orchestration failure event")
     try:
-        sync_to_gist(gist_client, gist_id, state)
+        sync_to_repo(repo_store, run_id, state)
     except Exception:
         logger.exception("Failed to sync orchestration failure state")
 
 
-def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: GistClient) -> None:
-    config_str = gist_client.read_file(gist_id, "config.yaml")
+def run_orchestration(run_id: str, cursor_client: CursorClient, repo_store: RepoStoreClient) -> None:
+    config_str = repo_store.read_file(run_id, "config.yaml")
     config = parse_config(config_str)
 
     planning_ran = False
     planning_ok = False
     if config.prompt and not config.tasks:
         planning_ran = True
-        plan_content = gist_client.read_file(gist_id, "task-plan.json")
+        plan_content = repo_store.read_file(run_id, "task-plan.json")
         if plan_content:
             try:
                 gh_token = os.environ["GH_TOKEN"]
@@ -651,10 +651,10 @@ def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: Gi
                 config.repositories["__bootstrap__"] = RepoConfig(url=bootstrap_url, ref=_resolve_bootstrap_ref())
                 parsed_tasks = parse_task_plan(plan_content, config)
                 config.tasks = parsed_tasks
-                gist_client.write_file(gist_id, "config.yaml", to_yaml(config))
+                repo_store.write_file(run_id, "config.yaml", to_yaml(config))
                 append_event(
-                    gist_client,
-                    gist_id,
+                    repo_store,
+                    run_id,
                     _make_event(
                         "planning_completed",
                         f"Planning completed: {len(parsed_tasks)} tasks (reused existing plan)",
@@ -667,15 +667,15 @@ def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: Gi
                 pass
         if not planning_ok:
             try:
-                planning_ok = _run_planning_phase(config, gist_id, cursor_client, gist_client)
+                planning_ok = _run_planning_phase(config, run_id, cursor_client, repo_store)
             except Exception:
                 planning_ok = False
                 raise
 
     try:
-        state = sync_from_gist(gist_client, gist_id)
+        state = sync_from_repo(repo_store, run_id)
     except Exception:
-        state = create_initial_state(config, gist_id)
+        state = create_initial_state(config, run_id)
 
     _reconcile_agents_from_config(state, config)
 
@@ -683,10 +683,10 @@ def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: Gi
         state.status = "running"
         state.started_at = _now_iso()
         seed_main_agent(state, agent_id=state.orchestrator_agent_id, status="running", started_at=state.started_at)
-        sync_to_gist(gist_client, gist_id, state)
+        sync_to_repo(repo_store, run_id, state)
         append_event(
-            gist_client,
-            gist_id,
+            repo_store,
+            run_id,
             _make_event(
                 "orchestration_started",
                 "Orchestration started",
@@ -701,15 +701,15 @@ def run_orchestration(gist_id: str, cursor_client: CursorClient, gist_client: Gi
             "finished" if planning_ok else "failed",
             timestamp=_now_iso(),
         )
-        sync_to_gist(gist_client, gist_id, state)
+        sync_to_repo(repo_store, run_id, state)
 
     graph = build_dependency_graph(config.tasks)
 
     try:
-        _orchestration_loop(state, config, graph, cursor_client, gist_client, gist_id)
+        _orchestration_loop(state, config, graph, cursor_client, repo_store, run_id)
     except Exception as exc:
         logger.exception("Orchestration loop failed")
-        _persist_unexpected_failure(state, gist_client, gist_id, exc)
+        _persist_unexpected_failure(state, repo_store, run_id, exc)
         raise
 
 
@@ -718,41 +718,41 @@ def _orchestration_loop(
     config: OrchestratorConfig,
     graph: dict[str, set[str]],
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
 ) -> None:
     while True:
-        if _check_stop_requested(state, cursor_client, gist_client, gist_id, config):
+        if _check_stop_requested(state, cursor_client, repo_store, run_id, config):
             break
-        _poll_agents(state, cursor_client, gist_client, gist_id)
-        _handle_blocked(state, cursor_client, gist_client, gist_id, graph)
-        _launch_ready_tasks(state, config, graph, cursor_client, gist_client, gist_id)
-        _write_progress(state, config, gist_client, gist_id)
-        if _check_completion(state, gist_client, gist_id):
+        _poll_agents(state, cursor_client, repo_store, run_id)
+        _handle_blocked(state, cursor_client, repo_store, run_id, graph)
+        _launch_ready_tasks(state, config, graph, cursor_client, repo_store, run_id)
+        _write_progress(state, config, repo_store, run_id)
+        if _check_completion(state, repo_store, run_id):
             break
-        if _check_failure(state, graph, gist_client, gist_id):
+        if _check_failure(state, graph, repo_store, run_id):
             break
-        time.sleep(_compute_sleep_time(gist_client))
+        time.sleep(_compute_sleep_time(repo_store))
 
 
 def _check_stop_requested(
     state: OrchestrationState,
     cursor_client: CursorClient,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     config: OrchestratorConfig,
 ) -> bool:
-    stop_content = gist_client.read_file(gist_id, "stop-requested.json")
+    stop_content = repo_store.read_file(run_id, "stop-requested.json")
     if not stop_content:
         return False
     logger.info("Stop requested, halting orchestration")
     _stop_all_running(state, cursor_client)
     state.status = "stopped"
-    gist_client.write_file(gist_id, "summary.md", _build_summary_md(config, state))
-    sync_to_gist(gist_client, gist_id, state)
+    repo_store.write_file(run_id, "summary.md", _build_summary_md(config, state))
+    sync_to_repo(repo_store, run_id, state)
     append_event(
-        gist_client,
-        gist_id,
+        repo_store,
+        run_id,
         _make_event(
             "orchestration_stopped",
             "Orchestration stopped by user",
@@ -766,22 +766,22 @@ def _check_stop_requested(
 def _write_progress(
     state: OrchestrationState,
     config: OrchestratorConfig,
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
 ) -> None:
     summary_md = _build_summary_md(config, state)
-    gist_client.write_file(gist_id, "summary.md", summary_md)
-    sync_to_gist(gist_client, gist_id, state)
+    repo_store.write_file(run_id, "summary.md", summary_md)
+    sync_to_repo(repo_store, run_id, state)
 
 
-def _check_completion(state: OrchestrationState, gist_client: GistClient, gist_id: str) -> bool:
+def _check_completion(state: OrchestrationState, repo_store: RepoStoreClient, run_id: str) -> bool:
     if not _check_all_finished(state):
         return False
     state.status = "completed"
-    sync_to_gist(gist_client, gist_id, state)
+    sync_to_repo(repo_store, run_id, state)
     append_event(
-        gist_client,
-        gist_id,
+        repo_store,
+        run_id,
         _make_event(
             "orchestration_completed",
             "All tasks completed",
@@ -796,22 +796,22 @@ def _check_completion(state: OrchestrationState, gist_client: GistClient, gist_i
 def _check_failure(
     state: OrchestrationState,
     graph: dict[str, set[str]],
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
 ) -> bool:
     failed_ids = {tid for tid, a in state.agents.items() if a.status == "failed"}
     if not failed_ids:
         return False
     for fid in list(failed_ids):
-        _cascade_failures(state, fid, graph, gist_client, gist_id)
+        _cascade_failures(state, fid, graph, repo_store, run_id)
     if not _check_terminal_failure(state, graph):
         return False
     state.status = "failed"
     state.error = f"Failed tasks: {', '.join(sorted(failed_ids))}"
-    sync_to_gist(gist_client, gist_id, state)
+    sync_to_repo(repo_store, run_id, state)
     append_event(
-        gist_client,
-        gist_id,
+        repo_store,
+        run_id,
         _make_event(
             "orchestration_failed",
             f"Orchestration failed: {state.error}",
@@ -829,11 +829,13 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    gist_id = os.environ["GIST_ID"]
+    run_id = os.environ["RUN_ID"]
     gh_token = os.environ["GH_TOKEN"]
     cursor_api_key = os.environ["CURSOR_API_KEY"]
+    bootstrap_owner = os.environ["BOOTSTRAP_OWNER"]
+    bootstrap_repo = os.environ["BOOTSTRAP_REPO"]
 
     cursor_client = CursorClient(api_key=cursor_api_key)
-    gist_client = GistClient(token=gh_token)
+    repo_store = RepoStoreClient(token=gh_token, owner=bootstrap_owner, repo=bootstrap_repo)
 
-    run_orchestration(gist_id, cursor_client, gist_client)
+    run_orchestration(run_id, cursor_client, repo_store)
