@@ -12,7 +12,7 @@ from cursor_orch.config import OrchestratorConfig, TaskConfig
 from cursor_orch.system_prompt import PLANNER_SYSTEM_PROMPT
 
 if TYPE_CHECKING:
-    from cursor_orch.api.gist_client import GistClient
+    from cursor_orch.api.repo_store import RepoStoreClient
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ Each task targets exactly one repository. Respect repository boundaries: create 
 one task per repository per concern. Tasks may declare dependencies on other tasks \
 by referencing their IDs.
 
-Produce a JSON task plan with the following structure and write it to the gist as \
+Produce a JSON task plan with the following structure and write it to the run branch as \
 a file named `task-plan.json`.
 
 ### Output Format
@@ -86,19 +86,27 @@ Use an empty list if there are no dependencies.
 - Do NOT create circular dependencies.
 - Maximum 20 tasks.
 
-### Gist Write Instructions
+### Output Write Instructions
 
-Write the JSON output as a file named `task-plan.json` to the gist with ID `{gist_id}`.
+Write the JSON output as a file named `task-plan.json` to the run branch of the bootstrap repo.
 
-Use the `gh` CLI to write to the gist:
+Use the `gh` CLI with the GitHub Contents API:
 ```bash
-GH_TOKEN="{gh_token}" gh api --method PATCH /gists/{gist_id} --input <payload-file>
+CONTENT=$(cat /tmp/task-plan.json | base64 -w 0)
+GH_TOKEN="{gh_token}" gh api --method PUT /repos/{bootstrap_owner}/{bootstrap_repo}/contents/task-plan.json \
+  --field message="write task-plan.json" \
+  --field content="$CONTENT" \
+  --field branch="run/{run_id}"
 ```
 """
 
 
 def build_planner_prompt(
-    config: OrchestratorConfig, gist_id: str, gh_token: str
+    config: OrchestratorConfig,
+    run_id: str,
+    gh_token: str,
+    bootstrap_owner: str,
+    bootstrap_repo: str,
 ) -> str:
     repo_lines: list[str] = []
     for alias, repo in config.repositories.items():
@@ -108,8 +116,10 @@ def build_planner_prompt(
     return PLANNER_SYSTEM_PROMPT + "\n\n" + PLANNER_PROMPT_TEMPLATE.format(
         prompt=config.prompt,
         repo_list=repo_list,
-        gist_id=gist_id,
+        run_id=run_id,
         gh_token=gh_token,
+        bootstrap_owner=bootstrap_owner,
+        bootstrap_repo=bootstrap_repo,
     )
 
 
@@ -246,16 +256,16 @@ def _collect_upstream_create_repo_ids(
 
 
 def wait_for_plan(
-    gist_client: GistClient,
-    gist_id: str,
+    repo_store: RepoStoreClient,
+    run_id: str,
     timeout: int = 600,
     poll_interval: int = 15,
 ) -> str | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        content = gist_client.read_file(gist_id, "task-plan.json")
+        content = repo_store.read_file(run_id, "task-plan.json")
         if content:
-            logger.info("Task plan found in gist %s", gist_id)
+            logger.info("Task plan found for run %s", run_id)
             return content
         remaining = deadline - time.monotonic()
         logger.debug(

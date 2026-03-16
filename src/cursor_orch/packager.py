@@ -20,7 +20,7 @@ RUNTIME_SOURCE_PATHS: tuple[str, ...] = (
     "system_prompt.py",
     "api/__init__.py",
     "api/cursor_client.py",
-    "api/gist_client.py",
+    "api/repo_store.py",
 )
 RUNTIME_METADATA_PATHS: tuple[str, ...] = ("pyproject.toml",)
 RUNTIME_REF_PREFIX = "runtime/"

@@ -13,15 +13,17 @@ MAX_DEP_OUTPUT_BYTES = 50 * 1024
 
 def build_worker_prompt(
     task: TaskConfig,
-    gist_id: str,
+    run_id: str,
     gh_token: str,
     dependency_outputs: dict[str, dict],
+    bootstrap_owner: str = "",
+    bootstrap_repo: str = "",
 ) -> str:
     sections = [
         WORKER_SYSTEM_PROMPT,
         _section_task(task),
         _section_dependencies(task, dependency_outputs),
-        _section_output_protocol(task, gist_id, gh_token),
+        _section_output_protocol(task, run_id, gh_token, bootstrap_owner, bootstrap_repo),
         _section_rules(),
     ]
     return "\n\n".join(s for s in sections if s)
@@ -29,16 +31,18 @@ def build_worker_prompt(
 
 def build_repo_creation_prompt(
     task: TaskConfig,
-    gist_id: str,
+    run_id: str,
     gh_token: str,
     dependency_outputs: dict[str, dict],
+    bootstrap_owner: str = "",
+    bootstrap_repo: str = "",
 ) -> str:
     sections = [
         WORKER_SYSTEM_PROMPT,
         _section_task(task),
         _section_repo_creation(task),
         _section_dependencies(task, dependency_outputs),
-        _section_output_protocol(task, gist_id, gh_token),
+        _section_output_protocol(task, run_id, gh_token, bootstrap_owner, bootstrap_repo),
         _section_rules(),
     ]
     return "\n\n".join(s for s in sections if s)
@@ -91,7 +95,7 @@ def _section_dependencies(task: TaskConfig, dependency_outputs: dict[str, dict])
             dep_data = {
                 "_truncated": True,
                 "summary": str(dep_data.get("summary", ""))[:4096],
-                "note": f"Full output available in agent-{dep_id}.json on the Gist.",
+                "note": f"Full output available in agent-{dep_id}.json on the run branch.",
             }
             serialized = json.dumps(dep_data, indent=2)
         lines.append(f'\n--- Output from task "{dep_id}" ---')
@@ -100,14 +104,20 @@ def _section_dependencies(task: TaskConfig, dependency_outputs: dict[str, dict])
     return "\n".join(lines)
 
 
-def _section_output_protocol(task: TaskConfig, gist_id: str, gh_token: str) -> str:
+def _section_output_protocol(
+    task: TaskConfig,
+    run_id: str,
+    gh_token: str,
+    bootstrap_owner: str,
+    bootstrap_repo: str,
+) -> str:
     return f'''WHEN YOU ARE DONE:
 Run the following commands in the shell to report your results.
 Replace the placeholder values with your actual output.
 
 ```bash
 python3 - <<'PY'
-import json
+import json, base64
 
 output = {{
     "task_id": "{task.id}",
@@ -117,19 +127,14 @@ output = {{
     "outputs": {{"key": "PUT ARTIFACTS OTHER TASKS MAY NEED HERE"}},
 }}
 
-payload = {{
-    "files": {{
-        "agent-{task.id}.json": {{
-            "content": json.dumps(output, indent=2),
-        }}
-    }}
-}}
-
-with open("/tmp/agent-{task.id}.json", "w", encoding="utf-8") as handle:
-    json.dump(payload, handle)
+content = base64.b64encode(json.dumps(output, indent=2).encode()).decode()
+with open("/tmp/agent-{task.id}-payload.json", "w") as f:
+    json.dump({{"message": "agent output", "content": content, "branch": "run/{run_id}"}}, f)
 PY
 
-GH_TOKEN="{gh_token}" gh api --method PATCH /gists/{gist_id} --input /tmp/agent-{task.id}.json
+GH_TOKEN="{gh_token}" gh api --method PUT \\
+  /repos/{bootstrap_owner}/{bootstrap_repo}/contents/agent-{task.id}.json \\
+  --input /tmp/agent-{task.id}-payload.json
 ```
 
 Edit the `output` dict before running:
@@ -142,6 +147,7 @@ def _section_rules() -> str:
     return """RULES:
 - Focus only on your assigned task. Do not modify unrelated code.
 - If you are blocked, report it using the output script with status "blocked" and a specific blocked_reason.
-- Do not attempt to communicate with other agents. Only write to your designated Gist file.
+- Do not attempt to communicate with other agents. Only write to your designated run branch file.
 - Create a clean, focused PR with a descriptive title and body.
-- Do not read or write any Gist files other than your designated output file."""
+- Do not read or write any run branch files other than your designated output file.
+# MANDATORY: At the end of your task, commit and push your changes directly to the repository"""

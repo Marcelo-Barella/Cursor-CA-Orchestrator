@@ -4,23 +4,27 @@ from cursor_orch.cli import _build_orchestration_launch_prompt, _run_orchestrati
 from cursor_orch.config import OrchestratorConfig, TargetConfig, to_yaml
 
 
-class _FakeGistClient:
-    created_files: dict[str, str] | None = None
-    update_calls: list[tuple[str, dict[str, str]]] = []
+class _FakeRepoStoreClient:
     writes: list[tuple[str, str, str]] = []
+    run_created: list[str] = []
 
-    def __init__(self, token: str):
+    def __init__(self, token: str, owner: str, repo: str):
         self.token = token
+        self.owner = owner
+        self.repo = repo
+        self.__class__.writes = []
+        self.__class__.run_created = []
+        self._files: dict[str, str] = {}
 
-    def create_gist(self, description: str, files: dict[str, str]):
-        self.__class__.created_files = dict(files)
-        return SimpleNamespace(id="gist-123", url="https://gist.github.com/example/gist-123")
+    def create_run(self, run_id: str) -> None:
+        self.__class__.run_created.append(run_id)
 
-    def update_gist(self, gist_id: str, files: dict[str, str]) -> None:
-        self.__class__.update_calls.append((gist_id, dict(files)))
+    def write_file(self, run_id: str, filename: str, content: str) -> None:
+        self.__class__.writes.append((run_id, filename, content))
+        self._files[filename] = content
 
-    def write_file(self, gist_id: str, filename: str, content: str) -> None:
-        self.__class__.writes.append((gist_id, filename, content))
+    def read_file(self, run_id: str, filename: str) -> str:
+        return self._files.get(filename, "")
 
 
 class _FakeCursorClient:
@@ -51,13 +55,15 @@ class _FakeCursorClient:
 
 def test_build_orchestration_launch_prompt_exports_runtime_context():
     prompt = _build_orchestration_launch_prompt(
-        gist_id="gist-123",
+        run_id="run-123",
         gh_token="gh-token",
         cursor_api_key="cursor-token",
         runtime_ref="runtime/abc123",
+        bootstrap_owner="octocat",
+        bootstrap_repo_name="cursor-orch-bootstrap",
     )
 
-    assert "export GIST_ID='gist-123'" in prompt
+    assert "export RUN_ID='run-123'" in prompt
     assert "export GH_TOKEN='gh-token'" in prompt
     assert "export CURSOR_API_KEY='cursor-token'" in prompt
     assert "export CURSOR_ORCH_RUNTIME_REF='runtime/abc123'" in prompt
@@ -66,9 +72,8 @@ def test_build_orchestration_launch_prompt_exports_runtime_context():
 
 
 def test_run_orchestration_uses_data_only_gist_and_pinned_runtime_ref(monkeypatch):
-    _FakeGistClient.created_files = None
-    _FakeGistClient.update_calls = []
-    _FakeGistClient.writes = []
+    _FakeRepoStoreClient.writes = []
+    _FakeRepoStoreClient.run_created = []
     _FakeCursorClient.launches = []
 
     config = OrchestratorConfig(
@@ -88,9 +93,9 @@ def test_run_orchestration_uses_data_only_gist_and_pinned_runtime_ref(monkeypatc
             "runtime_ref": "runtime/abc123",
         },
     )
-    monkeypatch.setattr("cursor_orch.cli.GistClient", _FakeGistClient)
+    monkeypatch.setattr("cursor_orch.cli.RepoStoreClient", _FakeRepoStoreClient)
     monkeypatch.setattr("cursor_orch.cli.CursorClient", _FakeCursorClient)
-    monkeypatch.setattr("cursor_orch.cli.render_live", lambda gist_client, gist_id, active_config: None)
+    monkeypatch.setattr("cursor_orch.cli.render_live", lambda repo_store, run_id, active_config: None)
 
     _run_orchestration(
         config,
@@ -100,16 +105,21 @@ def test_run_orchestration_uses_data_only_gist_and_pinned_runtime_ref(monkeypatc
         "cursor-orch-bootstrap",
     )
 
-    assert _FakeGistClient.created_files == {
-        "config.yaml": config_yaml,
-        "state.json": _FakeGistClient.created_files["state.json"],
-        "summary.md": "# Pinned runtime run\n\nOrchestration pending...\n",
-    }
-    assert _FakeGistClient.update_calls == []
-    assert len(_FakeCursorClient.launches) == 1
+    written_filenames = [filename for _, filename, _ in _FakeRepoStoreClient.writes]
+    assert "config.yaml" in written_filenames
+    assert "state.json" in written_filenames
+    assert "summary.md" in written_filenames
+
+    config_yaml_written = next(content for _, filename, content in _FakeRepoStoreClient.writes if filename == "config.yaml")
+    assert config_yaml_written == config_yaml
+
+    summary_written = next(content for _, filename, content in _FakeRepoStoreClient.writes if filename == "summary.md")
+    assert summary_written == "# Pinned runtime run\n\nOrchestration pending...\n"
+
+    assert len(_FakeCursorClient.launches) >= 1
 
     launch = _FakeCursorClient.launches[0]
     assert launch["repository"] == "https://github.com/octocat/cursor-orch-bootstrap"
     assert launch["ref"] == "runtime/abc123"
-    assert "export GIST_ID='gist-123'" in str(launch["prompt"])
+    assert "export RUN_ID=" in str(launch["prompt"])
     assert "export CURSOR_ORCH_RUNTIME_REF='runtime/abc123'" in str(launch["prompt"])

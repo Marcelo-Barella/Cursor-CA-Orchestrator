@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from cursor_orch.api.gist_client import GistClient
+    from cursor_orch.api.repo_store import RepoStoreClient
     from cursor_orch.config import OrchestratorConfig
 
 MAX_EVENTS_BYTES = 256 * 1024
@@ -43,7 +43,7 @@ class LifecycleAgentState:
 @dataclass
 class OrchestrationState:
     orchestration_id: str
-    gist_id: str
+    run_id: str
     orchestrator_agent_id: str | None = None
     status: str = "pending"
     started_at: str | None = None
@@ -99,14 +99,14 @@ def _default_phase_agents() -> dict[str, LifecycleAgentState]:
     }
 
 
-def create_initial_state(config: OrchestratorConfig, gist_id: str) -> OrchestrationState:
+def create_initial_state(config: OrchestratorConfig, run_id: str) -> OrchestrationState:
     agents = {
         task.id: AgentState(task_id=task.id)
         for task in config.tasks
     }
     state = OrchestrationState(
-        orchestration_id=gist_id,
-        gist_id=gist_id,
+        orchestration_id=run_id,
+        run_id=run_id,
         agents=agents,
     )
     ensure_lifecycle_agents(state)
@@ -204,6 +204,10 @@ def _lifecycle_agent_from_dict(d: dict, default_node_id: str, default_label: str
 
 def deserialize(json_str: str) -> OrchestrationState:
     raw = json.loads(json_str)
+    if "gist_id" in raw and "run_id" not in raw:
+        raw["run_id"] = raw.pop("gist_id")
+    elif "gist_id" in raw:
+        raw.pop("gist_id")
     agents = {
         k: AgentState(**v)
         for k, v in raw.pop("agents", {}).items()
@@ -244,21 +248,21 @@ def deserialize_event(json_str: str) -> OrchestrationEvent:
     return OrchestrationEvent(**json.loads(json_str))
 
 
-def sync_to_gist(gist_client: GistClient, gist_id: str, state: OrchestrationState) -> None:
-    gist_client.write_file(gist_id, "state.json", serialize(state))
+def sync_to_repo(repo_store: RepoStoreClient, run_id: str, state: OrchestrationState) -> None:
+    repo_store.write_file(run_id, "state.json", serialize(state))
 
 
-def sync_from_gist(gist_client: GistClient, gist_id: str) -> OrchestrationState:
-    content = gist_client.read_file(gist_id, "state.json")
+def sync_from_repo(repo_store: RepoStoreClient, run_id: str) -> OrchestrationState:
+    content = repo_store.read_file(run_id, "state.json")
     return deserialize(content)
 
 
-def append_event(gist_client: GistClient, gist_id: str, event: OrchestrationEvent) -> None:
-    existing = gist_client.read_file(gist_id, "events.jsonl")
+def append_event(repo_store: RepoStoreClient, run_id: str, event: OrchestrationEvent) -> None:
+    existing = repo_store.read_file(run_id, "events.jsonl")
     line = serialize_event(event)
     content = f"{existing}{line}\n" if existing else f"{line}\n"
     content = _rotate_events(content)
-    gist_client.write_file(gist_id, "events.jsonl", content)
+    repo_store.write_file(run_id, "events.jsonl", content)
 
 
 def _rotate_events(content: str) -> str:
@@ -273,8 +277,8 @@ def _rotate_events(content: str) -> str:
     return text
 
 
-def read_events(gist_client: GistClient, gist_id: str) -> list[OrchestrationEvent]:
-    content = gist_client.read_file(gist_id, "events.jsonl")
+def read_events(repo_store: RepoStoreClient, run_id: str) -> list[OrchestrationEvent]:
+    content = repo_store.read_file(run_id, "events.jsonl")
     if not content.strip():
         return []
     events: list[OrchestrationEvent] = []

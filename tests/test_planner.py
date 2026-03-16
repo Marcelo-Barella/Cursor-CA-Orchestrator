@@ -20,7 +20,7 @@ def _make_config(**overrides) -> OrchestratorConfig:
 
 def test_build_planner_prompt_starts_with_system_prompt():
     config = _make_config()
-    result = build_planner_prompt(config, gist_id="g123", gh_token="tok")
+    result = build_planner_prompt(config, run_id="r123", gh_token="tok", bootstrap_owner="owner", bootstrap_repo="repo")
     assert result.startswith(PLANNER_SYSTEM_PROMPT)
 
 
@@ -251,6 +251,6 @@ def test_parse_task_plan_rejects_ambiguous_transitive_create_repo_dependency():
 
 def test_planner_prompt_references_gh_cli():
     config = _make_config()
-    result = build_planner_prompt(config, gist_id="g123", gh_token="tok")
+    result = build_planner_prompt(config, run_id="r123", gh_token="tok", bootstrap_owner="owner", bootstrap_repo="repo")
     assert "gh" in result
     assert "do NOT have access to the `gh` CLI" not in result

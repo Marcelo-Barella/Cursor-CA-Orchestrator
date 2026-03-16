@@ -11,7 +11,7 @@ import click
 from rich.console import Console
 
 from cursor_orch.api.cursor_client import CursorClient
-from cursor_orch.api.gist_client import GistClient
+from cursor_orch.api.repo_store import RepoStoreClient
 from cursor_orch.bootstrap import (
     BOOTSTRAP_ENTRYPOINT,
     BOOTSTRAP_INSTALL_COMMAND,
@@ -35,6 +35,7 @@ from cursor_orch.state import (
     read_events,
     seed_main_agent,
     serialize,
+    sync_to_repo,
 )
 
 logger = logging.getLogger(__name__)
@@ -270,20 +271,30 @@ def _resolve_bootstrap_name(cli_name: str | None, config: OrchestratorConfig | N
     return "cursor-orch-bootstrap"
 
 
+def _make_repo_store(gh_token: str) -> RepoStoreClient:
+    owner = _get_env("BOOTSTRAP_OWNER", command="cursor-orch", command_example="BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch status --run <run_id>")
+    repo = _get_env("BOOTSTRAP_REPO", command="cursor-orch", command_example="BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch status --run <run_id>")
+    return RepoStoreClient(token=gh_token, owner=owner, repo=repo)
+
+
 def _build_orchestration_launch_prompt(
     *,
-    gist_id: str,
+    run_id: str,
     gh_token: str,
     cursor_api_key: str,
     runtime_ref: str,
+    bootstrap_owner: str,
+    bootstrap_repo_name: str,
 ) -> str:
     return "\n".join([
         "You are the main agent on a cursor-orch orchestrator workflow.",
         "Run the following shell commands exactly as written.",
-        f"export GIST_ID='{gist_id}'",
+        f"export RUN_ID='{run_id}'",
         f"export GH_TOKEN='{gh_token}'",
         f"export CURSOR_API_KEY='{cursor_api_key}'",
         f"export CURSOR_ORCH_RUNTIME_REF='{runtime_ref}'",
+        f"export BOOTSTRAP_OWNER='{bootstrap_owner}'",
+        f"export BOOTSTRAP_REPO='{bootstrap_repo_name}'",
         BOOTSTRAP_INSTALL_COMMAND,
         BOOTSTRAP_ENTRYPOINT,
         "If the install command fails, stop and report the exact error output.",
@@ -328,53 +339,51 @@ def _run_orchestration(
     gh_token: str,
     bootstrap_repo: str | None = None,
 ) -> None:
+    import uuid
     repo_name = _resolve_bootstrap_name(bootstrap_repo, config)
     repo_info = ensure_bootstrap_repo(gh_token, repo_name)
     runtime_ref = repo_info["runtime_ref"]
-    console.print(f"Bootstrap repo verified: {repo_info['owner']}/{repo_info['name']} @ {runtime_ref}")
+    owner = repo_info["owner"]
+    console.print(f"Bootstrap repo verified: {owner}/{repo_info['name']} @ {runtime_ref}")
 
-    initial_state = create_initial_state(config, "placeholder")
+    repo_store = RepoStoreClient(token=gh_token, owner=owner, repo=repo_info["name"])
 
-    gist_client = GistClient(token=gh_token)
-    gist_files: dict[str, str] = {
-        "config.yaml": config_yaml,
-        "state.json": serialize(initial_state),
-        "summary.md": f"# {config.name}\n\nOrchestration pending...\n",
-    }
+    orchestration_id = str(uuid.uuid4())[:8]
 
-    gist_info = gist_client.create_gist(
-        description=f"cursor-orch: {config.name}",
-        files=gist_files,
-    )
-    gist_id = gist_info.id
-    console.print(f"Created orchestration Gist (secret): {gist_info.url}")
-    console.print(f"Gist ID: {gist_id}")
+    repo_store.create_run(orchestration_id)
+
+    initial_state = create_initial_state(config, orchestration_id)
+
+    repo_store.write_file(orchestration_id, "config.yaml", config_yaml)
+    repo_store.write_file(orchestration_id, "state.json", serialize(initial_state))
+    repo_store.write_file(orchestration_id, "summary.md", f"# {config.name}\n\nOrchestration pending...\n")
+
+    console.print(f"Created run branch: run/{orchestration_id}")
+    console.print(f"Run ID: {orchestration_id}")
     _print_next_actions(
-        f"Watch run status: cursor-orch status --gist {gist_id} --watch",
-        f"Inspect orchestrator logs: cursor-orch logs --gist {gist_id}",
-        f"Request stop when needed: cursor-orch stop --gist {gist_id}",
+        f"Watch run status: cursor-orch status --run {orchestration_id}",
+        f"Inspect orchestrator logs: cursor-orch logs --run {orchestration_id}",
+        f"Request stop when needed: cursor-orch stop --run {orchestration_id}",
     )
-
-    initial_state.orchestration_id = gist_id
-    initial_state.gist_id = gist_id
-    gist_client.write_file(gist_id, "state.json", serialize(initial_state))
 
     cursor_client = CursorClient(api_key=cursor_api_key)
-    repo_url = f"https://github.com/{repo_info['owner']}/{repo_info['name']}"
+    repo_url = f"https://github.com/{owner}/{repo_info['name']}"
 
-    console.print(f"Launching orchestrator agent against {repo_info['owner']}/{repo_info['name']}...")
+    console.print(f"Launching orchestrator agent against {owner}/{repo_info['name']}...")
     launch_prompt = _build_orchestration_launch_prompt(
-        gist_id=gist_id,
+        run_id=orchestration_id,
         gh_token=gh_token,
         cursor_api_key=cursor_api_key,
         runtime_ref=runtime_ref,
+        bootstrap_owner=owner,
+        bootstrap_repo_name=repo_info["name"],
     )
     agent = cursor_client.launch_agent(
         prompt=launch_prompt,
         repository=repo_url,
         ref=runtime_ref,
         model=config.model,
-        branch_name=f"cursor-orch-run-{gist_id[:8]}",
+        branch_name=f"cursor-orch-run-{orchestration_id}",
         auto_pr=False,
     )
     console.print(f"Orchestrator {agent.id} {agent.status}.")
@@ -386,9 +395,9 @@ def _run_orchestration(
         status="launching",
         started_at=initial_state.started_at,
     )
-    gist_client.write_file(gist_id, "state.json", serialize(initial_state))
+    sync_to_repo(repo_store, orchestration_id, initial_state)
 
-    render_live(gist_client, gist_id, config)
+    render_live(repo_store, orchestration_id, config)
 
 
 def _run_interactive() -> None:
@@ -472,14 +481,14 @@ def run(config_path: str | None, bootstrap_repo: str | None) -> None:
 
 
 @main.command()
-@click.option("--gist", "gist_id", required=True, help="Gist ID of the orchestration run")
+@click.option("--run", "run_id", required=True, help="Run ID of the orchestration run")
 @click.option("--watch", is_flag=True, help="Enable live polling dashboard")
-def status(gist_id: str, watch: bool) -> None:
+def status(run_id: str, watch: bool) -> None:
     """
-    Show orchestration state from a run Gist.
-    Required options: --gist.
-    Quick start: cursor-orch status --gist <gist_id>
-    Automation: GH_TOKEN=... cursor-orch status --gist <gist_id> --watch
+    Show orchestration state from a run.
+    Required options: --run.
+    Quick start: cursor-orch status --run <run_id>
+    Automation: BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo GH_TOKEN=... cursor-orch status --run <run_id> --watch
     """
     env = _require_env_values(
         names=("GH_TOKEN",),
@@ -489,23 +498,23 @@ def status(gist_id: str, watch: bool) -> None:
         what_happened="status requires GitHub access to read orchestration state.",
         next_step="Set GH_TOKEN and rerun status.",
         alternative="Export GH_TOKEN inline in script execution.",
-        example="GH_TOKEN=... cursor-orch status --gist <gist_id>",
+        example="GH_TOKEN=... cursor-orch status --run <run_id>",
         exit_code=1,
     )
     gh_token = env["GH_TOKEN"]
-    gist_client = GistClient(token=gh_token)
+    repo_store = _make_repo_store(gh_token)
 
     try:
-        content = gist_client.read_file(gist_id, "state.json")
+        content = repo_store.read_file(run_id, "state.json")
     except Exception:
         _fail(
             code="STATUS-002",
             severity="ERROR",
             title="Run state is unavailable",
-            what_happened="The provided Gist ID is invalid or inaccessible with current token.",
-            next_step="Verify --gist value and token scope.",
-            alternative="Store and reuse the Gist ID emitted by run output.",
-            example="cursor-orch status --gist <saved_gist_id>",
+            what_happened="The provided run ID is invalid or inaccessible with current token.",
+            next_step="Verify --run value and token scope.",
+            alternative="Store and reuse the run ID emitted by run output.",
+            example="cursor-orch status --run <saved_run_id>",
             exit_code=2,
         )
 
@@ -514,8 +523,8 @@ def status(gist_id: str, watch: bool) -> None:
             code="STATUS-003",
             severity="ERROR",
             title="Missing state.json in run artifact",
-            what_happened="The Gist does not contain orchestration state metadata.",
-            next_step="Confirm this Gist comes from a valid run command.",
+            what_happened="The run branch does not contain orchestration state metadata.",
+            next_step="Confirm this run ID comes from a valid run command.",
             alternative="Rerun orchestration to regenerate artifacts.",
             example="cursor-orch run --config ./orchestrator.yaml",
             exit_code=2,
@@ -523,16 +532,16 @@ def status(gist_id: str, watch: bool) -> None:
 
     state = deserialize(content)
 
-    config_str = gist_client.read_file(gist_id, "config.yaml")
+    config_str = repo_store.read_file(run_id, "config.yaml")
     if not config_str:
         _fail(
             code="STATUS-004",
             severity="ERROR",
             title="Missing or invalid config snapshot",
             what_happened="status could not load config.yaml from the run artifact.",
-            next_step="Use a valid run-generated Gist or rerun orchestration.",
+            next_step="Use a valid run-generated run ID or rerun orchestration.",
             alternative="Regenerate run artifacts in automation before polling status.",
-            example="cursor-orch run --config ./orchestrator.yaml && cursor-orch status --gist <gist_id>",
+            example="cursor-orch run --config ./orchestrator.yaml && cursor-orch status --run <run_id>",
             exit_code=2,
         )
 
@@ -544,33 +553,33 @@ def status(gist_id: str, watch: bool) -> None:
             severity="ERROR",
             title="Missing or invalid config snapshot",
             what_happened="status could not load config.yaml from the run artifact.",
-            next_step="Use a valid run-generated Gist or rerun orchestration.",
+            next_step="Use a valid run-generated run ID or rerun orchestration.",
             alternative="Regenerate run artifacts in automation before polling status.",
-            example="cursor-orch run --config ./orchestrator.yaml && cursor-orch status --gist <gist_id>",
+            example="cursor-orch run --config ./orchestrator.yaml && cursor-orch status --run <run_id>",
             exit_code=2,
         )
 
     if watch:
         _print_next_actions(
-            f"Keep watching this run: cursor-orch status --gist {gist_id} --watch",
-            f"Inspect orchestrator conversation: cursor-orch logs --gist {gist_id}",
-            f"Request a stop if needed: cursor-orch stop --gist {gist_id}",
+            f"Keep watching this run: cursor-orch status --run {run_id} --watch",
+            f"Inspect orchestrator conversation: cursor-orch logs --run {run_id}",
+            f"Request a stop if needed: cursor-orch stop --run {run_id}",
         )
-        render_live(gist_client, gist_id, config)
+        render_live(repo_store, run_id, config)
         return
 
-    events = read_events(gist_client, gist_id)
+    events = read_events(repo_store, run_id)
     render_snapshot(state, config, events)
     _print_next_actions(
-        f"Watch live updates: cursor-orch status --gist {gist_id} --watch",
-        f"Inspect logs: cursor-orch logs --gist {gist_id}",
+        f"Watch live updates: cursor-orch status --run {run_id} --watch",
+        f"Inspect logs: cursor-orch logs --run {run_id}",
     )
     if state.status == "running":
-        _print_next_actions(f"Request stop when needed: cursor-orch stop --gist {gist_id}")
+        _print_next_actions(f"Request stop when needed: cursor-orch stop --run {run_id}")
     if state.status == "failed":
         _print_next_actions(
             "Re-run with validated configuration: cursor-orch run --config ./orchestrator.yaml",
-            f"Fetch conversation details: cursor-orch logs --gist {gist_id}",
+            f"Fetch conversation details: cursor-orch logs --run {run_id}",
         )
 
     if state.status in ("completed", "running"):
@@ -580,13 +589,13 @@ def status(gist_id: str, watch: bool) -> None:
 
 
 @main.command()
-@click.option("--gist", "gist_id", required=True, help="Gist ID of the orchestration run")
-def stop(gist_id: str) -> None:
+@click.option("--run", "run_id", required=True, help="Run ID of the orchestration run")
+def stop(run_id: str) -> None:
     """
     Request a stop signal for a running orchestration.
-    Required options: --gist.
-    Quick start: cursor-orch stop --gist <gist_id>
-    Automation: CURSOR_API_KEY=... GH_TOKEN=... cursor-orch stop --gist <gist_id>
+    Required options: --run.
+    Quick start: cursor-orch stop --run <run_id>
+    Automation: BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo CURSOR_API_KEY=... GH_TOKEN=... cursor-orch stop --run <run_id>
     """
     env = _require_env_values(
         names=("CURSOR_API_KEY", "GH_TOKEN"),
@@ -596,38 +605,37 @@ def stop(gist_id: str) -> None:
         what_happened="stop requires GH_TOKEN and may require CURSOR_API_KEY to stop agent execution.",
         next_step="Set required variables and retry stop.",
         alternative="Provide env vars inline for one-shot stop.",
-        example="CURSOR_API_KEY=... GH_TOKEN=... cursor-orch stop --gist <gist_id>",
+        example="CURSOR_API_KEY=... GH_TOKEN=... cursor-orch stop --run <run_id>",
         exit_code=1,
     )
     cursor_api_key = env["CURSOR_API_KEY"]
     gh_token = env["GH_TOKEN"]
 
-    gist_client = GistClient(token=gh_token)
+    repo_store = _make_repo_store(gh_token)
 
-    content = gist_client.read_file(gist_id, "state.json")
+    content = repo_store.read_file(run_id, "state.json")
     if not content:
         _fail(
             code="STOP-002",
             severity="ERROR",
             title="Cannot resolve run state for stop",
-            what_happened="state.json was not found in the provided Gist.",
-            next_step="Confirm the Gist ID belongs to a valid orchestration run.",
-            alternative="Save Gist ID from run output and pass it directly.",
-            example="cursor-orch stop --gist <saved_gist_id>",
+            what_happened="state.json was not found in the provided run.",
+            next_step="Confirm the run ID belongs to a valid orchestration run.",
+            alternative="Save run ID from run output and pass it directly.",
+            example="cursor-orch stop --run <saved_run_id>",
             exit_code=1,
         )
 
     state = deserialize(content)
 
-    import json
     from datetime import datetime, timezone
 
     stop_payload = json.dumps({
         "requested_at": datetime.now(timezone.utc).isoformat(),
         "requested_by": "cli",
     })
-    console.print("Writing stop request to Gist...")
-    gist_client.write_file(gist_id, "stop-requested.json", stop_payload)
+    console.print("Writing stop request to run branch...")
+    repo_store.write_file(run_id, "stop-requested.json", stop_payload)
 
     if state.orchestrator_agent_id:
         console.print(f"Stopping orchestrator agent {state.orchestrator_agent_id}...")
@@ -643,25 +651,25 @@ def stop(gist_id: str) -> None:
                 what_happened="stop-requested.json was written but direct agent stop call failed.",
                 next_step="Monitor run status to confirm halt on next loop.",
                 alternative="Poll status in a script until state changes.",
-                example="cursor-orch status --gist <gist_id> --watch",
+                example="cursor-orch status --run <run_id> --watch",
             )
 
     console.print("Stop requested. The orchestrator will halt on its next loop iteration.")
     _print_next_actions(
-        f"Confirm stop completion: cursor-orch status --gist {gist_id} --watch",
-        f"Inspect latest orchestrator logs: cursor-orch logs --gist {gist_id}",
+        f"Confirm stop completion: cursor-orch status --run {run_id} --watch",
+        f"Inspect latest orchestrator logs: cursor-orch logs --run {run_id}",
     )
 
 
 @main.command()
-@click.option("--gist", "gist_id", required=True, help="Gist ID of the orchestration run")
+@click.option("--run", "run_id", required=True, help="Run ID of the orchestration run")
 @click.option("--task", "task_id", default=None, help="Task ID to fetch logs for")
-def logs(gist_id: str, task_id: str | None) -> None:
+def logs(run_id: str, task_id: str | None) -> None:
     """
     Print orchestrator or task conversation logs for a run.
-    Required options: --gist.
-    Quick start: cursor-orch logs --gist <gist_id>
-    Automation: CURSOR_API_KEY=... GH_TOKEN=... cursor-orch logs --gist <gist_id> --task <task_id>
+    Required options: --run.
+    Quick start: cursor-orch logs --run <run_id>
+    Automation: BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo CURSOR_API_KEY=... GH_TOKEN=... cursor-orch logs --run <run_id> --task <task_id>
     """
     env = _require_env_values(
         names=("CURSOR_API_KEY", "GH_TOKEN"),
@@ -671,25 +679,25 @@ def logs(gist_id: str, task_id: str | None) -> None:
         what_happened="logs needs GH_TOKEN for state and CURSOR_API_KEY for conversation fetch.",
         next_step="Set required variables and retry logs.",
         alternative="Pass env vars inline in scripts.",
-        example="CURSOR_API_KEY=... GH_TOKEN=... cursor-orch logs --gist <gist_id>",
+        example="CURSOR_API_KEY=... GH_TOKEN=... cursor-orch logs --run <run_id>",
         exit_code=1,
     )
     cursor_api_key = env["CURSOR_API_KEY"]
     gh_token = env["GH_TOKEN"]
 
-    gist_client = GistClient(token=gh_token)
+    repo_store = _make_repo_store(gh_token)
     cursor_client = CursorClient(api_key=cursor_api_key)
 
-    content = gist_client.read_file(gist_id, "state.json")
+    content = repo_store.read_file(run_id, "state.json")
     if not content:
         _fail(
             code="LOGS-002",
             severity="ERROR",
             title="Cannot load run state for logs",
-            what_happened="state.json was not found in the provided Gist.",
-            next_step="Verify the Gist ID from run output.",
-            alternative="Persist gist IDs in automation metadata.",
-            example="cursor-orch logs --gist <saved_gist_id>",
+            what_happened="state.json was not found in the provided run.",
+            next_step="Verify the run ID from run output.",
+            alternative="Persist run IDs in automation metadata.",
+            example="cursor-orch logs --run <saved_run_id>",
             exit_code=1,
         )
 
@@ -705,7 +713,7 @@ def logs(gist_id: str, task_id: str | None) -> None:
                 what_happened="The supplied --task value does not match any task id in this run.",
                 next_step="Inspect status output to identify valid task ids.",
                 alternative="Parse task ids from state.json before calling logs.",
-                example="cursor-orch logs --gist <gist_id> --task <valid_task_id>",
+                example="cursor-orch logs --run <run_id> --task <valid_task_id>",
                 exit_code=1,
             )
         if not agent.agent_id:
@@ -716,7 +724,7 @@ def logs(gist_id: str, task_id: str | None) -> None:
                 what_happened=f"The task exists but no agent id has been assigned (status: {agent.status}).",
                 next_step="Wait for scheduling and check status again.",
                 alternative="Poll status before requesting task logs.",
-                example="cursor-orch status --gist <gist_id> --watch",
+                example="cursor-orch status --run <run_id> --watch",
             )
             sys.exit(0)
         target_agent_id = agent.agent_id
@@ -744,7 +752,7 @@ def logs(gist_id: str, task_id: str | None) -> None:
             what_happened=f"The conversation API request failed for the target agent: {exc}.",
             next_step="Verify CURSOR_API_KEY and agent id validity, then retry.",
             alternative="Retry with backoff in scripts.",
-            example="cursor-orch logs --gist <gist_id> --task <task_id>",
+            example="cursor-orch logs --run <run_id> --task <task_id>",
             exit_code=1,
         )
 
@@ -756,7 +764,7 @@ def logs(gist_id: str, task_id: str | None) -> None:
             what_happened="The target conversation exists but has no messages.",
             next_step="Wait briefly and request logs again.",
             alternative="Poll logs with interval in automation.",
-            example="while true; do cursor-orch logs --gist <gist_id>; sleep 15; done",
+            example="while true; do cursor-orch logs --run <run_id>; sleep 15; done",
         )
         return
 
@@ -764,7 +772,58 @@ def logs(gist_id: str, task_id: str | None) -> None:
         role_style = "bold cyan" if msg.role == "user" else "bold green"
         console.print(f"[{role_style}][{msg.role}][/{role_style}] {msg.text}")
         console.print()
-    _print_next_actions(f"Refresh run state: cursor-orch status --gist {gist_id}")
+    _print_next_actions(f"Refresh run state: cursor-orch status --run {run_id}")
+
+
+@main.command()
+@click.option("--older-than", "older_than_days", default=7, type=int, show_default=True, help="Delete branches older than N days")
+@click.option("--dry-run", is_flag=True, help="List branches to delete without actually deleting them")
+def cleanup(older_than_days: int, dry_run: bool) -> None:
+    """
+    Delete old run branches from the bootstrap repo.
+    Required env: GH_TOKEN, BOOTSTRAP_OWNER, BOOTSTRAP_REPO.
+    Quick start: cursor-orch cleanup --older-than 7 --dry-run
+    Automation: GH_TOKEN=... BOOTSTRAP_OWNER=... BOOTSTRAP_REPO=... cursor-orch cleanup
+    """
+    env = _require_env_values(
+        names=("GH_TOKEN",),
+        code="CLEANUP-001",
+        severity="FATAL",
+        title="Missing GH_TOKEN",
+        what_happened="cleanup requires GitHub access to list and delete run branches.",
+        next_step="Set GH_TOKEN and rerun.",
+        alternative="Export GH_TOKEN inline.",
+        example="GH_TOKEN=... BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
+        exit_code=1,
+    )
+    gh_token = env["GH_TOKEN"]
+    owner = _get_env("BOOTSTRAP_OWNER", command="cursor-orch cleanup", command_example="BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup")
+    repo = _get_env("BOOTSTRAP_REPO", command="cursor-orch cleanup", command_example="BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup")
+
+    repo_store = RepoStoreClient(token=gh_token, owner=owner, repo=repo)
+    branches = repo_store.list_run_branches()
+
+    if not branches:
+        console.print("No run branches found.")
+        return
+
+    if older_than_days != 7:
+        console.print(f"Note: age-based filtering (--older-than {older_than_days}) is not yet implemented. Showing all branches.")
+
+    if dry_run:
+        console.print(f"Found {len(branches)} run branches (dry run - not deleting):")
+        for branch in branches:
+            console.print(f"  - {branch}")
+        return
+
+    deleted = 0
+    for branch in branches:
+        run_id = branch.removeprefix("run/")
+        repo_store.delete_run_branch(run_id)
+        console.print(f"Deleted branch: {branch}")
+        deleted += 1
+
+    console.print(f"Deleted {deleted} run branch(es).")
 
 
 @main.group(name="config")
