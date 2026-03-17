@@ -553,9 +553,9 @@ def _run_planning_phase(
     )
     try:
         gh_token = os.environ["GH_TOKEN"]
-        planner_prompt = build_planner_prompt(config, run_id, gh_token)
-
         gh_user = _resolve_github_username(gh_token)
+        planner_prompt = build_planner_prompt(config, run_id, gh_token, gh_user, config.bootstrap_repo_name)
+
         bootstrap_url = f"https://github.com/{gh_user}/{config.bootstrap_repo_name}"
 
         cursor_client.launch_agent(

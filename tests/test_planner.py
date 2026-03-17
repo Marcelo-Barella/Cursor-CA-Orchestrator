@@ -119,7 +119,7 @@ def test_parse_task_plan_rejects_new_when_no_create_repo_tasks():
             }
         ]
     })
-    with pytest.raises(ValueError, match="does not depend on a create_repo task"):
+    with pytest.raises(ValueError, match="no create_repo task exists in the plan"):
         parse_task_plan(plan, config)
 
 
@@ -155,7 +155,7 @@ def test_parse_task_plan_rejects_unresolvable_new_when_multiple_create_repo_task
             },
         ]
     })
-    with pytest.raises(ValueError, match="does not depend on a create_repo task"):
+    with pytest.raises(ValueError, match="could not be matched to any of the"):
         parse_task_plan(plan, config)
 
 
@@ -245,8 +245,46 @@ def test_parse_task_plan_rejects_ambiguous_transitive_create_repo_dependency():
             },
         ]
     })
-    with pytest.raises(ValueError, match="does not depend on a create_repo task"):
+    with pytest.raises(ValueError, match="could not be matched to any of the"):
         parse_task_plan(plan, config)
+
+
+def test_parse_task_plan_matches_scaffold_suffix_to_implementation_task():
+    config = _make_config(repositories={
+        "backend": RepoConfig(url="https://github.com/o/backend", ref="main"),
+        "__bootstrap__": RepoConfig(url="https://github.com/o/bootstrap", ref="main"),
+    })
+    plan = json.dumps({
+        "tasks": [
+            {
+                "id": "backend-scaffold",
+                "repo": "__new__",
+                "prompt": "Create backend repo",
+                "depends_on": [],
+                "timeout_minutes": 30,
+                "create_repo": True,
+            },
+            {
+                "id": "frontend-scaffold",
+                "repo": "__new__",
+                "prompt": "Create frontend repo",
+                "depends_on": [],
+                "timeout_minutes": 30,
+                "create_repo": True,
+            },
+            {
+                "id": "frontend-dashboard-page",
+                "repo": "__new__",
+                "prompt": "Build the dashboard page",
+                "depends_on": [],
+                "timeout_minutes": 30,
+            },
+        ]
+    })
+    tasks = parse_task_plan(plan, config)
+    dash = next(t for t in tasks if t.id == "frontend-dashboard-page")
+    assert "frontend-scaffold" in dash.depends_on
+    assert "backend-scaffold" not in dash.depends_on
 
 
 def test_planner_prompt_references_gh_cli():

@@ -224,12 +224,59 @@ def parse_task_plan(plan_json: str, config: OrchestratorConfig) -> list[TaskConf
             if len(create_repo_task_ids) == 1:
                 task.depends_on.append(next(iter(create_repo_task_ids)))
                 continue
+            if not create_repo_task_ids:
+                raise ValueError(
+                    f"Task '{task.id}' uses '__new__' but no create_repo task exists in the plan. "
+                    "The planner must include a task with 'create_repo: true' for new repositories."
+                )
+            matched = _match_create_repo_by_name(task.id, create_repo_task_ids)
+            if matched:
+                task.depends_on.append(matched)
+                logger.info(
+                    "Auto-wired task '%s' to create_repo task '%s' via name matching",
+                    task.id, matched,
+                )
+                continue
             raise ValueError(
-                f"Task '{task.id}' uses '__new__' but does not depend on a create_repo task. "
-                "Add a dependency on the task that creates the target repository."
+                f"Task '{task.id}' uses '__new__' but could not be matched to any of the "
+                f"{len(create_repo_task_ids)} create_repo tasks: {sorted(create_repo_task_ids)}. "
+                "Add an explicit 'depends_on' referencing the correct create_repo task."
             )
 
     return tasks
+
+
+_CREATE_PREFIXES = ("create-", "setup-", "init-", "new-", "bootstrap-")
+_CREATE_SUFFIXES = ("-scaffold", "-repo", "-setup", "-init", "-bootstrap", "-create", "-new")
+
+
+def _strip_create_prefix(name: str) -> str:
+    for p in _CREATE_PREFIXES:
+        if name.startswith(p):
+            return name[len(p):]
+    return name
+
+
+def _strip_create_suffix(name: str) -> str:
+    for s in _CREATE_SUFFIXES:
+        if name.endswith(s):
+            return name[: -len(s)]
+    return name
+
+
+def _match_create_repo_by_name(task_id: str, create_repo_task_ids: set[str]) -> str | None:
+    task_base = _strip_create_prefix(task_id)
+    candidates: list[str] = []
+    for cid in create_repo_task_ids:
+        create_base = _strip_create_suffix(_strip_create_prefix(cid))
+        if create_base == task_base:
+            candidates.append(cid)
+            continue
+        if task_base.startswith(create_base + "-") or create_base.startswith(task_base + "-"):
+            candidates.append(cid)
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
 
 
 def _collect_upstream_create_repo_ids(
