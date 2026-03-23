@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
-import chalk from "chalk";
 import {
   COMMANDS,
   cmdHelp,
@@ -14,6 +13,8 @@ import {
 } from "./commands.js";
 import type { OrchestratorConfig } from "./config/types.js";
 import { Session } from "./session.js";
+import { readVersion } from "./version.js";
+import { tui } from "./tui/style.js";
 
 const NON_MUTATION = new Set(["help", "config", "repos", "run"]);
 
@@ -70,7 +71,7 @@ async function runGuidedSetup(session: Session, rl: readline.Interface): Promise
       } else {
         const err = validateModelValue(text);
         if (err) {
-          console.log(chalk.red(err));
+          console.log(tui.red(err));
           continue;
         }
         value = text;
@@ -226,19 +227,19 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
     terminal: true,
   });
 
-  console.log(chalk.bold("cursor-orch v0.2.0"));
-  console.log(chalk.dim("Type /help for available commands."));
-  console.log(chalk.dim("Next: complete guided setup (or set prompt via /prompt), then run /run."));
-  console.log(chalk.dim("Before /run, ensure CURSOR_API_KEY and GH_TOKEN are set (copy .env.example to .env)."));
+  console.log(tui.bold(`cursor-orch v${readVersion()}`));
+  console.log(tui.dim("Type /help for available commands."));
+  console.log(tui.dim("Next: complete guided setup (or set prompt via /prompt), then run /run."));
+  console.log(tui.dim("Before /run, ensure CURSOR_API_KEY and GH_TOKEN are set (copy .env.example to .env)."));
 
   const resumed = session.loadSession();
   if (resumed) {
-    console.log(chalk.green("Resumed previous session. Type /config to review."));
+    console.log(tui.green("Resumed previous session. Type /config to review."));
   }
 
   let directCommandsEntered = false;
   if (session.setupState().active) {
-    console.log(chalk.yellow(`Resuming guided setup from step: ${session.setupState().step}.`));
+    console.log(tui.yellow(`Resuming guided setup from step: ${session.setupState().step}.`));
   }
   const shouldRunGuided =
     session.shouldResumeGuidedSetup() || (!session.hasRequiredGuidedValues() && !directCommandsEntered);
@@ -273,7 +274,7 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
         continue;
       }
       if (!COMMANDS[cmd]) {
-        console.log(chalk.red(`Unknown command: /${cmd}. Type /help for available commands.`));
+        console.log(tui.red(`Unknown command: /${cmd}. Type /help for available commands.`));
         continue;
       }
       if (cmd === "prompt") {
@@ -296,7 +297,7 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
         const result = cmdRun(session);
         if ("errors" in result) {
           for (const err of result.errors) {
-            console.log(chalk.red(`Error: ${err}`));
+            console.log(tui.red(`Error: ${err}`));
           }
           continue;
         }

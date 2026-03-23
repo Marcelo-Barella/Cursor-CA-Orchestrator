@@ -1,6 +1,4 @@
 #!/usr/bin/env bun
-import chalk from "chalk";
-import { readFileSync } from "node:fs";
 import { Crust } from "@crustjs/core";
 import { helpPlugin, versionPlugin } from "@crustjs/plugins";
 import { CursorClient } from "./api/cursor-client.js";
@@ -21,11 +19,9 @@ import { loadEnvFile } from "./env.js";
 import { runRepl } from "./repl.js";
 import { renderLive, renderSnapshot } from "./dashboard.js";
 import { randomUUID } from "node:crypto";
-
-function readVersion(): string {
-  const url = new URL("../package.json", import.meta.url);
-  return (JSON.parse(readFileSync(url, "utf8")) as { version: string }).version;
-}
+import { readVersion } from "./version.js";
+import { withOrchestratorLaunchProgress } from "./tui/progress.js";
+import { severityStyle, tui } from "./tui/style.js";
 
 function printNextActions(...actions: string[]): void {
   if (!actions.length) return;
@@ -92,8 +88,9 @@ function requireEnv(names: string[], opts: Parameters<typeof fail>[0]): Record<s
 function printFindings(findings: DiagnosticFinding[]): void {
   for (const finding of findings) {
     const level = finding.severity.toUpperCase();
-    const style =
-      finding.severity === "error" ? chalk.red : finding.severity === "warn" ? chalk.yellow : chalk.cyan;
+    const sev =
+      finding.severity === "error" ? "error" : finding.severity === "warn" ? "warn" : "info";
+    const style = severityStyle(sev);
     console.log(style(`${level} ${finding.code}`), finding.message);
     console.log(`Field: ${finding.field}`);
     console.log(`Source of truth: ${sourceOfTruthForField(finding.field)}`);
@@ -292,7 +289,6 @@ async function runOrchestrationCli(
   const cursorClient = new CursorClient(cursorApiKey);
   const repoUrl = `https://github.com/${owner}/${repoInfo.name}`;
 
-  console.log(`Launching orchestrator agent against ${owner}/${repoInfo.name}...`);
   const launchPrompt = buildOrchestrationLaunchPrompt({
     runId: orchestrationId,
     ghToken,
@@ -301,13 +297,19 @@ async function runOrchestrationCli(
     bootstrapOwner: owner,
     bootstrapRepoName: repoInfo.name,
   });
-  const agent = await cursorClient.launchAgent(
-    launchPrompt,
-    repoUrl,
-    runtimeRef,
-    config.model,
-    `cursor-orch-run-${orchestrationId}`,
-    false,
+  const agent = await withOrchestratorLaunchProgress(
+    `Launching orchestrator agent (${owner}/${repoInfo.name})`,
+    async (updateMessage) => {
+      updateMessage("Calling Cursor API…");
+      return cursorClient.launchAgent(
+        launchPrompt,
+        repoUrl,
+        runtimeRef,
+        config.model,
+        `cursor-orch-run-${orchestrationId}`,
+        false,
+      );
+    },
   );
   console.log(`Orchestrator ${agent.id} ${agent.status}.`);
 
@@ -660,7 +662,7 @@ function buildCli() {
         return;
       }
       for (const msg of messages) {
-        const roleStyle = msg.role === "user" ? chalk.bold.cyan : chalk.bold.green;
+        const roleStyle = msg.role === "user" ? (t: string) => tui.bold.cyan(t) : (t: string) => tui.bold.green(t);
         console.log(roleStyle(`[${msg.role}]`), msg.text);
         console.log();
       }

@@ -1,7 +1,7 @@
-import chalk from "chalk";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import type { Session } from "./session.js";
+import { tui } from "./tui/style.js";
 
 export interface CommandInfo {
   name: string;
@@ -64,64 +64,64 @@ export function setupSummaryLines(session: Session): string[] {
 
 export function cmdName(session: Session, name: string): string {
   session.setName(name);
-  return `${chalk.green("Session name set to")} ${chalk.bold(name)}`;
+  return `${tui.green("Session name set to")} ${tui.bold(name)}`;
 }
 
 export function cmdModel(session: Session, model: string): string {
   const error = validateModelValue(model);
   if (error) {
-    return chalk.red(error);
+    return tui.red(error);
   }
   session.setModel(model);
-  return `${chalk.green("Model set to")} ${chalk.bold(model)}`;
+  return `${tui.green("Model set to")} ${tui.bold(model)}`;
 }
 
 export function cmdRepo(session: Session, alias: string, url: string, ref = "main"): string {
   const replaced = session.addRepo(alias, url, ref);
   const parts: string[] = [];
   if (replaced) {
-    parts.push(`${chalk.red("Replacing existing repo")} ${chalk.bold(alias)}`);
+    parts.push(`${tui.red("Replacing existing repo")} ${tui.bold(alias)}`);
   }
-  parts.push(`${chalk.green("Repo added:")} ${chalk.bold(alias)} -> ${url} ${chalk.dim(`(ref: ${ref})`)}`);
+  parts.push(`${tui.green("Repo added:")} ${tui.bold(alias)} -> ${url} ${tui.dim(`(ref: ${ref})`)}`);
   return parts.join("\n");
 }
 
 export function cmdRepoRemove(session: Session, alias: string): string {
   const removed = session.removeRepo(alias);
   if (removed) {
-    return `${chalk.green("Repo removed:")} ${chalk.bold(alias)}`;
+    return `${tui.green("Repo removed:")} ${tui.bold(alias)}`;
   }
-  return `${chalk.red("Repo not found:")} ${chalk.bold(alias)}`;
+  return `${tui.red("Repo not found:")} ${tui.bold(alias)}`;
 }
 
 export function cmdRepos(session: Session): string {
   const repos = session.config.repositories;
   if (!Object.keys(repos).length) {
-    return chalk.dim("No repositories configured.");
+    return tui.dim("No repositories configured.");
   }
-  const lines = [chalk.bold("Repositories:")];
+  const lines = [tui.bold("Repositories:")];
   for (const [alias, repo] of Object.entries(repos)) {
-    lines.push(`  ${chalk.bold(alias)} -> ${repo.url} ${chalk.dim(`(ref: ${repo.ref})`)}`);
+    lines.push(`  ${tui.bold(alias)} -> ${repo.url} ${tui.dim(`(ref: ${repo.ref})`)}`);
   }
   return lines.join("\n");
 }
 
 export function cmdPrompt(): string {
-  return chalk.dim("Enter your prompt (multi-line). Submit an empty line to finish:");
+  return tui.dim("Enter your prompt (multi-line). Submit an empty line to finish:");
 }
 
 export function cmdPromptSet(session: Session, text: string): string {
   const error = validatePromptValue(text);
   if (error) {
-    return chalk.red(error);
+    return tui.red(error);
   }
   session.setPrompt(text);
-  return `${chalk.green("Prompt set")} ${chalk.dim(`(${text.length} characters)`)}`;
+  return `${tui.green("Prompt set")} ${tui.dim(`(${text.length} characters)`)}`;
 }
 
 export function cmdBranchPrefix(session: Session, prefix: string): string {
   session.setBranchPrefix(prefix);
-  return `${chalk.green("Branch prefix set to")} ${chalk.bold(prefix)}`;
+  return `${tui.green("Branch prefix set to")} ${tui.bold(prefix)}`;
 }
 
 export function cmdAutoPr(session: Session, toggle?: string): string {
@@ -133,62 +133,62 @@ export function cmdAutoPr(session: Session, toggle?: string): string {
   } else if (toggle.toLowerCase() === "off") {
     newState = false;
   } else {
-    return `${chalk.red("Invalid value:")} ${toggle}. Use ${chalk.bold("on")} or ${chalk.bold("off")}.`;
+    return `${tui.red("Invalid value:")} ${toggle}. Use ${tui.bold("on")} or ${tui.bold("off")}.`;
   }
   session.setAutoPr(newState);
-  const stateLabel = newState ? chalk.green("on") : chalk.red("off");
-  return `${chalk.green("Auto PR:")} ${stateLabel}`;
+  const stateLabel = newState ? tui.green("on") : tui.red("off");
+  return `${tui.green("Auto PR:")} ${stateLabel}`;
 }
 
 export function cmdBootstrapRepo(session: Session, name: string): string {
   session.setBootstrapRepo(name);
-  return `${chalk.green("Bootstrap repo set to")} ${chalk.bold(name)}`;
+  return `${tui.green("Bootstrap repo set to")} ${tui.bold(name)}`;
 }
 
 export function cmdConfig(session: Session): string {
   const cfg = session.config;
   const preview = cfg.prompt.length > 80 ? `${cfg.prompt.slice(0, 80)}...` : cfg.prompt;
   const repoCount = Object.keys(cfg.repositories).length;
-  const autoPr = cfg.target.auto_create_pr ? chalk.green("on") : chalk.red("off");
+  const autoPr = cfg.target.auto_create_pr ? tui.green("on") : tui.red("off");
   return [
-    chalk.bold("Current Configuration:"),
-    `  ${chalk.bold("Name:")}           ${cfg.name}`,
-    `  ${chalk.bold("Model:")}          ${cfg.model}`,
-    `  ${chalk.bold("Repositories:")}   ${repoCount}`,
-    `  ${chalk.bold("Prompt:")}         ${preview || chalk.dim("not set")}`,
-    `  ${chalk.bold("Branch prefix:")}  ${cfg.target.branch_prefix}`,
-    `  ${chalk.bold("Auto PR:")}        ${autoPr}`,
-    `  ${chalk.bold("Bootstrap repo:")} ${cfg.bootstrap_repo_name}`,
+    tui.bold("Current Configuration:"),
+    `  ${tui.bold("Name:")}           ${cfg.name}`,
+    `  ${tui.bold("Model:")}          ${cfg.model}`,
+    `  ${tui.bold("Repositories:")}   ${repoCount}`,
+    `  ${tui.bold("Prompt:")}         ${preview || tui.dim("not set")}`,
+    `  ${tui.bold("Branch prefix:")}  ${cfg.target.branch_prefix}`,
+    `  ${tui.bold("Auto PR:")}        ${autoPr}`,
+    `  ${tui.bold("Bootstrap repo:")} ${cfg.bootstrap_repo_name}`,
   ].join("\n");
 }
 
 export function cmdSave(session: Session, savePath?: string): string {
   if (savePath) {
     session.save(savePath);
-    return `${chalk.green("Config saved to")} ${chalk.bold(savePath)}`;
+    return `${tui.green("Config saved to")} ${tui.bold(savePath)}`;
   }
   session.saveSession();
-  return chalk.green("Session saved.");
+  return tui.green("Session saved.");
 }
 
 export function cmdLoad(session: Session, loadPath: string): string {
   const target = path.resolve(loadPath);
   if (!existsSync(target)) {
-    return `${chalk.red("File not found:")} ${loadPath}`;
+    return `${tui.red("File not found:")} ${loadPath}`;
   }
   try {
     session.load(target);
   } catch (e) {
-    return `${chalk.red("Error loading config:")} ${e}`;
+    return `${tui.red("Error loading config:")} ${e}`;
   }
-  return `${chalk.green("Config loaded from")} ${chalk.bold(loadPath)}`;
+  return `${tui.green("Config loaded from")} ${tui.bold(loadPath)}`;
 }
 
 export function cmdHelp(): string {
-  const lines = [chalk.bold("Available Commands:"), ""];
+  const lines = [tui.bold("Available Commands:"), ""];
   for (const info of Object.values(COMMANDS)) {
-    lines.push(`  ${chalk.bold(info.usage)}`);
-    lines.push(`    ${chalk.dim(info.description)}`);
+    lines.push(`  ${tui.bold(info.usage)}`);
+    lines.push(`    ${tui.dim(info.description)}`);
   }
   return lines.join("\n");
 }
