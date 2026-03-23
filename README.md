@@ -1,14 +1,13 @@
 # cursor-orch
 
-A Python CLI that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, creates a per-run Gist as a coordination bulletin board, and launches an orchestrator Cloud Agent that manages worker agents targeting your repositories.
+A Node.js / TypeScript CLI that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, uses per-run branches on that repo as a coordination bulletin board, and launches an orchestrator Cloud Agent that manages worker agents targeting your repositories.
 
 ## Prerequisites
 
-- Python 3.11+
-- GitHub personal access token for `GH_TOKEN` with:
-  - `repo` scope for bootstrap repository creation and updates
-  - `gist` scope for per-run Gist operations
+- Node.js 20+
+- GitHub personal access token for `GH_TOKEN` with `repo` scope for bootstrap repository creation and updates
 - Cursor API key for `CURSOR_API_KEY`
+- For `status`, `logs`, and `stop` against an existing run, set `BOOTSTRAP_OWNER` and `BOOTSTRAP_REPO` to the GitHub owner and repository name of your bootstrap repo (same values used in the run output)
 
 ## Onboarding: Clone to First Run
 
@@ -27,15 +26,17 @@ Run one-command bootstrap:
 
 ```bash
 bash scripts/bootstrap.sh
-source .venv/bin/activate
 ```
 
 Expected smoke output includes:
 
 - `Bootstrapping environment`
-- `Installing cursor-orch in editable mode`
-- `Running smoke check: cursor-orch --help`
+- `Installing dependencies`
+- `Building cursor-orch`
+- `Running smoke check: node ./dist/cli.js --help`
 - `Bootstrap complete`
+
+The previous Python implementation is kept under `legacy-python/` for reference only.
 
 If bootstrap fails due to missing credentials, re-check `.env` values and token scopes in prerequisites.
 
@@ -50,10 +51,15 @@ Immediate next actions:
 ## Manual Install and Smoke
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
+npm install
+npm run build
+node ./dist/cli.js --help
+```
+
+Global install (optional):
+
+```bash
+npm install -g .
 cursor-orch --help
 ```
 
@@ -71,20 +77,20 @@ cursor-orch config doctor --strict
 cursor-orch run --config ./orchestrator.yaml
 
 # Check status of a running orchestration (one-shot)
-cursor-orch status --gist GIST_ID
+cursor-orch status --run RUN_ID
 
 # Watch live dashboard
-cursor-orch status --gist GIST_ID --watch
+cursor-orch status --run RUN_ID --watch
 
 # View agent conversation logs
-cursor-orch logs --gist GIST_ID
-cursor-orch logs --gist GIST_ID --task my-task-id
+cursor-orch logs --run RUN_ID
+cursor-orch logs --run RUN_ID --task my-task-id
 
 # Stop a running orchestration
-cursor-orch stop --gist GIST_ID
+cursor-orch stop --run RUN_ID
 ```
 
-After `cursor-orch run`, copy the printed Gist ID and use it with `status`, `logs`, and `stop`.
+After `cursor-orch run`, copy the printed run ID and use it with `status`, `logs`, and `stop`. Set `BOOTSTRAP_OWNER` and `BOOTSTRAP_REPO` to match your bootstrap repository.
 
 If a command fails, use this quick recovery path:
 
@@ -98,10 +104,10 @@ Core command discoverability and immediate next actions:
 
 | Command | Purpose | Immediate next action | Automation-oriented example |
 |---------|---------|-----------------------|-----------------------------|
-| `cursor-orch run --config ./orchestrator.yaml` | Start orchestration | `cursor-orch status --gist <gist_id> --watch` | `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch run --config /workspace/orchestrator.yaml --bootstrap-repo cursor-orch-bootstrap` |
-| `cursor-orch status --gist <gist_id>` | Read current run state | `cursor-orch logs --gist <gist_id>` | `GH_TOKEN=... cursor-orch status --gist <gist_id> --watch` |
-| `cursor-orch logs --gist <gist_id>` | Read orchestrator conversation | `cursor-orch status --gist <gist_id>` | `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch logs --gist <gist_id> --task <task_id>` |
-| `cursor-orch stop --gist <gist_id>` | Request graceful stop | `cursor-orch status --gist <gist_id> --watch` | `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch stop --gist <gist_id>` |
+| `cursor-orch run --config ./orchestrator.yaml` | Start orchestration | `cursor-orch status --run <run_id> --watch` | `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch run --config /workspace/orchestrator.yaml --bootstrap-repo cursor-orch-bootstrap` |
+| `cursor-orch status --run <run_id>` | Read current run state | `cursor-orch logs --run <run_id>` | `GH_TOKEN=... cursor-orch status --run <run_id> --watch` |
+| `cursor-orch logs --run <run_id>` | Read orchestrator conversation | `cursor-orch status --run <run_id>` | `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch logs --run <run_id> --task <task_id>` |
+| `cursor-orch stop --run <run_id>` | Request graceful stop | `cursor-orch status --run <run_id> --watch` | `CURSOR_API_KEY=... GH_TOKEN=... cursor-orch stop --run <run_id>` |
 
 Core command help:
 
@@ -240,13 +246,13 @@ target:
 ```
 User Terminal                     GitHub                          Cursor Cloud
 +------------+                +------------------+           +-------------------+
-| Local CLI  |---creates----->| Per-Run Gist     |<---r/w--->| Orchestrator      |
+| Local CLI  |---creates----->| Run branch       |<---r/w--->| Orchestrator      |
 |            |                | - config.yaml    |           | Cloud Agent       |
 |            |---ensures----->| - state.json     |           |   (runs loader    |
 |            |                | - summary.md     |           |    from bootstrap |
 |            |---launches---->| - manifest.json  |           |    repo, loads    |
-|            |                | - runtime__*.py  |           |    runtime from   |
-|            |---polls------->| - agent-*.json   |           |    Gist)          |
+|            |                | - dist/*.cjs     |           |    runtime from   |
+|            |---polls------->| - agent-*.json   |           |    run branch)    |
 +------------+                | - events.jsonl   |           |                   |
                               +------------------+           +---+---------------+
                               +------------------+               |
@@ -263,15 +269,15 @@ User Terminal                     GitHub                          Cursor Cloud
 
 ### Three Components
 
-1. **Local CLI** -- Runs in your terminal. Provides the interactive REPL, creates config, provisions the bootstrap repo, creates a per-run Gist with runtime code, launches the orchestrator agent, and provides a dashboard.
+1. **Local CLI** -- Runs in your terminal. Provides the interactive REPL, creates config, provisions the bootstrap repo, creates a per-run branch with runtime files, launches the orchestrator agent, and provides a dashboard.
 
-2. **Bootstrap Repo** -- A minimal private repo in your GitHub account (`cursor-orch-bootstrap`). Contains a loader script and a Cursor rule. The rule is dynamically generated before each run with credentials. The loader fetches and verifies runtime code from the Gist.
+2. **Bootstrap Repo** -- A minimal private repo in your GitHub account (`cursor-orch-bootstrap`). Contains Cursor rules and pinned runtime files on dedicated refs. The orchestrator agent runs `node dist/orchestrator-runtime.cjs` with environment variables pointing at the run branch.
 
-3. **Cloud Agents** -- The orchestrator agent runs against the bootstrap repo, executes the loader, and manages the task graph. Worker agents run against your target repositories, each receiving a self-contained prompt with task instructions and a Python helper to report results via the Gist.
+3. **Cloud Agents** -- The orchestrator agent runs against the bootstrap repo and manages the task graph. Worker agents run against your target repositories, each receiving a self-contained prompt with task instructions and shell steps to report results via the run branch.
 
-### Per-Run Gist
+### Per-Run Branch
 
-Each orchestration run creates a fresh private Gist that serves as a coordination bulletin board:
+Each orchestration run creates a branch `run/<run_id>` on the bootstrap repository that serves as a coordination bulletin board:
 
 - **CLI writes once:** config.yaml, runtime files, manifest
 - **Orchestrator writes:** state.json, summary.md, events.jsonl
@@ -285,7 +291,7 @@ Every file has exactly one writer. No concurrent writes to any file.
 - Maximum 20 tasks per orchestration run
 - Workers are fully isolated and cannot communicate with each other
 - Orchestration logic is reactive polling (30-second intervals), not event-driven
-- GitHub Gist size limits apply (10MB per file, ~300 files per Gist)
+- GitHub repository and API limits apply (file size, rate limits)
 - Runtime payload (all orchestration code) must be under 1MB combined
 - Worker output per task capped at 512KB with automatic truncation
 - Rate limits: GitHub API (5,000 req/hour), Cursor API (conservative estimates)

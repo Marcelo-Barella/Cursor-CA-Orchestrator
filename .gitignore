@@ -6,6 +6,7 @@ build/
 .eggs/
 .env
 .venv/
+node_modules/
 
 .cursor/
 coordination/
