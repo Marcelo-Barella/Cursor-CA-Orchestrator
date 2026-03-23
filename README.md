@@ -1,10 +1,11 @@
 # cursor-orch
 
-A Node.js / TypeScript CLI that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, uses per-run branches on that repo as a coordination bulletin board, and launches an orchestrator Cloud Agent that manages worker agents targeting your repositories.
+A TypeScript CLI (run the `cursor-orch` entrypoint with Bun) that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, uses per-run branches on that repo as a coordination bulletin board, and launches an orchestrator Cloud Agent that manages worker agents targeting your repositories.
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 20+ (for `npm run build` / tests)
+- [Bun](https://bun.sh) 1+ (required to run the `cursor-orch` CLI; Crust is Bun-native)
 - GitHub personal access token for `GH_TOKEN` with `repo` scope for bootstrap repository creation and updates
 - Cursor API key for `CURSOR_API_KEY`
 - For `status`, `logs`, and `stop` against an existing run, set `BOOTSTRAP_OWNER` and `BOOTSTRAP_REPO` to the GitHub owner and repository name of your bootstrap repo (same values used in the run output)
@@ -33,10 +34,8 @@ Expected smoke output includes:
 - `Bootstrapping environment`
 - `Installing dependencies`
 - `Building cursor-orch`
-- `Running smoke check: node ./dist/cli.js --help`
+- `Running smoke check: bun ./dist/cli.js --help`
 - `Bootstrap complete`
-
-The previous Python implementation is kept under `legacy-python/` for reference only.
 
 If bootstrap fails due to missing credentials, re-check `.env` values and token scopes in prerequisites.
 
@@ -53,7 +52,7 @@ Immediate next actions:
 ```bash
 npm install
 npm run build
-node ./dist/cli.js --help
+bun ./dist/cli.js --help
 ```
 
 Global install (optional):

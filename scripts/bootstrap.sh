@@ -8,6 +8,11 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v bun >/dev/null 2>&1; then
+  echo "Error: Bun is required for the cursor-orch CLI (https://bun.sh)"
+  exit 1
+fi
+
 echo "Installing dependencies"
 npm install
 
@@ -33,6 +38,6 @@ if [ -z "${GH_TOKEN:-}" ]; then
   exit 1
 fi
 
-echo "Running smoke check: npx cursor-orch --help"
-node ./dist/cli.js --help >/dev/null
+echo "Running smoke check: bun ./dist/cli.js --help"
+bun ./dist/cli.js --help >/dev/null
 echo "Bootstrap complete"

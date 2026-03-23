@@ -1,6 +1,8 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import chalk from "chalk";
-import { Command } from "commander";
+import { readFileSync } from "node:fs";
+import { Crust } from "@crustjs/core";
+import { helpPlugin, versionPlugin } from "@crustjs/plugins";
 import { CursorClient } from "./api/cursor-client.js";
 import { RepoStoreClient } from "./api/repo-store.js";
 import { ensureBootstrapRepo, BOOTSTRAP_ENTRYPOINT, BOOTSTRAP_INSTALL_COMMAND } from "./bootstrap.js";
@@ -19,6 +21,11 @@ import { loadEnvFile } from "./env.js";
 import { runRepl } from "./repl.js";
 import { renderLive, renderSnapshot } from "./dashboard.js";
 import { randomUUID } from "node:crypto";
+
+function readVersion(): string {
+  const url = new URL("../package.json", import.meta.url);
+  return (JSON.parse(readFileSync(url, "utf8")) as { version: string }).version;
+}
 
 function printNextActions(...actions: string[]): void {
   if (!actions.length) return;
@@ -332,17 +339,20 @@ async function runInteractive(): Promise<void> {
   await runOrchestrationCli(config, configYaml, env.CURSOR_API_KEY!, env.GH_TOKEN!, undefined);
 }
 
-async function main(): Promise<void> {
-  loadEnvFile();
-
-  const program = new Command();
-  program.name("cursor-orch").description("CLI for cursor-orch orchestration").version("0.2.0");
-
-  program
-    .command("run")
-    .option("--config <path>", "Path to config YAML")
-    .option("--bootstrap-repo <name>", "Bootstrap repo name")
-    .action(async (opts: { config?: string; bootstrapRepo?: string }) => {
+function buildCli() {
+  return new Crust("cursor-orch")
+    .meta({ description: "CLI for cursor-orch orchestration" })
+    .use(versionPlugin(readVersion()))
+    .use(helpPlugin())
+    .command("run", (cmd) =>
+      cmd
+        .meta({ description: "Run orchestration from validated config" })
+        .flags({
+          config: { type: "string", description: "Path to config YAML" },
+          bootstrapRepo: { type: "string", description: "Bootstrap repo name" },
+        })
+        .run(async ({ flags }) => {
+          const opts = { config: flags.config, bootstrapRepo: flags.bootstrapRepo };
       const resolution = resolveConfig(opts.config, opts.bootstrapRepo);
       const config = resolution.config;
       printResolutionSummary(resolution);
@@ -374,13 +384,17 @@ async function main(): Promise<void> {
           exitCode: 1,
         });
       }
-    });
-
-  program
-    .command("status")
-    .requiredOption("--run <id>", "Run ID")
-    .option("--watch", "Live dashboard")
-    .action(async (opts: { run: string; watch?: boolean }) => {
+        }),
+    )
+    .command("status", (cmd) =>
+      cmd
+        .meta({ description: "Show orchestration status for a run" })
+        .flags({
+          run: { type: "string", required: true, description: "Run ID" },
+          watch: { type: "boolean", description: "Live dashboard" },
+        })
+        .run(async ({ flags }) => {
+          const opts = { run: flags.run, watch: flags.watch };
       const env = requireEnv(["GH_TOKEN"], {
         code: "STATUS-001",
         severity: "FATAL",
@@ -474,12 +488,16 @@ async function main(): Promise<void> {
       } else if (state.status === "failed") {
         process.exit(1);
       }
-    });
-
-  program
-    .command("stop")
-    .requiredOption("--run <id>", "Run ID")
-    .action(async (opts: { run: string }) => {
+        }),
+    )
+    .command("stop", (cmd) =>
+      cmd
+        .meta({ description: "Request orchestration stop" })
+        .flags({
+          run: { type: "string", required: true, description: "Run ID" },
+        })
+        .run(async ({ flags }) => {
+          const opts = { run: flags.run };
       const env = requireEnv(["CURSOR_API_KEY", "GH_TOKEN"], {
         code: "STOP-001",
         severity: "FATAL",
@@ -534,13 +552,17 @@ async function main(): Promise<void> {
         `Confirm stop completion: cursor-orch status --run ${opts.run} --watch`,
         `Inspect latest orchestrator logs: cursor-orch logs --run ${opts.run}`,
       );
-    });
-
-  program
-    .command("logs")
-    .requiredOption("--run <id>", "Run ID")
-    .option("--task <id>", "Task ID")
-    .action(async (opts: { run: string; task?: string }) => {
+        }),
+    )
+    .command("logs", (cmd) =>
+      cmd
+        .meta({ description: "Fetch orchestrator or task conversation logs" })
+        .flags({
+          run: { type: "string", required: true, description: "Run ID" },
+          task: { type: "string", description: "Task ID" },
+        })
+        .run(async ({ flags }) => {
+          const opts = { run: flags.run, task: flags.task };
       const env = requireEnv(["CURSOR_API_KEY", "GH_TOKEN"], {
         code: "LOGS-001",
         severity: "FATAL",
@@ -643,13 +665,17 @@ async function main(): Promise<void> {
         console.log();
       }
       printNextActions(`Refresh run state: cursor-orch status --run ${opts.run}`);
-    });
-
-  program
-    .command("cleanup")
-    .option("--older-than <days>", "Delete branches older than N days", "7")
-    .option("--dry-run", "List branches without deleting")
-    .action(async (opts: { olderThan: string; dryRun?: boolean }) => {
+        }),
+    )
+    .command("cleanup", (cmd) =>
+      cmd
+        .meta({ description: "Delete old run branches on the bootstrap repo" })
+        .flags({
+          olderThan: { type: "string", description: "Delete branches older than N days", default: "7" },
+          dryRun: { type: "boolean", description: "List branches without deleting" },
+        })
+        .run(async ({ flags }) => {
+          const opts = { olderThan: flags.olderThan, dryRun: flags.dryRun };
       const env = requireEnv(["GH_TOKEN"], {
         code: "CLEANUP-001",
         severity: "FATAL",
@@ -705,45 +731,61 @@ async function main(): Promise<void> {
         deleted += 1;
       }
       console.log(`Deleted ${deleted} run branch(es).`);
-    });
+        }),
+    )
+    .command("config", (configCmd) =>
+      configCmd
+        .meta({ description: "Configuration commands" })
+        .command("doctor", (doctorCmd) =>
+          doctorCmd
+            .meta({ description: "Validate config and show resolution" })
+            .flags({
+              config: { type: "string", description: "Path to config YAML" },
+              json: { type: "boolean", description: "Emit JSON" },
+              strict: { type: "boolean", description: "Non-zero on warnings" },
+              redact: { type: "string", description: "Redaction mode", default: "partial" },
+            })
+            .run(({ flags }) => {
+              const opts = {
+                config: flags.config,
+                json: flags.json,
+                strict: flags.strict,
+                redact: flags.redact,
+              };
+              const resolution = resolveConfigPrecedence(opts.config, undefined);
+              if (opts.json) {
+                console.log(JSON.stringify(resolutionToJson(resolution, opts.redact), null, 2));
+              } else {
+                printResolutionSummary(resolution);
+                if (resolution.findings.length) {
+                  console.log();
+                  console.log("Findings:");
+                  printFindings(resolution.findings);
+                }
+              }
+              const errors = resolution.findings.filter((f) => f.severity === "error");
+              const warnings = resolution.findings.filter((f) => f.severity === "warn");
+              if (errors.length) {
+                process.exit(1);
+              }
+              if (opts.strict && warnings.length) {
+                process.exit(2);
+              }
+              process.exit(0);
+            }),
+        ),
+    );
+}
 
-  const configCmd = program.command("config").description("Configuration commands");
-  configCmd
-    .command("doctor")
-    .option("--config <path>", "Path to config YAML")
-    .option("--json", "Emit JSON")
-    .option("--strict", "Non-zero on warnings")
-    .option("--redact <mode>", "Redaction mode", "partial")
-    .action((opts: { config?: string; json?: boolean; strict?: boolean; redact: string }) => {
-      const resolution = resolveConfigPrecedence(opts.config, undefined);
-      if (opts.json) {
-        console.log(JSON.stringify(resolutionToJson(resolution, opts.redact), null, 2));
-      } else {
-        printResolutionSummary(resolution);
-        if (resolution.findings.length) {
-          console.log();
-          console.log("Findings:");
-          printFindings(resolution.findings);
-        }
-      }
-      const errors = resolution.findings.filter((f) => f.severity === "error");
-      const warnings = resolution.findings.filter((f) => f.severity === "warn");
-      if (errors.length) {
-        process.exit(1);
-      }
-      if (opts.strict && warnings.length) {
-        process.exit(2);
-      }
-      process.exit(0);
-    });
-
+async function main(): Promise<void> {
+  loadEnvFile();
   const args = process.argv.slice(2);
   if (args.length === 0) {
     await runInteractive();
     return;
   }
-
-  await program.parseAsync(process.argv);
+  const app = buildCli();
+  await app.execute();
 }
 
 main().catch((e) => {

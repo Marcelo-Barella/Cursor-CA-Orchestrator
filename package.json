@@ -1,6 +1,6 @@
 {
   "name": "cursor-orch",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "CLI to orchestrate multiple Cursor Cloud Agents across GitHub repositories",
   "type": "module",
   "main": "./dist/index.js",
@@ -18,14 +18,17 @@
     "bundle:runtime": "esbuild src/orchestrator-entry.ts --bundle --platform=node --format=cjs --outfile=dist/orchestrator-runtime.cjs --legal-comments=none",
     "prepack": "npm run build",
     "test": "vitest run",
+    "smoke": "bun ./dist/cli.js --help",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "bun": ">=1.0.0"
   },
   "dependencies": {
+    "@crustjs/core": "^0.0.15",
+    "@crustjs/plugins": "^0.0.20",
     "chalk": "^5.4.1",
-    "commander": "^13.1.0",
     "jsonrepair": "^3.12.0",
     "yaml": "^2.7.0"
   },
