@@ -3,16 +3,16 @@ set -euo pipefail
 
 echo "Bootstrapping environment"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Error: python3 is required"
+if ! command -v node >/dev/null 2>&1; then
+  echo "Error: Node.js 20+ is required"
   exit 1
 fi
 
-python3 -m venv .venv
+echo "Installing dependencies"
+npm install
 
-echo "Installing cursor-orch in editable mode"
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e .
+echo "Building cursor-orch"
+npm run build
 
 if [ ! -f .env ]; then
   echo "Error: .env not found. Run: cp .env.example .env"
@@ -33,6 +33,6 @@ if [ -z "${GH_TOKEN:-}" ]; then
   exit 1
 fi
 
-echo "Running smoke check: cursor-orch --help"
-.venv/bin/cursor-orch --help >/dev/null
+echo "Running smoke check: npx cursor-orch --help"
+node ./dist/cli.js --help >/dev/null
 echo "Bootstrap complete"
