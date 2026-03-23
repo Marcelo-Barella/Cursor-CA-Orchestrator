@@ -10,7 +10,7 @@ describe("packager", () => {
 
   it("digest stable for same files", () => {
     const files = {
-      "src/cursor_orch/orchestrator.py": "print('a')\n",
+      "src/orchestrator-entry.ts": "export {}\n",
     };
     const a = buildRuntimeDigest(files);
     const b = buildRuntimeDigest(files);

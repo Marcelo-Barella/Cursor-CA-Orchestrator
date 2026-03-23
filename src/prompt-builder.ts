@@ -102,21 +102,21 @@ Run the following commands in the shell to report your results.
 Replace the placeholder values with your actual output.
 
 \`\`\`bash
-python3 - <<'PY'
-import json, base64
-
-output = {
-    "task_id": "${task.id}",
-    "status": "completed",
-    "summary": "DESCRIBE WHAT YOU DID HERE",
-    "blocked_reason": None,
-    "outputs": {"key": "PUT ARTIFACTS OTHER TASKS MAY NEED HERE"},
-}
-
-content = base64.b64encode(json.dumps(output, indent=2).encode()).decode()
-with open("/tmp/agent-${task.id}-payload.json", "w") as f:
-    json.dump({"message": "agent output", "content": content, "branch": "run/${runId}"}, f)
-PY
+node <<'NJS'
+const fs = require("fs");
+const output = {
+  task_id: "${task.id}",
+  status: "completed",
+  summary: "DESCRIBE WHAT YOU DID HERE",
+  blocked_reason: null,
+  outputs: { key: "PUT ARTIFACTS OTHER TASKS MAY NEED HERE" },
+};
+const content = Buffer.from(JSON.stringify(output, null, 2)).toString("base64");
+fs.writeFileSync(
+  "/tmp/agent-${task.id}-payload.json",
+  JSON.stringify({ message: "agent output", content, branch: "run/${runId}" }),
+);
+NJS
 
 GH_TOKEN="${ghToken}" gh api --method PUT \\
   /repos/${bootstrapOwner}/${bootstrapRepo}/contents/agent-${task.id}.json \\

@@ -1,12 +1,8 @@
-__pycache__/
-*.pyc
-*.egg-info/
 dist/
-build/
-.eggs/
 .env
-.venv/
 node_modules/
+.venv/
+__pycache__/
 
 .cursor/
 coordination/
