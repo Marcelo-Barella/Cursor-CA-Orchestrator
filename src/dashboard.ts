@@ -1,21 +1,21 @@
-import chalk from "chalk";
 import { setTimeout as delay } from "node:timers/promises";
 import type { RepoStoreClient } from "./api/repo-store.js";
 import type { OrchestratorConfig } from "./config/types.js";
 import { type OrchestrationEvent, type OrchestrationState, deserialize, readEvents } from "./state.js";
+import { table, tui } from "./tui/style.js";
 
 const POLL_INTERVAL = 10;
 const TERMINAL_STATES = new Set(["completed", "failed", "stopped"]);
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
-  finished: chalk.green,
-  running: chalk.yellow,
-  pending: chalk.blue,
-  failed: chalk.red,
-  blocked: chalk.magenta,
-  launching: chalk.cyan,
-  stopped: chalk.dim,
-  completed: chalk.green,
+  finished: (s) => tui.green(s),
+  running: (s) => tui.yellow(s),
+  pending: (s) => tui.blue(s),
+  failed: (s) => tui.red(s),
+  blocked: (s) => tui.magenta(s),
+  launching: (s) => tui.cyan(s),
+  stopped: (s) => tui.dim(s),
+  completed: (s) => tui.green(s),
 };
 
 function elapsedStr(startedAt: string | null): string {
@@ -52,19 +52,19 @@ function buildHeader(state: OrchestrationState, config: OrchestratorConfig): str
   const total = Object.keys(state.agents).length;
   const color = paintStatus(state.status);
   const tasksLabel = total === 0 && config.prompt ? "[planning...]" : `[${finished}/${total} tasks]`;
-  return `${chalk.bold(`cursor-orch: ${config.name}`)}  ${chalk.dim(tasksLabel)}  ${chalk.dim("status:")} ${color(state.status)}  ${chalk.dim(`elapsed: ${elapsedStr(state.started_at)}`)}`;
+  return `${tui.bold(`cursor-orch: ${config.name}`)}  ${tui.dim(tasksLabel)}  ${tui.dim("status:")} ${color(state.status)}  ${tui.dim(`elapsed: ${elapsedStr(state.started_at)}`)}`;
 }
 
 function buildTable(state: OrchestrationState, config: OrchestratorConfig): string {
   const taskMap = Object.fromEntries(config.tasks.map((t) => [t.id, t]));
-  const rows: string[] = ["Task | Repo | Status | Time | PR", "-----|------|--------|------|-----"];
+  const rows: string[][] = [];
   for (const [taskId, agent] of Object.entries(state.agents)) {
     const task = taskMap[taskId];
     const repo = task ? task.repo : "?";
     const st = paintStatus(agent.status)(agent.status.toUpperCase());
-    rows.push(`${taskId} | ${repo} | ${st} | ${durationStr(agent.started_at, agent.finished_at)} | ${agent.pr_url ?? "--"}`);
+    rows.push([taskId, repo, st, durationStr(agent.started_at, agent.finished_at), agent.pr_url ?? "--"]);
   }
-  return rows.join("\n");
+  return table(["Task", "Repo", "Status", "Time", "PR"], rows);
 }
 
 function formatEvent(ev: OrchestrationEvent): string {
@@ -74,7 +74,7 @@ function formatEvent(ev: OrchestrationEvent): string {
   } catch {
     /* keep */
   }
-  return `[${ts}] ${ev.detail}`;
+  return `${tui.dim(`[${ts}]`)} ${ev.detail}`;
 }
 
 export async function renderSnapshot(state: OrchestrationState, config: OrchestratorConfig, events: OrchestrationEvent[]): Promise<void> {
@@ -83,10 +83,10 @@ export async function renderSnapshot(state: OrchestrationState, config: Orchestr
   console.log();
   console.log(buildTable(state, config));
   console.log();
-  console.log(chalk.dim("Events:"));
+  console.log(tui.dim("Events:"));
   const recent = events.slice(-10);
   if (!recent.length) {
-    console.log(chalk.dim("No events yet."));
+    console.log(tui.dim("No events yet."));
   } else {
     for (const ev of recent) {
       console.log(formatEvent(ev));
