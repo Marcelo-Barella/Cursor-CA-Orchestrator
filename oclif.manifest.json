@@ -1,0 +1,224 @@
+{
+  "commands": {
+    "cleanup": {
+      "aliases": [],
+      "args": {},
+      "flags": {
+        "older-than": {
+          "description": "Delete branches older than N days",
+          "name": "older-than",
+          "default": "7",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "dry-run": {
+          "description": "List branches without deleting",
+          "name": "dry-run",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "cleanup",
+      "pluginAlias": "cursor-orch",
+      "pluginName": "cursor-orch",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Delete old run branches on the bootstrap repo",
+      "enableJsonFlag": false,
+      "isESM": true,
+      "relativePath": [
+        "dist",
+        "commands",
+        "cleanup.js"
+      ]
+    },
+    "logs": {
+      "aliases": [],
+      "args": {},
+      "flags": {
+        "run": {
+          "description": "Run ID",
+          "name": "run",
+          "required": true,
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "task": {
+          "description": "Task ID",
+          "name": "task",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "logs",
+      "pluginAlias": "cursor-orch",
+      "pluginName": "cursor-orch",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Fetch orchestrator or task conversation logs",
+      "enableJsonFlag": false,
+      "isESM": true,
+      "relativePath": [
+        "dist",
+        "commands",
+        "logs.js"
+      ]
+    },
+    "run": {
+      "aliases": [],
+      "args": {},
+      "flags": {
+        "config": {
+          "description": "Path to config YAML",
+          "name": "config",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "bootstrap-repo": {
+          "description": "Bootstrap repo name",
+          "name": "bootstrap-repo",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "run",
+      "pluginAlias": "cursor-orch",
+      "pluginName": "cursor-orch",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Run orchestration from validated config",
+      "enableJsonFlag": false,
+      "isESM": true,
+      "relativePath": [
+        "dist",
+        "commands",
+        "run.js"
+      ]
+    },
+    "status": {
+      "aliases": [],
+      "args": {},
+      "flags": {
+        "run": {
+          "description": "Run ID",
+          "name": "run",
+          "required": true,
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "watch": {
+          "description": "Live dashboard",
+          "name": "watch",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "status",
+      "pluginAlias": "cursor-orch",
+      "pluginName": "cursor-orch",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Show orchestration status for a run",
+      "enableJsonFlag": false,
+      "isESM": true,
+      "relativePath": [
+        "dist",
+        "commands",
+        "status.js"
+      ]
+    },
+    "stop": {
+      "aliases": [],
+      "args": {},
+      "flags": {
+        "run": {
+          "description": "Run ID",
+          "name": "run",
+          "required": true,
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "stop",
+      "pluginAlias": "cursor-orch",
+      "pluginName": "cursor-orch",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Request stop for an orchestration run",
+      "enableJsonFlag": false,
+      "isESM": true,
+      "relativePath": [
+        "dist",
+        "commands",
+        "stop.js"
+      ]
+    },
+    "config:doctor": {
+      "aliases": [],
+      "args": {},
+      "flags": {
+        "config": {
+          "description": "Path to config YAML",
+          "name": "config",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "json": {
+          "description": "Emit JSON",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "strict": {
+          "description": "Non-zero on warnings",
+          "name": "strict",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "redact": {
+          "description": "Redaction mode",
+          "name": "redact",
+          "default": "partial",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "config:doctor",
+      "pluginAlias": "cursor-orch",
+      "pluginName": "cursor-orch",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Validate config and show resolution",
+      "enableJsonFlag": false,
+      "isESM": true,
+      "relativePath": [
+        "dist",
+        "commands",
+        "config",
+        "doctor.js"
+      ]
+    }
+  },
+  "version": "0.3.2"
+}

@@ -1,11 +1,10 @@
 # cursor-orch
 
-A TypeScript CLI (run the `cursor-orch` entrypoint with Bun) that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, uses per-run branches on that repo as a coordination bulletin board, and launches an orchestrator Cloud Agent that manages worker agents targeting your repositories.
+A TypeScript CLI for Node.js 20+ that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, uses per-run branches on that repo as a coordination bulletin board, and launches an orchestrator Cloud Agent that manages worker agents targeting your repositories.
 
 ## Prerequisites
 
-- Node.js 20+ (for `npm run build` / tests)
-- [Bun](https://bun.sh) 1+ (required to run the `cursor-orch` CLI; Crust is Bun-native)
+- Node.js 20+ (for install, build, tests, and CLI execution)
 - GitHub personal access token for `GH_TOKEN` with `repo` scope for bootstrap repository creation and updates
 - Cursor API key for `CURSOR_API_KEY`
 - For `status`, `logs`, and `stop` against an existing run, set `BOOTSTRAP_OWNER` and `BOOTSTRAP_REPO` to the GitHub owner and repository name of your bootstrap repo (same values used in the run output)
@@ -34,7 +33,7 @@ Expected smoke output includes:
 - `Bootstrapping environment`
 - `Installing dependencies`
 - `Building cursor-orch`
-- `Running smoke check: bun ./dist/cli.js --help`
+- `Running smoke check: node ./dist/cli.js --help`
 - `Bootstrap complete`
 
 If bootstrap fails due to missing credentials, re-check `.env` values and token scopes in prerequisites.
@@ -52,7 +51,7 @@ Immediate next actions:
 ```bash
 npm install
 npm run build
-bun ./dist/cli.js --help
+node ./dist/cli.js --help
 ```
 
 Global install (optional):
@@ -118,11 +117,32 @@ cursor-orch stop --help
 cursor-orch config doctor --help
 ```
 
+## Shell Autocomplete
+
+`cursor-orch` includes the oclif autocomplete plugin, so you can print shell-specific setup instructions directly from the CLI:
+
+```bash
+cursor-orch autocomplete
+cursor-orch autocomplete bash
+cursor-orch autocomplete zsh
+cursor-orch autocomplete powershell
+```
+
+The command prints the install steps for your current shell. After enabling it, tab completion includes command names, flags, and space-separated topics such as `cursor-orch config doctor`.
+
+If you want colon-style topic completion instead, regenerate the setup with:
+
+```bash
+OCLIF_AUTOCOMPLETE_TOPIC_SEPARATOR=colon cursor-orch autocomplete
+```
+
 ## Interactive REPL
 
 Running `cursor-orch` with no arguments launches an interactive REPL where you configure repositories, set a prompt, and start an orchestration run -- all from a single session.
 
 The REPL persists your session to `~/.cursor-orch/session.yaml` so you can resume where you left off.
+
+In a normal terminal (interactive stdin and stdout), the main prompt shows **live slash suggestions** while you type: after a leading `/`, all commands appear; as you add characters before the first space, the list filters by prefix (case-insensitive). The list shows up to ten entries with a hint if more match. Piped or non-interactive stdin keeps classic line-at-a-time input with no suggestion panel. Guided setup and `/prompt` multi-line capture are unchanged. Use `/help` for the full command reference at any time.
 
 ### Example Session
 
@@ -155,7 +175,7 @@ $ cursor-orch
 | `/name` | `/name <session-name>` | Set the session name |
 | `/model` | `/model <model-name>` | Set the AI model to use |
 | `/repo` | `/repo <alias> <url> [ref]` | Add or replace a repository |
-| `/repo remove` | `/repo remove <alias>` | Remove a repository by alias |
+| `/repo-remove` | `/repo-remove <alias>` | Remove a repository (also `/repo remove <alias>`) |
 | `/repos` | `/repos` | List all configured repositories |
 | `/prompt` | `/prompt` | Enter a multi-line prompt interactively |
 | `/branch-prefix` | `/branch-prefix <prefix>` | Set the branch name prefix |
@@ -295,3 +315,9 @@ Every file has exactly one writer. No concurrent writes to any file.
 - Worker output per task capped at 512KB with automatic truncation
 - Rate limits: GitHub API (5,000 req/hour), Cursor API (conservative estimates)
 - The bootstrap repo Cursor rule contains literal credentials (repo must stay private)
+
+## Publishing (maintainers)
+
+npm releases are automated by [.github/workflows/publish.yml](.github/workflows/publish.yml). Each push to `main` runs the workflow, which compares `package.json` `version` to the npm registry via `npm view` and runs `npm publish` only when the local version is semver-greater than the published version. If the package is not on the registry yet, the workflow treats the remote version as `0.0.0`, so the first publish is supported.
+
+Add a GitHub Actions repository secret named exactly `NODE_AUTH_TOKEN` with an [npm automation token](https://docs.npmjs.com/about-access-tokens). To ship a release, bump `version` in `package.json` on `main` and push; publishing happens only when that version exceeds what is already published.

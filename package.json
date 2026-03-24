@@ -1,6 +1,6 @@
 {
   "name": "cursor-orch",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "CLI to orchestrate multiple Cursor Cloud Agents across GitHub repositories",
   "type": "module",
   "main": "./dist/index.js",
@@ -10,32 +10,42 @@
   },
   "files": [
     "dist",
+    "oclif.manifest.json",
     "package.json",
     "README.md"
   ],
+  "oclif": {
+    "bin": "cursor-orch",
+    "dirname": "cursor-orch",
+    "commands": "./dist/commands",
+    "plugins": [
+      "@oclif/plugin-autocomplete"
+    ],
+    "topicSeparator": " "
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && npm run bundle:runtime",
     "bundle:runtime": "esbuild src/orchestrator-entry.ts --bundle --platform=node --format=cjs --outfile=dist/orchestrator-runtime.cjs --legal-comments=none",
-    "prepack": "npm run build",
+    "prepack": "npm run build && oclif manifest",
     "test": "vitest run",
-    "smoke": "bun ./dist/cli.js --help",
+    "smoke": "node ./dist/cli.js --help",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
-    "node": ">=20",
-    "bun": ">=1.0.0"
+    "node": ">=20"
   },
   "dependencies": {
-    "@crustjs/core": "^0.0.15",
-    "@crustjs/plugins": "^0.0.20",
     "@crustjs/prompts": "^0.0.10",
     "@crustjs/style": "^0.0.6",
+    "@oclif/core": "^4.10.2",
+    "@oclif/plugin-autocomplete": "^3.2.42",
     "jsonrepair": "^3.12.0",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
     "esbuild": "^0.25.0",
+    "oclif": "^4.22.2",
     "typescript": "^5.8.2",
     "vitest": "^3.0.9"
   }

@@ -1,0 +1,52 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+          always-auth: true
+      - run: npm ci
+      - name: Compare version to registry
+        id: version
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const { execSync } = require("child_process");
+          const semver = require("semver");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const local = pkg.version;
+          if (!semver.valid(local)) {
+            console.error("Invalid package.json version:", local);
+            process.exit(1);
+          }
+          let remote = "";
+          try {
+            remote = execSync(`npm view ${pkg.name} version`, {
+              encoding: "utf8",
+              stdio: ["pipe", "pipe", "pipe"],
+            }).trim();
+          } catch {
+            remote = "";
+          }
+          const r = remote && semver.valid(remote) ? remote : "0.0.0";
+          const publish = semver.gt(local, r);
+          console.log(`Local: ${local}, registry: ${r}, publish: ${publish}`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `publish=${publish}\n`);
+          NODE
+      - name: Publish to npm
+        if: steps.version.outputs.publish == 'true'
+        run: npm publish
