@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { extractSlashQueryPrefix, shouldShowSlashSuggestions } from "../src/lib/repl/tty-line-editor.js";
+import {
+  extractSlashQueryPrefix,
+  parseKeysChunk,
+  shouldShowSlashSuggestions,
+} from "../src/lib/repl/tty-line-editor.js";
 
 describe("tty-line-editor slash gate", () => {
   it("shows suggestions for slash only or slash plus spaces before cursor", () => {
@@ -14,5 +18,12 @@ describe("tty-line-editor slash gate", () => {
   it("extracts prefix for filtering", () => {
     expect(extractSlashQueryPrefix("/pro", 4)).toBe("pro");
     expect(extractSlashQueryPrefix("/  pro", 6)).toBe("pro");
+  });
+});
+
+describe("parseKeysChunk", () => {
+  it("maps Ctrl+D (0x04) to eot", () => {
+    const { keys } = parseKeysChunk(Buffer.alloc(0), Buffer.from([0x04]));
+    expect(keys).toEqual([{ kind: "eot" }]);
   });
 });
