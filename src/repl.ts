@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
+import tty from "node:tty";
+import type { Interface as ReadlineInterface } from "node:readline/promises";
 import {
   COMMANDS,
   cmdHelp,
@@ -13,6 +15,7 @@ import {
 } from "./commands.js";
 import type { OrchestratorConfig } from "./config/types.js";
 import { Session } from "./session.js";
+import { readReplLineTTY } from "./lib/repl/tty-line-editor.js";
 import { readVersion } from "./version.js";
 import { tui } from "./tui/style.js";
 
@@ -35,7 +38,31 @@ function isControl(value: string, control: string): boolean {
   return value.trim().toLowerCase() === control;
 }
 
-async function runGuidedSetup(session: Session, rl: readline.Interface): Promise<OrchestratorConfig | null> {
+async function readLineOrEof(rl: ReadlineInterface, prompt: string): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      rl.off("close", onClose);
+      action();
+    };
+    const onClose = (): void => {
+      finish(() => {
+        resolve(null);
+      });
+    };
+    rl.once("close", onClose);
+    void rl
+      .question(prompt)
+      .then((line) => finish(() => resolve(line)))
+      .catch((err: unknown) => finish(() => reject(err)));
+  });
+}
+
+async function runGuidedSetup(session: Session, rl: ReadlineInterface): Promise<OrchestratorConfig | null> {
   console.log("Welcome to cursor-orch interactive setup.");
   console.log("I will ask only what is required for your first run.");
   console.log("Controls: type 'skip' (use default), 'back' (previous step), or 'exit' (cancel setup).");
@@ -54,7 +81,10 @@ async function runGuidedSetup(session: Session, rl: readline.Interface): Promise
   while (true) {
     if (step === "model") {
       console.log("Step 1/2 - Model");
-      const raw = await rl.question("AI model [default: gpt-5]: ");
+      const raw = await readLineOrEof(rl, "AI model [default: gpt-5]: ");
+      if (raw === null) {
+        return null;
+      }
       const text = raw.trim();
       if (isControl(text, "exit")) {
         session.setSetupState({ active: true, step: "model" });
@@ -90,7 +120,12 @@ async function runGuidedSetup(session: Session, rl: readline.Interface): Promise
       console.log("Enter orchestration prompt. Finish with an empty line.");
       const lines: string[] = [];
       while (true) {
-        const line = await rl.question("... ");
+        const line = await readLineOrEof(rl, "... ");
+        if (line === null) {
+          session.setSetupState({ active: true, step: "prompt" });
+          session.saveSession();
+          return null;
+        }
         if (!lines.length) {
           const stripped = line.trim();
           if (isControl(stripped, "back")) {
@@ -142,7 +177,11 @@ async function runGuidedSetup(session: Session, rl: readline.Interface): Promise
       console.log("2) back  -> edit previous step");
       console.log("3) exit  -> cancel and return to REPL");
       while (true) {
-        const action = (await rl.question("Choose action [run/back/exit]: ")).trim().toLowerCase();
+        const actionRaw = await readLineOrEof(rl, "Choose action [run/back/exit]: ");
+        if (actionRaw === null) {
+          return null;
+        }
+        const action = actionRaw.trim().toLowerCase();
         if (action === "back") {
           step = "prompt";
           session.setSetupState({ active: true, step: "prompt" });
@@ -251,9 +290,25 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
     }
   }
 
+  const useTtyEditor =
+    tty.isatty(0) &&
+    tty.isatty(1) &&
+    typeof process.stdin.setRawMode === "function";
+  if (useTtyEditor) {
+    rl.close();
+    process.stdin.resume();
+  }
+
+  const readMainLine = (): Promise<string | null> =>
+    useTtyEditor ? readReplLineTTY(historyPath) : readLineOrEof(rl, "> ");
+
   try {
     while (true) {
-      const text = (await rl.question("> ")).trim();
+      const rawLine = await readMainLine();
+      if (rawLine === null) {
+        return null;
+      }
+      const text = rawLine.trim();
       if (!text) {
         continue;
       }
@@ -280,12 +335,37 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
       if (cmd === "prompt") {
         console.log(COMMANDS.prompt.handler(session));
         const lines: string[] = [];
-        while (true) {
-          const line = await rl.question("... ");
-          if (line === "" && lines.length) {
-            break;
+        if (useTtyEditor) {
+          const prl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+            terminal: true,
+          });
+          try {
+            while (true) {
+              const line = await readLineOrEof(prl, "... ");
+              if (line === null) {
+                break;
+              }
+              if (line === "" && lines.length) {
+                break;
+              }
+              lines.push(line);
+            }
+          } finally {
+            prl.close();
           }
-          lines.push(line);
+        } else {
+          while (true) {
+            const line = await readLineOrEof(rl, "... ");
+            if (line === null) {
+              break;
+            }
+            if (line === "" && lines.length) {
+              break;
+            }
+            lines.push(line);
+          }
         }
         const multilineText = lines.join("\n");
         const result = cmdPromptSet(session, multilineText);
@@ -314,6 +394,8 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
       }
     }
   } finally {
-    rl.close();
+    if (!useTtyEditor) {
+      rl.close();
+    }
   }
 }
