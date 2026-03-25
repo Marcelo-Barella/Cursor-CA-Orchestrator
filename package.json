@@ -12,7 +12,8 @@
     "dist",
     "oclif.manifest.json",
     "package.json",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "oclif": {
     "bin": "cursor-orch",
