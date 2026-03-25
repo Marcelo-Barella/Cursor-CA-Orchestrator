@@ -37,7 +37,6 @@ describe("slash-suggestions", () => {
     const lower = filterSlashSuggestions("pro");
     const upper = filterSlashSuggestions("PRO");
     expect(lower.map((e) => e.dispatchKey)).toEqual(upper.map((e) => e.dispatchKey));
-    expect(lower.map((e) => e.dispatchKey)).toContain("prompt");
     expect(lower.map((e) => e.dispatchKey)).toContain("prompt-set");
   });
 
@@ -56,8 +55,8 @@ describe("slash-suggestions", () => {
   });
 
   it("replaceSlashQuerySegment updates query and cursor", () => {
-    const r = replaceSlashQuerySegment("/pr", 3, "prompt");
-    expect(r).toEqual({ line: "/prompt", cursor: "/prompt".length });
+    const r = replaceSlashQuerySegment("/mo", 3, "model");
+    expect(r).toEqual({ line: "/model", cursor: "/model".length });
     const r2 = replaceSlashQuerySegment("  /  x", 6, "help");
     expect(r2?.line).toBe("  /  help");
     expect(r2?.cursor).toBe(9);

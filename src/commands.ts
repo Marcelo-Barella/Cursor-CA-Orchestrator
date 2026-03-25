@@ -106,10 +106,6 @@ export function cmdRepos(session: Session): string {
   return lines.join("\n");
 }
 
-export function cmdPrompt(): string {
-  return tui.dim("Enter your prompt (multi-line). Submit an empty line to finish:");
-}
-
 export function cmdPromptSet(session: Session, text: string): string {
   const error = validatePromptValue(text);
   if (error) {
@@ -212,7 +208,6 @@ export const COMMANDS: Record<string, CommandInfo> = {
     description: "Remove a repository by alias.",
   },
   repos: { name: "repos", handler: cmdRepos as (...args: unknown[]) => unknown, usage: "/repos", description: "List all configured repositories." },
-  prompt: { name: "prompt", handler: cmdPrompt as (...args: unknown[]) => unknown, usage: "/prompt", description: "Enter a multi-line prompt." },
   "prompt-set": {
     name: "prompt-set",
     handler: cmdPromptSet as (...args: unknown[]) => unknown,

@@ -138,11 +138,13 @@ OCLIF_AUTOCOMPLETE_TOPIC_SEPARATOR=colon cursor-orch autocomplete
 
 ## Interactive REPL
 
-Running `cursor-orch` with no arguments launches an interactive REPL where you configure repositories, set a prompt, and start an orchestration run -- all from a single session.
+Running `cursor-orch` with no arguments launches an interactive REPL where you configure repositories, set the orchestration prompt, and start a run -- all from a single session.
+
+At the `>` prompt, a line that does **not** start with `/` is treated as the orchestration prompt text (you can paste multi-line text in one submission where the terminal supports it). Lines that **do** start with `/` are slash commands.
 
 The REPL persists your session to `~/.cursor-orch/session.yaml` so you can resume where you left off.
 
-In a normal terminal (interactive stdin and stdout), the main prompt shows **live slash suggestions** while you type: after a leading `/`, all commands appear; as you add characters before the first space, the list filters by prefix (case-insensitive). **Tab** expands the longest shared prefix across matches when possible; otherwise it inserts the **highlighted** command. Use **Up / Down** to move the highlight when more than one match is shown (the line text does not follow the highlight until you press **Tab**). With a **single** matching command, **Up / Down** stay on **input history**; use **Tab** to complete that command. **Enter** always submits the current line as shown. The list scrolls a window of up to ten rows when there are many matches, with a footer showing the range. Piped or non-interactive stdin keeps classic line-at-a-time input with no suggestion panel. Guided setup and `/prompt` multi-line capture are unchanged. Use `/help` for the full command reference at any time. The `/repo remove` form appears in the list alongside `/repo-remove` (same behavior).
+In a normal terminal (interactive stdin and stdout), the main prompt shows **live slash suggestions** while you type: after a leading `/`, all commands appear; as you add characters before the first space, the list filters by prefix (case-insensitive). **Tab** expands the longest shared prefix across matches when possible; otherwise it inserts the **highlighted** command. Use **Up / Down** to move the highlight when more than one match is shown (the line text does not follow the highlight until you press **Tab**). With a **single** matching command, **Up / Down** stay on **input history**; use **Tab** to complete that command. **Enter** always submits the current line as shown. The list scrolls a window of up to ten rows when there are many matches, with a footer showing the range. Piped or non-interactive stdin keeps classic line-at-a-time input with no suggestion panel. Guided setup uses the same rule: non-slash input sets the prompt. Use `/help` for the full command reference at any time. The `/repo remove` form appears in the list alongside `/repo-remove` (same behavior).
 
 ### Example Session
 
@@ -158,10 +160,7 @@ $ cursor-orch
 > /repo auth-svc https://github.com/acme/auth-service main
   Repository added: auth-svc
 
-> /prompt
-  Enter orchestration prompt (end with empty line):
-  | Migrate from session-based auth to JWT across all services.
-  |
+> Migrate from session-based auth to JWT across all services.
   Prompt set (57 characters)
 
 > /run
@@ -177,7 +176,7 @@ $ cursor-orch
 | `/repo` | `/repo <alias> <url> [ref]` | Add or replace a repository |
 | `/repo-remove` | `/repo-remove <alias>` | Remove a repository (also `/repo remove <alias>`) |
 | `/repos` | `/repos` | List all configured repositories |
-| `/prompt` | `/prompt` | Enter a multi-line prompt interactively |
+| `/prompt-set` | `/prompt-set <text>` | Set the orchestration prompt text directly |
 | `/branch-prefix` | `/branch-prefix <prefix>` | Set the branch name prefix |
 | `/auto-pr` | `/auto-pr [on\|off]` | Toggle or set automatic PR creation |
 | `/bootstrap-repo` | `/bootstrap-repo <name>` | Set the bootstrap repository name |
@@ -194,7 +193,7 @@ $ cursor-orch
 In single-prompt mode you provide a high-level prompt describing what you want done, along with the set of repositories involved. The orchestrator decomposes the prompt into individual tasks using a planner agent and dispatches them to worker agents targeting the appropriate repos.
 
 1. Add repositories with `/repo`.
-2. Describe the goal with `/prompt`.
+2. Describe the goal at `>` (plain text, not a slash command), or use `/prompt-set <text>`.
 3. Run with `/run` -- the planner agent breaks the prompt into tasks and assigns each to a repository.
 
 This lets you express cross-repo changes in a single natural-language statement instead of writing individual task definitions by hand.

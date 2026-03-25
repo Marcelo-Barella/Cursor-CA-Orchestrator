@@ -117,53 +117,50 @@ async function runGuidedSetup(session: Session, rl: ReadlineInterface): Promise<
 
     if (step === "prompt") {
       console.log("Step 2/2 - Prompt");
-      console.log("Enter orchestration prompt. Finish with an empty line.");
-      const lines: string[] = [];
-      while (true) {
-        const line = await readLineOrEof(rl, "... ");
-        if (line === null) {
-          session.setSetupState({ active: true, step: "prompt" });
-          session.saveSession();
-          return null;
-        }
-        if (!lines.length) {
-          const stripped = line.trim();
-          if (isControl(stripped, "back")) {
-            step = "model";
-            session.setSetupState({ active: true, step: "model" });
-            session.saveSession();
-            break;
-          }
-          if (isControl(stripped, "exit")) {
-            session.setSetupState({ active: true, step: "prompt" });
-            session.saveSession();
-            return null;
-          }
-          if (isControl(stripped, "skip")) {
-            console.log("Prompt is required for first run. Enter prompt text or type 'back'/'exit'.");
-            continue;
-          }
-        }
-        if (line === "") {
-          const promptText = lines.join("\n");
-          const err = validatePromptValue(promptText);
-          if (err) {
-            console.log(err);
-            lines.length = 0;
-            continue;
-          }
-          session.setPrompt(promptText);
-          session.setSetupState({ active: true, step: "confirm" });
-          session.saveSession();
-          console.log(`Prompt captured (${promptText.length} characters).`);
-          console.log("Equivalent command: /prompt");
-          console.log(`Equivalent command: ${promptSetCommandText(promptText)}`);
-          step = "confirm";
-          break;
-        }
-        lines.push(line);
+      console.log(
+        "Enter your orchestration prompt as plain text at the prompt (same as the main REPL). A leading / starts a command; here use plain text, or type back/exit.",
+      );
+      const raw = await readLineOrEof(rl, "> ");
+      if (raw === null) {
+        session.setSetupState({ active: true, step: "prompt" });
+        session.saveSession();
+        return null;
       }
-      if (step === "model") continue;
+      const stripped = raw.trim();
+      if (isControl(stripped, "back")) {
+        step = "model";
+        session.setSetupState({ active: true, step: "model" });
+        session.saveSession();
+        continue;
+      }
+      if (isControl(stripped, "exit")) {
+        session.setSetupState({ active: true, step: "prompt" });
+        session.saveSession();
+        return null;
+      }
+      if (isControl(stripped, "skip")) {
+        console.log("Prompt is required for first run. Enter prompt text or type 'back'/'exit'.");
+        continue;
+      }
+      if (!stripped) {
+        console.log("Prompt is required for first run. Enter prompt text or type 'back'/'exit'.");
+        continue;
+      }
+      if (stripped.startsWith("/")) {
+        console.log(tui.yellow("At this step, enter the prompt as plain text (no leading /), or type back or exit."));
+        continue;
+      }
+      const output = cmdPromptSet(session, raw);
+      if (output) {
+        console.log(output);
+      }
+      if (validatePromptValue(raw) !== null) {
+        continue;
+      }
+      session.setSetupState({ active: true, step: "confirm" });
+      session.saveSession();
+      console.log(`Equivalent command: ${promptSetCommandText(session.config.prompt)}`);
+      step = "confirm";
       continue;
     }
 
@@ -267,8 +264,8 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
   });
 
   console.log(tui.bold(`cursor-orch v${readVersion()}`));
-  console.log(tui.dim("Type /help for available commands."));
-  console.log(tui.dim("Next: complete guided setup (or set prompt via /prompt), then run /run."));
+  console.log(tui.dim("Plain text at > sets the orchestration prompt; lines starting with / are commands. Type /help for the list."));
+  console.log(tui.dim("Next: complete guided setup (or set the prompt at > or via /prompt-set), then run /run."));
   console.log(tui.dim("Before /run, ensure CURSOR_API_KEY and GH_TOKEN are set (copy .env.example to .env)."));
 
   const resumed = session.loadSession();
@@ -313,7 +310,13 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
         continue;
       }
       if (!text.startsWith("/")) {
-        console.log("Unknown input. Type /help for available commands.");
+        const output = cmdPromptSet(session, rawLine);
+        if (output) {
+          console.log(output);
+        }
+        if (validatePromptValue(rawLine) === null) {
+          session.saveSession();
+        }
         continue;
       }
       directCommandsEntered = true;
@@ -330,47 +333,6 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
       }
       if (!COMMANDS[cmd]) {
         console.log(tui.red(`Unknown command: /${cmd}. Type /help for available commands.`));
-        continue;
-      }
-      if (cmd === "prompt") {
-        console.log(COMMANDS.prompt.handler(session));
-        const lines: string[] = [];
-        if (useTtyEditor) {
-          const prl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout,
-            terminal: true,
-          });
-          try {
-            while (true) {
-              const line = await readLineOrEof(prl, "... ");
-              if (line === null) {
-                break;
-              }
-              if (line === "" && lines.length) {
-                break;
-              }
-              lines.push(line);
-            }
-          } finally {
-            prl.close();
-          }
-        } else {
-          while (true) {
-            const line = await readLineOrEof(rl, "... ");
-            if (line === null) {
-              break;
-            }
-            if (line === "" && lines.length) {
-              break;
-            }
-            lines.push(line);
-          }
-        }
-        const multilineText = lines.join("\n");
-        const result = cmdPromptSet(session, multilineText);
-        console.log(result);
-        session.saveSession();
         continue;
       }
       if (cmd === "run") {
