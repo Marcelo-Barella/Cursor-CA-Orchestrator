@@ -2,6 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { RepoStoreClient } from "./api/repo-store.js";
 import type { OrchestratorConfig } from "./config/types.js";
 import { type OrchestrationEvent, type OrchestrationState, deserialize, readEvents } from "./state.js";
+import { isQuietProgress } from "./tui/progress.js";
 import { table, tui } from "./tui/style.js";
 
 const POLL_INTERVAL = 10;
@@ -95,7 +96,7 @@ export async function renderSnapshot(state: OrchestrationState, config: Orchestr
   console.log();
 }
 
-async function pollOnce(
+export async function pollOnce(
   repoStore: RepoStoreClient,
   runId: string,
   _config: OrchestratorConfig,
@@ -106,7 +107,7 @@ async function pollOnce(
   return { state, events, terminal: TERMINAL_STATES.has(state.status) };
 }
 
-export async function renderLive(repoStore: RepoStoreClient, runId: string, config: OrchestratorConfig): Promise<void> {
+export async function renderLiveInline(repoStore: RepoStoreClient, runId: string, config: OrchestratorConfig): Promise<void> {
   while (true) {
     const { state, events, terminal } = await pollOnce(repoStore, runId, config);
     console.clear();
@@ -117,4 +118,12 @@ export async function renderLive(repoStore: RepoStoreClient, runId: string, conf
     }
     await delay(POLL_INTERVAL * 1000);
   }
+}
+
+export async function renderLive(repoStore: RepoStoreClient, runId: string, config: OrchestratorConfig): Promise<void> {
+  if (process.stdout.isTTY && !isQuietProgress()) {
+    const { renderLiveTUI } = await import("./tui/live-loop.js");
+    return renderLiveTUI(repoStore, runId, config);
+  }
+  return renderLiveInline(repoStore, runId, config);
 }
