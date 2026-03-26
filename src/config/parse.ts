@@ -55,12 +55,27 @@ export function toYaml(config: OrchestratorConfig): string {
   return YAML.stringify(data, { sortMapEntries: false });
 }
 
+function looksLikeGithubRepoHttpsUrl(s: string): boolean {
+  return /^https?:\/\/github\.com\/[^/\s]+\/[^/\s]+/.test(s.trim());
+}
+
+function normalizeRepoUrlRef(url: string, ref: string | undefined): { url: string; ref: string } {
+  const r = ref ?? "main";
+  if (looksLikeGithubRepoHttpsUrl(r) && !looksLikeGithubRepoHttpsUrl(url)) {
+    return { url: r.trim(), ref: url.trim() || "main" };
+  }
+  return { url, ref: r };
+}
+
 function parseRepositories(raw: Record<string, unknown>): Record<string, RepoConfig> {
   const out: Record<string, RepoConfig> = {};
   for (const [k, v] of Object.entries(raw)) {
     if (typeof v !== "object" || v === null) continue;
     const o = v as Record<string, unknown>;
-    out[k] = { url: String(o.url), ref: (o.ref as string) ?? "main" };
+    const rawUrl = o.url !== undefined && o.url !== null ? String(o.url) : "";
+    const rawRef = o.ref !== undefined && o.ref !== null ? String(o.ref) : undefined;
+    const normalized = normalizeRepoUrlRef(rawUrl, rawRef);
+    out[k] = { url: normalized.url, ref: normalized.ref };
   }
   return out;
 }

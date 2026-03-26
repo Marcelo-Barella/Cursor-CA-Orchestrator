@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OrchestratorConfig, TaskConfig } from "../src/config/types.js";
-import { toYaml } from "../src/config/parse.js";
+import { parseConfig, toYaml } from "../src/config/parse.js";
 import { validateRepoRefs } from "../src/config/validate.js";
 
 describe("config", () => {
@@ -59,5 +59,56 @@ describe("config", () => {
       },
     ];
     validateRepoRefs(tasks, repos);
+  });
+
+  it("validate repo refs accepts repo name that matches URL-keyed repository", () => {
+    const repos = { "https://github.com/o/bergamota.git": { url: "https://github.com/o/bergamota.git", ref: "main" } };
+    const tasks: TaskConfig[] = [
+      {
+        id: "motion-doc",
+        repo: "bergamota",
+        prompt: "write docs",
+        model: null,
+        depends_on: [],
+        timeout_minutes: 30,
+        create_repo: false,
+        repo_config: null,
+      },
+    ];
+    validateRepoRefs(tasks, repos);
+  });
+
+  it("parseConfig corrects swapped url and ref when ref holds the GitHub URL", () => {
+    const yaml = `
+name: test
+repositories:
+  svc:
+    url: main
+    ref: "https://github.com/o/r"
+tasks: []
+target:
+  auto_create_pr: true
+  branch_prefix: cursor-orch
+`;
+    const config = parseConfig(yaml);
+    expect(config.repositories.svc!.url).toBe("https://github.com/o/r");
+    expect(config.repositories.svc!.ref).toBe("main");
+  });
+
+  it("parseConfig leaves correct url and ref unchanged", () => {
+    const yaml = `
+name: test
+repositories:
+  svc:
+    url: "https://github.com/o/r"
+    ref: main
+tasks: []
+target:
+  auto_create_pr: true
+  branch_prefix: cursor-orch
+`;
+    const config = parseConfig(yaml);
+    expect(config.repositories.svc!.url).toBe("https://github.com/o/r");
+    expect(config.repositories.svc!.ref).toBe("main");
   });
 });
