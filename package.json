@@ -1,6 +1,6 @@
 {
   "name": "cursor-orch",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "CLI to orchestrate multiple Cursor Cloud Agents across GitHub repositories",
   "type": "module",
   "main": "./dist/index.js",
@@ -36,14 +36,14 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@crustjs/prompts": "^0.0.10",
-    "@crustjs/style": "^0.0.6",
     "@oclif/core": "^4.10.2",
     "@oclif/plugin-autocomplete": "^3.2.42",
+    "blessed": "^0.1.81",
     "jsonrepair": "^3.12.0",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
+    "@types/blessed": "^0.1.27",
     "@types/node": "^22.13.10",
     "esbuild": "^0.25.0",
     "oclif": "^4.22.2",
