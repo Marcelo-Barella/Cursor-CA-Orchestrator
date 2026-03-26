@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.4.3 - 2026-03-26
+- **Repository remove:** removing a repository by URL now matches the configured `url` when the argument is a full URL, not only the map key (alias).
+
 ## 0.4.2 - 2026-03-26
 - **TTY multiline prompt:** raw-mode line editor for the interactive REPL and guided setup when stdin is a TTY—**Ctrl+J** (LF) or **Alt+Enter** (ESC+CR) inserts a newline; **Enter** submits. Bracketed paste passes embedded newlines as text. Parses CSI `u` / `27;13;~` enter events where the terminal sends them.
 - **History file:** REPL history stores entries as JSON lines so multiline prompts round-trip; legacy plain lines still load.
