@@ -73,9 +73,44 @@ function validateUniqueIds(tasks: TaskConfig[]): Set<string> {
   return ids;
 }
 
+function normalizeRepoToken(value: string): string {
+  return value.trim().replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase();
+}
+
+function extractRepoName(value: string): string | null {
+  const normalized = normalizeRepoToken(value);
+  if (!normalized) return null;
+  const parts = normalized.split("/").filter(Boolean);
+  if (!parts.length) return null;
+  return parts[parts.length - 1] ?? null;
+}
+
+function addRepoTokenIndex(tokenIndex: Map<string, Set<string>>, token: string | null, alias: string): void {
+  if (!token) return;
+  if (!tokenIndex.has(token)) {
+    tokenIndex.set(token, new Set<string>());
+  }
+  tokenIndex.get(token)!.add(alias);
+}
+
+function buildRepoTokenIndex(repositories: Record<string, { url: string; ref: string }>): Map<string, Set<string>> {
+  const tokenIndex = new Map<string, Set<string>>();
+  for (const [alias, repo] of Object.entries(repositories)) {
+    addRepoTokenIndex(tokenIndex, normalizeRepoToken(alias), alias);
+    addRepoTokenIndex(tokenIndex, extractRepoName(alias), alias);
+    addRepoTokenIndex(tokenIndex, normalizeRepoToken(repo.url), alias);
+    addRepoTokenIndex(tokenIndex, extractRepoName(repo.url), alias);
+  }
+  return tokenIndex;
+}
+
 export function validateRepoRefs(tasks: TaskConfig[], repositories: Record<string, { url: string; ref: string }>): void {
+  const repoTokenIndex = buildRepoTokenIndex(repositories);
   for (const task of tasks) {
-    if (!task.create_repo && !(task.repo in repositories)) {
+    if (task.create_repo) continue;
+    if (task.repo in repositories) continue;
+    const matches = repoTokenIndex.get(normalizeRepoToken(task.repo));
+    if (!matches || matches.size !== 1) {
       throw new Error(`Task '${task.id}' references unknown repository '${task.repo}'`);
     }
   }
