@@ -61,6 +61,7 @@ function formatSlashSuggestionLines(
 type Key =
   | { kind: "char"; value: string }
   | { kind: "enter" }
+  | { kind: "newline" }
   | { kind: "backspace" }
   | { kind: "left" }
   | { kind: "right" }
@@ -71,6 +72,52 @@ type Key =
   | { kind: "interrupt" }
   | { kind: "eot" }
   | { kind: "eof" };
+
+const PASTE_START = Buffer.from("\x1b[200~");
+const PASTE_END = Buffer.from("\x1b[201~");
+const BRACKETED_PASTE_ON = "\x1b[?2004h";
+const BRACKETED_PASTE_OFF = "\x1b[?2004l";
+
+function enterKeyModsMeanNewline(mods: number): boolean {
+  return mods !== 0 && (mods & 4) === 0;
+}
+
+function scanCsiTerminator(b: Buffer): number | 0 {
+  if (b.length < 3 || b[0] !== 0x1b || b[1] !== 0x5b) {
+    return 0;
+  }
+  let j = 2;
+  while (j < b.length && (b[j]! < 0x40 || b[j]! > 0x7e)) {
+    j++;
+  }
+  if (j >= b.length) {
+    return 0;
+  }
+  return j;
+}
+
+function tryParseCsiEnterU(b: Buffer): { keys: Key[]; len: number } | 0 {
+  const j = scanCsiTerminator(b);
+  if (j === 0 || b[j] !== 0x75) {
+    return 0;
+  }
+  const mid = b.subarray(2, j).toString();
+  const parts = mid.split(";");
+  const head = parts[0] ?? "";
+  const keyStr = head.includes(":") ? (head.split(":")[0] ?? "") : head;
+  const keyNum = Number.parseInt(keyStr, 10);
+  if (!Number.isFinite(keyNum) || keyNum !== 13) {
+    return 0;
+  }
+  let mods = 0;
+  if (parts.length >= 2) {
+    mods = Number.parseInt(parts[parts.length - 1] ?? "0", 10) || 0;
+  }
+  if (enterKeyModsMeanNewline(mods)) {
+    return { keys: [{ kind: "newline" }], len: j + 1 };
+  }
+  return { keys: [{ kind: "enter" }], len: j + 1 };
+}
 
 function tryParseEscape(b: Buffer): { keys: Key[]; len: number } | 0 {
   if (b.length < 2) {
@@ -105,6 +152,14 @@ function tryParseEscape(b: Buffer): { keys: Key[]; len: number } | 0 {
     if (mid === "3") {
       return { keys: [{ kind: "delete" }], len };
     }
+    const okEnter = /^27;13;(\d+)$/.exec(mid);
+    if (okEnter) {
+      const mods = Number.parseInt(okEnter[1]!, 10) || 0;
+      if (enterKeyModsMeanNewline(mods)) {
+        return { keys: [{ kind: "newline" }], len };
+      }
+      return { keys: [{ kind: "enter" }], len };
+    }
     return { keys: [], len };
   }
   return { keys: [], len };
@@ -118,6 +173,56 @@ export function parseKeysChunk(residual: Buffer, chunk: Buffer): { keys: Key[]; 
     const byte = buf[i]!;
     if (byte === 0x1b) {
       const sub = buf.subarray(i);
+      if (sub.length >= 2 && sub[1] === 0x0d) {
+        keys.push({ kind: "newline" });
+        i += 2;
+        continue;
+      }
+      if (
+        sub.length >= PASTE_START.length &&
+        sub.subarray(0, PASTE_START.length).equals(PASTE_START)
+      ) {
+        const endPos = sub.indexOf(PASTE_END, PASTE_START.length);
+        if (endPos === -1) {
+          break;
+        }
+        const inner = sub.subarray(PASTE_START.length, endPos);
+        let pi = 0;
+        while (pi < inner.length) {
+          const pb = inner[pi]!;
+          if (pb === 0x0d) {
+            if (pi + 1 < inner.length && inner[pi + 1] === 0x0a) {
+              pi++;
+            }
+            keys.push({ kind: "char", value: "\n" });
+            pi++;
+            continue;
+          }
+          if (pb === 0x0a) {
+            keys.push({ kind: "char", value: "\n" });
+            pi++;
+            continue;
+          }
+          if (pb < 0x20) {
+            pi++;
+            continue;
+          }
+          const rest = inner.subarray(pi).toString("utf8");
+          const cp = rest.codePointAt(0)!;
+          const ch = String.fromCodePoint(cp);
+          const adv = Buffer.byteLength(ch, "utf8");
+          keys.push({ kind: "char", value: ch });
+          pi += adv;
+        }
+        i += endPos + PASTE_END.length;
+        continue;
+      }
+      const enterU = tryParseCsiEnterU(sub);
+      if (enterU !== 0) {
+        keys.push(...enterU.keys);
+        i += enterU.len;
+        continue;
+      }
       const esc = tryParseEscape(sub);
       if (esc === 0) {
         if (sub.length === 1) {
@@ -130,8 +235,16 @@ export function parseKeysChunk(residual: Buffer, chunk: Buffer): { keys: Key[]; 
       i += esc.len;
       continue;
     }
-    if (byte === 0x0d || byte === 0x0a) {
+    if (byte === 0x0d) {
+      if (i + 1 < buf.length && buf[i + 1] === 0x0a) {
+        i++;
+      }
       keys.push({ kind: "enter" });
+      i++;
+      continue;
+    }
+    if (byte === 0x0a) {
+      keys.push({ kind: "newline" });
       i++;
       continue;
     }
@@ -172,13 +285,37 @@ export function parseKeysChunk(residual: Buffer, chunk: Buffer): { keys: Key[]; 
   return { keys, residual: buf.subarray(i) };
 }
 
+const HISTORY_CAP = 500;
+
+export function encodeHistoryEntry(line: string): string {
+  return JSON.stringify(line);
+}
+
+export function parseHistoryFileText(text: string): string[] {
+  const rawLines = text.split("\n").filter((l) => l.length > 0);
+  const out: string[] = [];
+  for (const l of rawLines) {
+    try {
+      const v = JSON.parse(l) as unknown;
+      if (typeof v === "string") {
+        out.push(v);
+        continue;
+      }
+    } catch {
+      // legacy newline-delimited plain text
+    }
+    out.push(l);
+  }
+  return out.slice(-HISTORY_CAP);
+}
+
 function loadHistoryLines(historyPath: string): string[] {
   if (!fs.existsSync(historyPath)) {
     return [];
   }
   try {
     const text = fs.readFileSync(historyPath, "utf8");
-    return text.split("\n").filter((l) => l.length > 0).slice(-500);
+    return parseHistoryFileText(text);
   } catch {
     return [];
   }
@@ -190,20 +327,63 @@ function appendHistoryLine(historyPath: string, line: string): void {
     return;
   }
   try {
-    fs.appendFileSync(historyPath, `${t}\n`, "utf8");
+    fs.appendFileSync(historyPath, `${encodeHistoryEntry(line)}\n`, "utf8");
   } catch {}
 }
 
-function clearReplPromptBlock(stdout: NodeJS.WriteStream, suggestionRows: number): void {
-  if (suggestionRows > 0) {
-    stdout.write("\r\x1b[2K");
-    for (let i = 0; i < suggestionRows; i++) {
-      stdout.write("\x1b[1B\r\x1b[2K");
-    }
-    stdout.write(`\x1b[${suggestionRows}A`);
-  } else {
-    stdout.write("\r\x1b[2K");
+function clearPromptFrame(
+  stdout: NodeJS.WriteStream,
+  cursorRowInEditBlock: number,
+  prevEditRows: number,
+  prevSuggestionRows: number,
+): void {
+  const total = prevEditRows + prevSuggestionRows;
+  if (total <= 0) {
+    return;
   }
+  if (cursorRowInEditBlock > 0) {
+    stdout.write(`\x1b[${cursorRowInEditBlock}A`);
+  }
+  stdout.write("\r");
+  for (let i = 0; i < total; i++) {
+    stdout.write("\x1b[2K");
+    if (i < total - 1) {
+      stdout.write("\x1b[1B");
+    }
+  }
+  if (total > 1) {
+    stdout.write(`\x1b[${total - 1}A`);
+  }
+  stdout.write("\r");
+}
+
+export function bufferEditLines(buffer: string): string[] {
+  return buffer.split("\n");
+}
+
+export function cursorEditRowAndCol(buffer: string, cursor: number): { row: number; col: number } {
+  let lineStart = 0;
+  let row = 0;
+  for (let p = 0; p < cursor && p < buffer.length; p++) {
+    if (buffer[p] === "\n") {
+      row++;
+      lineStart = p + 1;
+    }
+  }
+  const col = 2 + [...buffer.slice(lineStart, cursor)].length;
+  return { row, col };
+}
+
+function positionEditCursor(stdout: NodeJS.WriteStream, lines: string[], toRow: number, toCol: number): void {
+  const h = lines.length;
+  const eolCol = 2 + [...lines[h - 1]!].length;
+  if (toRow === h - 1 && toCol === eolCol) {
+    return;
+  }
+  stdout.write("\r");
+  stdout.write(`\x1b[${h - 1 - toRow}A`);
+  stdout.write("\r");
+  stdout.write(`\x1b[${toCol}C`);
 }
 
 export async function readReplLineTTY(historyPath: string): Promise<string | null> {
@@ -212,7 +392,9 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
 
   let buffer = "";
   let cursor = 0;
+  let prevEditRows = 1;
   let prevSuggestionRows = 0;
+  let lastCursorRow = 0;
   const sessionHistory = loadHistoryLines(historyPath);
   let histIndex: number | null = null;
   let stashBuffer = "";
@@ -240,21 +422,13 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
     }
   }
 
-  function nextKey(): Promise<Key> {
-    if (keyQueue.length) {
-      return Promise.resolve(keyQueue.shift()!);
-    }
-    return new Promise((resolve) => {
-      keyWaiters.push(resolve);
-    });
-  }
-
   const wasRaw = stdin.isRaw === true;
 
   return new Promise((resolve, reject) => {
     let settled = false;
 
     function detach(): void {
+      stdout.write(BRACKETED_PASTE_OFF);
       stdin.setRawMode(wasRaw);
       stdin.removeListener("data", onData);
       stdin.removeListener("end", onStdinEof);
@@ -277,7 +451,7 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
       while (keyWaiters.length) {
         keyWaiters.shift()!({ kind: "eof" });
       }
-      clearReplPromptBlock(stdout, prevSuggestionRows);
+      clearPromptFrame(stdout, lastCursorRow, prevEditRows, prevSuggestionRows);
       if (line === null) {
         resolve(null);
         return;
@@ -306,6 +480,8 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
 
     stdin.resume();
 
+    stdout.write(BRACKETED_PASTE_ON);
+
     stdin.on("data", onData);
     stdin.once("end", onStdinEof);
     stdin.once("close", onStdinEof);
@@ -317,10 +493,21 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
       }
     });
 
+    let redrawScheduled = false;
     function redraw(): void {
-      clearReplPromptBlock(stdout, prevSuggestionRows);
-      stdout.write("> ");
-      stdout.write(buffer);
+      if (settled) {
+        return;
+      }
+      clearPromptFrame(stdout, lastCursorRow, prevEditRows, prevSuggestionRows);
+      const lines = bufferEditLines(buffer);
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0) {
+          stdout.write("\n");
+        }
+        stdout.write(i === 0 ? "> " : ". ");
+        stdout.write(lines[i]!);
+      }
+      const { row, col } = cursorEditRowAndCol(buffer, cursor);
       const show = shouldShowSlashSuggestions(buffer, cursor);
       const qp = extractSlashQueryPrefix(buffer, cursor);
       const matches = show ? filterSlashSuggestions(qp) : [];
@@ -332,14 +519,35 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
       const sug = show ? formatSlashSuggestionLines(qp, suggestHighlight) : { lines: [], matchCount: 0 };
       const sugLines = sug.lines;
       if (sugLines.length) {
+        positionEditCursor(stdout, lines, row, col);
         stdout.write(`\n${sugLines.join("\n")}`);
         prevSuggestionRows = sugLines.length;
-        stdout.write(`\x1b[${sugLines.length}A`);
-        const col = 2 + [...buffer.slice(0, cursor)].length;
-        stdout.write(`\r\x1b[${col}C`);
+        const upCount = sugLines.length + (lines.length - 1 - row);
+        stdout.write(`\x1b[${upCount}A`);
+        stdout.write("\r");
+        stdout.write(`\x1b[${col}C`);
       } else {
         prevSuggestionRows = 0;
+        positionEditCursor(stdout, lines, row, col);
       }
+      prevEditRows = lines.length;
+      lastCursorRow = row;
+    }
+
+    function scheduleRedraw(): void {
+      if (settled) {
+        return;
+      }
+      if (redrawScheduled) {
+        return;
+      }
+      redrawScheduled = true;
+      queueMicrotask(() => {
+        redrawScheduled = false;
+        if (!settled) {
+          redraw();
+        }
+      });
     }
 
     function applySlashStem(stem: string): void {
@@ -377,7 +585,14 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
     void (async () => {
       try {
         while (true) {
-          const key = await nextKey();
+          let key: Key;
+          if (keyQueue.length > 0) {
+            key = keyQueue.shift()!;
+          } else {
+            key = await new Promise<Key>((resolve) => {
+              keyWaiters.push(resolve);
+            });
+          }
           if (key.kind === "eof") {
             return;
           }
@@ -392,7 +607,7 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
             if (cursor < buffer.length) {
               buffer = buffer.slice(0, cursor) + buffer.slice(cursor + 1);
               suggestHighlight = 0;
-              redraw();
+              scheduleRedraw();
             }
             continue;
           }
@@ -403,12 +618,22 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
             stashBuffer = "";
             stashCursor = 0;
             suggestHighlight = 0;
-            redraw();
+            scheduleRedraw();
             continue;
           }
           if (key.kind === "enter") {
             settle(buffer);
             return;
+          }
+          if (key.kind === "newline") {
+            if (histIndex !== null) {
+              histIndex = null;
+            }
+            buffer = buffer.slice(0, cursor) + "\n" + buffer.slice(cursor);
+            cursor += 1;
+            suggestHighlight = 0;
+            scheduleRedraw();
+            continue;
           }
           if (key.kind === "backspace") {
             if (histIndex !== null) {
@@ -419,7 +644,7 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
               cursor--;
             }
             suggestHighlight = 0;
-            redraw();
+            scheduleRedraw();
             continue;
           }
           if (key.kind === "delete") {
@@ -430,21 +655,21 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
               buffer = buffer.slice(0, cursor) + buffer.slice(cursor + 1);
             }
             suggestHighlight = 0;
-            redraw();
+            scheduleRedraw();
             continue;
           }
           if (key.kind === "left") {
             if (cursor > 0) {
               cursor--;
             }
-            redraw();
+            scheduleRedraw();
             continue;
           }
           if (key.kind === "right") {
             if (cursor < buffer.length) {
               cursor++;
             }
-            redraw();
+            scheduleRedraw();
             continue;
           }
           if (key.kind === "tab") {
@@ -453,10 +678,10 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
             }
             if (shouldShowSlashSuggestions(buffer, cursor)) {
               handleSlashTab();
-              redraw();
+              scheduleRedraw();
               continue;
             }
-            redraw();
+            scheduleRedraw();
             continue;
           }
           if (key.kind === "up") {
@@ -468,11 +693,11 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
                 histIndex = null;
               }
               suggestHighlight = rotateSlashHighlight(suggestHighlight, matches.length, "up");
-              redraw();
+              scheduleRedraw();
               continue;
             }
             if (!sessionHistory.length) {
-              redraw();
+              scheduleRedraw();
               continue;
             }
             if (histIndex === null) {
@@ -484,7 +709,7 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
             }
             buffer = sessionHistory[histIndex]!;
             cursor = buffer.length;
-            redraw();
+            scheduleRedraw();
             continue;
           }
           if (key.kind === "down") {
@@ -496,11 +721,11 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
                 histIndex = null;
               }
               suggestHighlight = rotateSlashHighlight(suggestHighlight, matches.length, "down");
-              redraw();
+              scheduleRedraw();
               continue;
             }
             if (histIndex === null) {
-              redraw();
+              scheduleRedraw();
               continue;
             }
             if (histIndex < sessionHistory.length - 1) {
@@ -512,7 +737,7 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
               buffer = stashBuffer;
               cursor = stashCursor;
             }
-            redraw();
+            scheduleRedraw();
             continue;
           }
           if (key.kind === "char") {
@@ -523,7 +748,7 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
             buffer = buffer.slice(0, cursor) + ch + buffer.slice(cursor);
             cursor += ch.length;
             suggestHighlight = 0;
-            redraw();
+            scheduleRedraw();
           }
         }
       } catch (e) {

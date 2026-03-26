@@ -1,7 +1,12 @@
 # Changelog
 
 ## Unreleased
-- Added slash-command tab completion with improved suggestion navigation.
+
+## 0.4.2 - 2026-03-26
+- **TTY multiline prompt:** raw-mode line editor for the interactive REPL and guided setup when stdin is a TTY—**Ctrl+J** (LF) or **Alt+Enter** (ESC+CR) inserts a newline; **Enter** submits. Bracketed paste passes embedded newlines as text. Parses CSI `u` / `27;13;~` enter events where the terminal sends them.
+- **History file:** REPL history stores entries as JSON lines so multiline prompts round-trip; legacy plain lines still load.
+- **Slash commands:** multi-line input that starts with `/` is rejected with a short hint (slash commands must be one line).
+- **Docs in-app:** setup and REPL banner explain that **Shift+Enter** is the same as **Enter** in typical integrated terminals (e.g. VS Code/Cursor), so use Ctrl+J or Alt+Enter for a new line.
 
 ## 0.3.2 - 2026-03-24
 - Published the 0.3.2 release.

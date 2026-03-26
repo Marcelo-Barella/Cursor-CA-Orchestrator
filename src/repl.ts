@@ -38,6 +38,16 @@ function isControl(value: string, control: string): boolean {
   return value.trim().toLowerCase() === control;
 }
 
+function isInteractiveTty(): boolean {
+  return (
+    tty.isatty(0) &&
+    tty.isatty(1) &&
+    typeof process.stdin.setRawMode === "function"
+  );
+}
+
+type RlHolder = { rl: ReadlineInterface };
+
 async function readLineOrEof(rl: ReadlineInterface, prompt: string): Promise<string | null> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -62,7 +72,11 @@ async function readLineOrEof(rl: ReadlineInterface, prompt: string): Promise<str
   });
 }
 
-async function runGuidedSetup(session: Session, rl: ReadlineInterface): Promise<OrchestratorConfig | null> {
+async function runGuidedSetup(
+  session: Session,
+  holder: RlHolder,
+  historyPath: string,
+): Promise<OrchestratorConfig | null> {
   console.log("Welcome to cursor-orch interactive setup.");
   console.log("I will ask only what is required for your first run.");
   console.log("Controls: type 'skip' (use default), 'back' (previous step), or 'exit' (cancel setup).");
@@ -81,7 +95,7 @@ async function runGuidedSetup(session: Session, rl: ReadlineInterface): Promise<
   while (true) {
     if (step === "model") {
       console.log("Step 1/2 - Model");
-      const raw = await readLineOrEof(rl, "AI model [default: gpt-5]: ");
+      const raw = await readLineOrEof(holder.rl, "AI model [default: gpt-5]: ");
       if (raw === null) {
         return null;
       }
@@ -117,10 +131,29 @@ async function runGuidedSetup(session: Session, rl: ReadlineInterface): Promise<
 
     if (step === "prompt") {
       console.log("Step 2/2 - Prompt");
-      console.log(
-        "Enter your orchestration prompt as plain text at the prompt (same as the main REPL). A leading / starts a command; here use plain text, or type back/exit.",
-      );
-      const raw = await readLineOrEof(rl, "> ");
+      const ttyPrompt = isInteractiveTty();
+      if (ttyPrompt) {
+        console.log(
+          "Enter your orchestration prompt as plain text (TTY: Ctrl+J or Alt+Enter for newline, Enter to submit). Shift+Enter also sends Enter here and cannot be a newline unless your terminal maps it to a line feed. A leading / starts a command; here use plain text, or type back/exit.",
+        );
+      } else {
+        console.log(
+          "Enter your orchestration prompt as plain text at the prompt (single line in this environment). A leading / starts a command; here use plain text, or type back/exit.",
+        );
+      }
+      let raw: string | null;
+      if (ttyPrompt) {
+        holder.rl.close();
+        process.stdin.resume();
+        raw = await readReplLineTTY(historyPath);
+        holder.rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout,
+          terminal: true,
+        });
+      } else {
+        raw = await readLineOrEof(holder.rl, "> ");
+      }
       if (raw === null) {
         session.setSetupState({ active: true, step: "prompt" });
         session.saveSession();
@@ -174,7 +207,7 @@ async function runGuidedSetup(session: Session, rl: ReadlineInterface): Promise<
       console.log("2) back  -> edit previous step");
       console.log("3) exit  -> cancel and return to REPL");
       while (true) {
-        const actionRaw = await readLineOrEof(rl, "Choose action [run/back/exit]: ");
+        const actionRaw = await readLineOrEof(holder.rl, "Choose action [run/back/exit]: ");
         if (actionRaw === null) {
           return null;
         }
@@ -257,13 +290,22 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
   const historyPath = path.join(process.env.HOME ?? ".", ".cursor-orch", "history");
   fs.mkdirSync(path.dirname(historyPath), { recursive: true });
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-  });
+  const holder: RlHolder = {
+    rl: readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: true,
+    }),
+  };
 
   console.log(tui.bold(`cursor-orch v${readVersion()}`));
+  if (isInteractiveTty()) {
+    console.log(
+      tui.dim(
+        "TTY line editor: Ctrl+J (or Alt+Enter) inserts a newline; Enter submits. Shift+Enter submits too in integrated terminals.",
+      ),
+    );
+  }
   console.log(tui.dim("Plain text at > sets the orchestration prompt; lines starting with / are commands. Type /help for the list."));
   console.log(tui.dim("Next: complete guided setup (or set the prompt at > or via /prompt-set), then run /run."));
   console.log(tui.dim("Before /run, ensure CURSOR_API_KEY and GH_TOKEN are set (copy .env.example to .env)."));
@@ -280,24 +322,21 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
   const shouldRunGuided =
     session.shouldResumeGuidedSetup() || (!session.hasRequiredGuidedValues() && !directCommandsEntered);
   if (shouldRunGuided) {
-    const cfg = await runGuidedSetup(session, rl);
+    const cfg = await runGuidedSetup(session, holder, historyPath);
     if (cfg) {
-      rl.close();
+      holder.rl.close();
       return cfg;
     }
   }
 
-  const useTtyEditor =
-    tty.isatty(0) &&
-    tty.isatty(1) &&
-    typeof process.stdin.setRawMode === "function";
+  const useTtyEditor = isInteractiveTty();
   if (useTtyEditor) {
-    rl.close();
+    holder.rl.close();
     process.stdin.resume();
   }
 
   const readMainLine = (): Promise<string | null> =>
-    useTtyEditor ? readReplLineTTY(historyPath) : readLineOrEof(rl, "> ");
+    useTtyEditor ? readReplLineTTY(historyPath) : readLineOrEof(holder.rl, "> ");
 
   try {
     while (true) {
@@ -307,6 +346,14 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
       }
       const text = rawLine.trim();
       if (!text) {
+        continue;
+      }
+      if (text.startsWith("/") && rawLine.includes("\n")) {
+        console.log(
+          tui.yellow(
+            "Slash commands must be on one line. Use one line for /commands, or enter a multi-line prompt without a leading /.",
+          ),
+        );
         continue;
       }
       if (!text.startsWith("/")) {
@@ -357,7 +404,7 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
     }
   } finally {
     if (!useTtyEditor) {
-      rl.close();
+      holder.rl.close();
     }
   }
 }
