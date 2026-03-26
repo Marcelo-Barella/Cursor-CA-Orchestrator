@@ -180,8 +180,6 @@ export function resolveBootstrapName(
 
 export function buildOrchestrationLaunchPrompt(opts: {
   runId: string;
-  ghToken: string;
-  cursorApiKey: string;
   runtimeRef: string;
   bootstrapOwner: string;
   bootstrapRepoName: string;
@@ -190,8 +188,6 @@ export function buildOrchestrationLaunchPrompt(opts: {
     "You are the main agent on a cursor-orch orchestrator workflow.",
     "Run the following shell commands exactly as written.",
     `export RUN_ID='${opts.runId}'`,
-    `export GH_TOKEN='${opts.ghToken}'`,
-    `export CURSOR_API_KEY='${opts.cursorApiKey}'`,
     `export CURSOR_ORCH_RUNTIME_REF='${opts.runtimeRef}'`,
     `export BOOTSTRAP_OWNER='${opts.bootstrapOwner}'`,
     `export BOOTSTRAP_REPO='${opts.bootstrapRepoName}'`,
@@ -221,6 +217,11 @@ export async function runOrchestrationCli(
   const orchestrationId = randomUUID().slice(0, 8);
 
   await repoStore.createRun(orchestrationId);
+  await repoStore.writeFile(
+    orchestrationId,
+    "secrets.json",
+    JSON.stringify({ GH_TOKEN: ghToken, CURSOR_API_KEY: cursorApiKey }),
+  );
 
   const initialState = createInitialState(config, orchestrationId);
 
@@ -240,8 +241,6 @@ export async function runOrchestrationCli(
   const repoUrl = `https://github.com/${owner}/${repoInfo.name}`;
   const launchPrompt = buildOrchestrationLaunchPrompt({
     runId: orchestrationId,
-    ghToken,
-    cursorApiKey,
     runtimeRef,
     bootstrapOwner: owner,
     bootstrapRepoName: repoInfo.name,

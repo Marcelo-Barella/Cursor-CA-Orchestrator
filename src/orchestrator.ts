@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { CursorClient, type AgentInfo } from "./api/cursor-client.js";
 import { RepoStoreClient } from "./api/repo-store.js";
@@ -659,6 +660,9 @@ export async function runOrchestration(runId: string, cursorClient: CursorClient
     await persistUnexpectedFailure(state, repoStore, runId, exc);
     throw exc;
   }
+  if (state.status === "failed") {
+    throw new Error(state.error ? `Orchestration failed: ${state.error}` : "Orchestration failed");
+  }
 }
 
 async function orchestrationLoop(
@@ -747,17 +751,61 @@ async function checkFailure(state: OrchestrationState, graph: Record<string, Set
   return true;
 }
 
+export function loadSecretsFromRepo(runId: string): { GH_TOKEN: string; CURSOR_API_KEY: string } {
+  const ref = `run/${runId}`;
+  try {
+    execSync(`git fetch origin ${ref}`, { encoding: "utf8" });
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(`git fetch origin ${ref} failed: ${detail}`);
+  }
+  let raw: string;
+  try {
+    raw = execSync("git show FETCH_HEAD:secrets.json", { encoding: "utf8" });
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(`git show FETCH_HEAD:secrets.json failed: ${detail}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(`secrets.json is not valid JSON: ${detail}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("secrets.json must be a JSON object with GH_TOKEN and CURSOR_API_KEY");
+  }
+  const o = parsed as Record<string, unknown>;
+  const gh = o.GH_TOKEN;
+  const ck = o.CURSOR_API_KEY;
+  if (typeof gh !== "string" || gh.length === 0) {
+    throw new Error("secrets.json missing or empty GH_TOKEN");
+  }
+  if (typeof ck !== "string" || ck.length === 0) {
+    throw new Error("secrets.json missing or empty CURSOR_API_KEY");
+  }
+  return { GH_TOKEN: gh, CURSOR_API_KEY: ck };
+}
+
 export async function runOrchestrationMain(): Promise<void> {
   const runId = process.env.RUN_ID;
-  const ghToken = process.env.GH_TOKEN;
-  const cursorApiKey = process.env.CURSOR_API_KEY;
   const bootstrapOwner = process.env.BOOTSTRAP_OWNER;
   const bootstrapRepo = process.env.BOOTSTRAP_REPO;
-  if (!runId || !ghToken || !cursorApiKey || !bootstrapOwner || !bootstrapRepo) {
-    console.error("Missing RUN_ID, GH_TOKEN, CURSOR_API_KEY, BOOTSTRAP_OWNER, or BOOTSTRAP_REPO");
+  if (!runId || !bootstrapOwner || !bootstrapRepo) {
+    console.error("Missing RUN_ID, BOOTSTRAP_OWNER, or BOOTSTRAP_REPO");
     process.exit(1);
   }
-  const cursorClient = new CursorClient(cursorApiKey);
-  const repoStore = new RepoStoreClient(ghToken, bootstrapOwner, bootstrapRepo);
+  let secrets: { GH_TOKEN: string; CURSOR_API_KEY: string };
+  try {
+    secrets = loadSecretsFromRepo(runId);
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+  process.env.GH_TOKEN = secrets.GH_TOKEN;
+  process.env.CURSOR_API_KEY = secrets.CURSOR_API_KEY;
+  const cursorClient = new CursorClient(secrets.CURSOR_API_KEY);
+  const repoStore = new RepoStoreClient(secrets.GH_TOKEN, bootstrapOwner, bootstrapRepo);
   await runOrchestration(runId, cursorClient, repoStore);
 }
