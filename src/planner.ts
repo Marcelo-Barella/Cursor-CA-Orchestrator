@@ -187,6 +187,52 @@ function collectUpstreamCreateRepoIds(
   return upstream;
 }
 
+function normalizeRepoToken(value: string): string {
+  return value.trim().replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase();
+}
+
+function extractRepoName(value: string): string | null {
+  const normalized = normalizeRepoToken(value);
+  if (!normalized) return null;
+  const parts = normalized.split("/").filter(Boolean);
+  if (!parts.length) return null;
+  return parts[parts.length - 1] ?? null;
+}
+
+function addRepoTokenIndex(tokenIndex: Map<string, Set<string>>, token: string | null, alias: string): void {
+  if (!token) return;
+  if (!tokenIndex.has(token)) {
+    tokenIndex.set(token, new Set<string>());
+  }
+  tokenIndex.get(token)!.add(alias);
+}
+
+function buildRepoTokenIndex(repositories: Record<string, { url: string; ref: string }>): Map<string, Set<string>> {
+  const tokenIndex = new Map<string, Set<string>>();
+  for (const [alias, repo] of Object.entries(repositories)) {
+    addRepoTokenIndex(tokenIndex, normalizeRepoToken(alias), alias);
+    addRepoTokenIndex(tokenIndex, extractRepoName(alias), alias);
+    addRepoTokenIndex(tokenIndex, normalizeRepoToken(repo.url), alias);
+    addRepoTokenIndex(tokenIndex, extractRepoName(repo.url), alias);
+  }
+  return tokenIndex;
+}
+
+function resolveRepoAlias(
+  requestedRepo: string,
+  repositories: Record<string, { url: string; ref: string }>,
+  tokenIndex: Map<string, Set<string>>,
+): string | null {
+  if (requestedRepo in repositories) {
+    return requestedRepo;
+  }
+  const matches = tokenIndex.get(normalizeRepoToken(requestedRepo));
+  if (!matches || matches.size !== 1) {
+    return null;
+  }
+  return [...matches][0] ?? null;
+}
+
 export function parseTaskPlan(planJson: string, config: OrchestratorConfig): TaskConfig[] {
   let data: unknown;
   try {
@@ -209,6 +255,7 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
   }
   const taskIds = new Set<string>();
   const tasks: TaskConfig[] = [];
+  const repoTokenIndex = buildRepoTokenIndex(config.repositories);
   for (const entry of rawTasks) {
     if (typeof entry !== "object" || entry === null) {
       throw new Error(`Each task must be a JSON object, got ${typeof entry}`);
@@ -224,11 +271,15 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
       throw new Error(`Duplicate task ID: ${taskId}`);
     }
     taskIds.add(taskId);
-    const repoAlias = String(o.repo);
+    const requestedRepoAlias = String(o.repo);
     const isCreateRepo = Boolean(o.create_repo);
-    if (repoAlias !== "__new__" && !isCreateRepo && !(repoAlias in config.repositories)) {
+    const resolvedRepoAlias =
+      requestedRepoAlias === "__new__" || isCreateRepo
+        ? requestedRepoAlias
+        : resolveRepoAlias(requestedRepoAlias, config.repositories, repoTokenIndex);
+    if (requestedRepoAlias !== "__new__" && !isCreateRepo && !resolvedRepoAlias) {
       throw new Error(
-        `Task '${taskId}' references unknown repository '${repoAlias}'. Valid aliases: ${Object.keys(config.repositories).sort().join(", ")}`,
+        `Task '${taskId}' references unknown repository '${requestedRepoAlias}'. Valid aliases: ${Object.keys(config.repositories).sort().join(", ")}`,
       );
     }
     const dependsOn = Array.isArray(o.depends_on) ? (o.depends_on as string[]) : [];
@@ -238,7 +289,7 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
     }
     tasks.push({
       id: taskId,
-      repo: repoAlias,
+      repo: resolvedRepoAlias ?? requestedRepoAlias,
       prompt: String(o.prompt),
       model: o.model !== undefined ? String(o.model) : null,
       depends_on: dependsOn,
