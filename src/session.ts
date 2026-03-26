@@ -51,6 +51,12 @@ export class Session {
       delete this._config.repositories[alias];
       return true;
     }
+    for (const [key, repo] of Object.entries(this._config.repositories)) {
+      if (repo.url === alias) {
+        delete this._config.repositories[key];
+        return true;
+      }
+    }
     return false;
   }
 
