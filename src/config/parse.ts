@@ -1,5 +1,13 @@
 import YAML from "yaml";
-import type { OrchestratorConfig, RepoConfig, TargetConfig, TaskConfig } from "./types.js";
+import type {
+  DelegationGroupConfig,
+  DelegationMapConfig,
+  DelegationPhaseConfig,
+  OrchestratorConfig,
+  RepoConfig,
+  TargetConfig,
+  TaskConfig,
+} from "./types.js";
 
 export function parseConfig(yamlStr: string): OrchestratorConfig {
   const raw = YAML.parse(yamlStr) as unknown;
@@ -9,13 +17,15 @@ export function parseConfig(yamlStr: string): OrchestratorConfig {
   const r = raw as Record<string, unknown>;
   const repositories = parseRepositories((r.repositories as Record<string, unknown>) || {});
   const tasks = parseTasks((r.tasks as unknown[]) || []);
+  const delegationMap = parseDelegationMap(r.delegation_map ?? r.delegationMap);
   const target = parseTarget((r.target as Record<string, unknown>) || {});
   return {
     name: (r.name as string) ?? "unnamed",
-    model: (r.model as string) ?? "default",
+    model: (r.model as string) ?? "composer-2",
     prompt: (r.prompt as string) ?? "",
     repositories,
     tasks,
+    delegation_map: delegationMap,
     target,
     bootstrap_repo_name: (r.bootstrap_repo_name as string) ?? "cursor-orch-bootstrap",
   };
@@ -44,6 +54,17 @@ export function toYaml(config: OrchestratorConfig): string {
       if (t.repo_config !== null) td.repo_config = t.repo_config;
       return td;
     });
+  }
+  if (config.delegation_map && config.delegation_map.phases.length > 0) {
+    data.delegation_map = {
+      phases: config.delegation_map.phases.map((phase) => ({
+        id: phase.id,
+        groups: phase.groups.map((group) => ({
+          id: group.id,
+          task_ids: [...group.task_ids],
+        })),
+      })),
+    };
   }
   data.target = {
     auto_create_pr: config.target.auto_create_pr,
@@ -102,4 +123,77 @@ function parseTarget(raw: Record<string, unknown>): TargetConfig {
     auto_create_pr: raw.auto_create_pr !== undefined ? Boolean(raw.auto_create_pr) : true,
     branch_prefix: (raw.branch_prefix as string) ?? "cursor-orch",
   };
+}
+
+function parseDelegationMap(raw: unknown): DelegationMapConfig | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const source = raw as Record<string, unknown>;
+  const phasesRaw = source.phases;
+  if (!Array.isArray(phasesRaw)) {
+    return null;
+  }
+  const phases: DelegationPhaseConfig[] = phasesRaw
+    .map((entry, index) => parseDelegationPhase(entry, index))
+    .filter((phase): phase is DelegationPhaseConfig => phase !== null);
+  return { phases };
+}
+
+function parseDelegationPhase(raw: unknown, index: number): DelegationPhaseConfig | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const source = raw as Record<string, unknown>;
+  const id = stringifyOrFallback(source.id ?? source.name ?? source.phase ?? source.phase_id, `phase-${index + 1}`);
+  const groups = parseDelegationGroups(source.groups ?? source.parallel_groups ?? source.parallelGroups);
+  return { id, groups };
+}
+
+function parseDelegationGroups(raw: unknown): DelegationGroupConfig[] {
+  if (Array.isArray(raw)) {
+    return raw
+      .map((entry, index) => parseDelegationGroup(entry, index))
+      .filter((group): group is DelegationGroupConfig => group !== null);
+  }
+  if (raw && typeof raw === "object") {
+    return Object.entries(raw as Record<string, unknown>)
+      .map(([groupId, value], index) => parseDelegationGroup({ id: groupId, task_ids: value }, index))
+      .filter((group): group is DelegationGroupConfig => group !== null);
+  }
+  return [];
+}
+
+function parseDelegationGroup(raw: unknown, index: number): DelegationGroupConfig | null {
+  if (Array.isArray(raw)) {
+    return {
+      id: `group-${index + 1}`,
+      task_ids: parseTaskIds(raw),
+    };
+  }
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const source = raw as Record<string, unknown>;
+  const id = stringifyOrFallback(source.id ?? source.name ?? source.group ?? source.group_id, `group-${index + 1}`);
+  const taskIdsRaw = source.task_ids ?? source.taskIds ?? source.tasks;
+  return {
+    id,
+    task_ids: parseTaskIds(taskIdsRaw),
+  };
+}
+
+function parseTaskIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .filter((value) => value !== null && value !== undefined)
+    .map((value) => String(value).trim())
+    .filter((value) => value.length > 0);
+}
+
+function stringifyOrFallback(value: unknown, fallback: string): string {
+  const normalized = value === null || value === undefined ? "" : String(value).trim();
+  return normalized || fallback;
 }

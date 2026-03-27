@@ -2,6 +2,7 @@ import { CursorClient } from "../../api/cursor-client.js";
 import { RepoStoreClient } from "../../api/repo-store.js";
 import { ensureBootstrapRepo, BOOTSTRAP_ENTRYPOINT, BOOTSTRAP_INSTALL_COMMAND } from "../../bootstrap.js";
 import {
+  canonicalizeOrchestratorConfig,
   resolveConfigPrecedence,
   toYaml,
   precedenceForField,
@@ -277,7 +278,7 @@ export async function runCommand(opts: {
   bootstrapRepo: string | undefined;
 }): Promise<void> {
   const resolution = resolveConfig(opts.config, opts.bootstrapRepo);
-  const config = resolution.config;
+  const config = canonicalizeOrchestratorConfig(resolution.config);
   printResolutionSummary(resolution);
   printNonBlockingFindings(resolution.findings);
   console.log(

@@ -21,12 +21,27 @@ export interface TargetConfig {
   branch_prefix: string;
 }
 
+export interface DelegationGroupConfig {
+  id: string;
+  task_ids: string[];
+}
+
+export interface DelegationPhaseConfig {
+  id: string;
+  groups: DelegationGroupConfig[];
+}
+
+export interface DelegationMapConfig {
+  phases: DelegationPhaseConfig[];
+}
+
 export interface OrchestratorConfig {
   name: string;
   model: string;
   prompt: string;
   repositories: Record<string, RepoConfig>;
   tasks: TaskConfig[];
+  delegation_map?: DelegationMapConfig | null;
   target: TargetConfig;
   bootstrap_repo_name: string;
 }
