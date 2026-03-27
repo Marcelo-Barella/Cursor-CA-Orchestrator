@@ -179,51 +179,77 @@ export class RepoStoreClient {
     }
   }
 
-  async createRun(runId: string): Promise<void> {
+  private async getFileSnapshot(runId: string, filename: string): Promise<{ content: string; sha: string | null }> {
+    const url = `${BASE_URL}/repos/${this.owner}/${this.repo}/contents/${filename}?ref=${encodeURIComponent(`run/${runId}`)}`;
+    try {
+      const resp = await this.request("GET", url);
+      const data = (await resp.json()) as { content?: string; sha?: string };
+      return {
+        content: decodeContent(data.content ?? ""),
+        sha: data.sha ?? null,
+      };
+    } catch (e) {
+      if (e instanceof RepoStoreNotFound) {
+        return { content: "", sha: null };
+      }
+      throw e;
+    }
+  }
+
+  private async putFile(runId: string, filename: string, content: string, sha: string | null): Promise<void> {
+    const url = `${BASE_URL}/repos/${this.owner}/${this.repo}/contents/${filename}`;
+    const payload: Record<string, unknown> = {
+      message: `update ${filename}`,
+      content: encodeContent(content),
+      branch: `run/${runId}`,
+    };
+    if (sha !== null) {
+      payload.sha = sha;
+    }
+    await this.request("PUT", url, payload);
+  }
+
+  async createRun(runId: string): Promise<boolean> {
     const sha = await this.getDefaultBranchSha();
     const url = `${BASE_URL}/repos/${this.owner}/${this.repo}/git/refs`;
     const payload = { ref: `refs/heads/run/${runId}`, sha };
     try {
       await this.request("POST", url, payload);
+      return true;
     } catch (e) {
       if (e instanceof RepoStoreError && e.statusCode === 422) {
-        return;
+        return false;
       }
       throw e;
     }
   }
 
   async readFile(runId: string, filename: string): Promise<string> {
-    const url = `${BASE_URL}/repos/${this.owner}/${this.repo}/contents/${filename}?ref=${encodeURIComponent(`run/${runId}`)}`;
-    try {
-      const resp = await this.request("GET", url);
-      const data = (await resp.json()) as { content?: string };
-      const encoded = data.content ?? "";
-      return decodeContent(encoded);
-    } catch (e) {
-      if (e instanceof RepoStoreNotFound) {
-        return "";
-      }
-      throw e;
-    }
+    return (await this.getFileSnapshot(runId, filename)).content;
   }
 
   async writeFile(runId: string, filename: string, content: string): Promise<void> {
-    const url = `${BASE_URL}/repos/${this.owner}/${this.repo}/contents/${filename}`;
-    const branch = `run/${runId}`;
-    const encoded = encodeContent(content);
     for (let attempt = 0; attempt <= MAX_RETRIES_409; attempt++) {
-      const sha = await this.getFileSha(runId, filename);
-      const payload: Record<string, unknown> = {
-        message: `update ${filename}`,
-        content: encoded,
-        branch,
-      };
-      if (sha !== null) {
-        payload.sha = sha;
-      }
+      const snapshot = await this.getFileSnapshot(runId, filename);
       try {
-        await this.request("PUT", url, payload);
+        await this.putFile(runId, filename, content, snapshot.sha);
+        return;
+      } catch (e) {
+        if (e instanceof RepoStoreError && (e.statusCode === 409 || e.statusCode === 422) && attempt < MAX_RETRIES_409) {
+          await delay(Math.ceil(computeDelay(attempt) * 1000));
+          continue;
+        }
+        throw e;
+      }
+    }
+  }
+
+  async updateFile(runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
+    for (let attempt = 0; attempt <= MAX_RETRIES_409; attempt++) {
+      const snapshot = await this.getFileSnapshot(runId, filename);
+      const nextContent = await updater(snapshot.content);
+      try {
+        await this.putFile(runId, filename, nextContent, snapshot.sha);
         return;
       } catch (e) {
         if (e instanceof RepoStoreError && (e.statusCode === 409 || e.statusCode === 422) && attempt < MAX_RETRIES_409) {
