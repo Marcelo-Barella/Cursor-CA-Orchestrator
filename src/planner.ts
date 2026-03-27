@@ -99,7 +99,7 @@ Write the JSON output as a file named \`task-plan.json\` to the run branch of th
 
 Use the \`gh\` CLI with the GitHub Contents API:
 \`\`\`bash
-CONTENT=$(cat /tmp/task-plan.json | base64 -w 0)
+CONTENT=$(cat {plan_tmp_path} | base64 -w 0)
 GH_TOKEN="{gh_token}" gh api --method PUT /repos/{bootstrap_owner}/{bootstrap_repo}/contents/task-plan.json \\
   --field message="write task-plan.json" \\
   --field content="$CONTENT" \\
@@ -114,6 +114,7 @@ export function buildPlannerPrompt(
   bootstrapOwner: string,
   bootstrapRepo: string,
 ): string {
+  const planTmpPath = `/tmp/cursor-orch-${runId}-task-plan.json`;
   const repoLines: string[] = [];
   for (const [key, repo] of Object.entries(config.repositories)) {
     if (key === "__bootstrap__") continue;
@@ -124,6 +125,7 @@ export function buildPlannerPrompt(
     .replace("{repo_list}", repoList)
     .replace("{run_id}", runId)
     .replace("{gh_token}", ghToken)
+    .replace("{plan_tmp_path}", planTmpPath)
     .replace("{bootstrap_owner}", bootstrapOwner)
     .replace("{bootstrap_repo}", bootstrapRepo);
   return `${PLANNER_SYSTEM_PROMPT}\n\n${body}`;

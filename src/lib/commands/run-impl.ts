@@ -17,6 +17,8 @@ import { randomUUID } from "node:crypto";
 import { withOrchestratorLaunchProgress } from "../../tui/progress.js";
 import { severityStyle } from "../../tui/style.js";
 
+const MAX_RUN_ID_ATTEMPTS = 5;
+
 export interface FeedbackOptions {
   code: string;
   severity: string;
@@ -201,6 +203,23 @@ export function buildOrchestrationLaunchPrompt(opts: {
   ].join("\n");
 }
 
+export function createRunId(): string {
+  return randomUUID();
+}
+
+export async function reserveRunId(
+  repoStore: Pick<RepoStoreClient, "createRun">,
+  nextRunId: () => string = createRunId,
+): Promise<string> {
+  for (let attempt = 0; attempt < MAX_RUN_ID_ATTEMPTS; attempt++) {
+    const runId = nextRunId();
+    if (await repoStore.createRun(runId)) {
+      return runId;
+    }
+  }
+  throw new Error(`Failed to reserve a unique run ID after ${MAX_RUN_ID_ATTEMPTS} attempts`);
+}
+
 export async function runOrchestrationCli(
   config: OrchestratorConfig,
   configYaml: string,
@@ -215,9 +234,7 @@ export async function runOrchestrationCli(
   console.log(`Bootstrap repo verified: ${owner}/${repoInfo.name} @ ${runtimeRef}`);
 
   const repoStore = new RepoStoreClient(ghToken, owner, repoInfo.name);
-  const orchestrationId = randomUUID().slice(0, 8);
-
-  await repoStore.createRun(orchestrationId);
+  const orchestrationId = await reserveRunId(repoStore);
   await repoStore.writeFile(
     orchestrationId,
     "secrets.json",
