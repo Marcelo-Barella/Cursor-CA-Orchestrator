@@ -50,8 +50,8 @@ export function getBlockedTasks(agents: Record<string, AgentState>): AgentState[
   return Object.values(agents).filter((a) => a.status === "blocked");
 }
 
-export function computeBranchName(branchPrefix: string, taskId: string, retryCount: number): string {
-  const base = `${branchPrefix}/${taskId}`;
+export function computeBranchName(branchPrefix: string, runId: string, taskId: string, retryCount: number): string {
+  const base = `${branchPrefix}/${runId}/${taskId}`;
   if (retryCount > 0) {
     return `${base}-retry-${retryCount}`;
   }
@@ -431,7 +431,7 @@ async function launchSingleTask(
   const prompt = task.create_repo
     ? buildRepoCreationPrompt(task, runId, ghToken, depOutputs)
     : buildWorkerPrompt(task, runId, ghToken, depOutputs);
-  const branch = computeBranchName(config.target.branch_prefix, taskId, state.agents[taskId]!.retry_count);
+  const branch = computeBranchName(config.target.branch_prefix, runId, taskId, state.agents[taskId]!.retry_count);
   const model = task.model ?? config.model;
   const info = await tryLaunchAgent(cursorClient, prompt, repoUrl, ref, model, branch, config.target.auto_create_pr);
   if (!info) {

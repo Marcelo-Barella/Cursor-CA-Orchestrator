@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
@@ -6,16 +7,59 @@ import type { OrchestratorConfig } from "./config/types.js";
 import { parseConfig, toYaml } from "./config/parse.js";
 import { validateConfig } from "./config/validate.js";
 
-export const SESSION_DIR = path.join(os.homedir(), ".cursor-orch");
-export const SESSION_PATH = path.join(SESSION_DIR, "session.yaml");
-export const SETUP_STATE_PATH = path.join(SESSION_DIR, "setup-state.yaml");
+type SessionPaths = {
+  sessionDir: string;
+  sessionPath: string;
+  setupStatePath: string;
+  historyPath: string;
+};
+
+function hashSessionKey(sessionKey: string): string {
+  return createHash("sha256").update(sessionKey).digest("hex").slice(0, 16);
+}
+
+function resolveSessionKey(cwd: string, sessionKey: string | undefined): string {
+  if (sessionKey && sessionKey.trim()) {
+    return sessionKey.trim();
+  }
+  return path.resolve(cwd);
+}
+
+export function resolveSessionPaths(opts?: {
+  homeDir?: string;
+  cwd?: string;
+  sessionKey?: string;
+}): SessionPaths {
+  const homeDir = opts?.homeDir ?? os.homedir();
+  const cwd = opts?.cwd ?? process.cwd();
+  const sessionKey = resolveSessionKey(cwd, opts?.sessionKey ?? process.env.CURSOR_ORCH_SESSION_KEY);
+  const sessionRoot = path.join(homeDir, ".cursor-orch");
+  const sessionDir = path.join(sessionRoot, "sessions", hashSessionKey(sessionKey));
+  return {
+    sessionDir,
+    sessionPath: path.join(sessionDir, "session.yaml"),
+    setupStatePath: path.join(sessionDir, "setup-state.yaml"),
+    historyPath: path.join(sessionDir, "history"),
+  };
+}
+
+const defaultSessionPaths = resolveSessionPaths();
+export const SESSION_DIR = defaultSessionPaths.sessionDir;
+export const SESSION_PATH = defaultSessionPaths.sessionPath;
+export const SETUP_STATE_PATH = defaultSessionPaths.setupStatePath;
 export const VALID_SETUP_STEPS = new Set(["model", "prompt", "confirm"]);
+
+const LEGACY_SESSION_ROOT = path.join(os.homedir(), ".cursor-orch");
+const LEGACY_SESSION_PATH = path.join(LEGACY_SESSION_ROOT, "session.yaml");
+const LEGACY_SETUP_STATE_PATH = path.join(LEGACY_SESSION_ROOT, "setup-state.yaml");
 
 export class Session {
   private _config: OrchestratorConfig;
   private _setupState: { active: boolean; step: string };
+  private readonly sessionPaths: SessionPaths;
 
-  constructor() {
+  constructor(paths: SessionPaths = resolveSessionPaths()) {
+    this.sessionPaths = paths;
     this._config = {
       name: "",
       model: "",
@@ -76,6 +120,10 @@ export class Session {
     return this._config;
   }
 
+  get historyPath(): string {
+    return this.sessionPaths.historyPath;
+  }
+
   buildConfig(): OrchestratorConfig {
     return this._config;
   }
@@ -129,35 +177,36 @@ export class Session {
   }
 
   saveSession(): void {
-    this.save(SESSION_PATH);
+    this.save(this.sessionPaths.sessionPath);
     this.saveSetupState();
   }
 
   loadSession(): boolean {
-    let loaded = false;
-    if (fs.existsSync(SESSION_PATH)) {
-      this.load(SESSION_PATH);
-      loaded = true;
+    const configPath = this.resolveReadablePath(this.sessionPaths.sessionPath, LEGACY_SESSION_PATH);
+    const loaded = Boolean(configPath);
+    if (configPath) {
+      this.load(configPath);
     }
     this.loadSetupState();
     return loaded;
   }
 
   private saveSetupState(): void {
-    fs.mkdirSync(SESSION_DIR, { recursive: true });
+    fs.mkdirSync(this.sessionPaths.sessionDir, { recursive: true });
     const payload = {
       active: this._setupState.active,
       step: this._setupState.step,
     };
-    fs.writeFileSync(SETUP_STATE_PATH, YAML.stringify(payload), "utf8");
+    fs.writeFileSync(this.sessionPaths.setupStatePath, YAML.stringify(payload), "utf8");
   }
 
   private loadSetupState(): void {
-    if (!fs.existsSync(SETUP_STATE_PATH)) {
+    const setupStatePath = this.resolveReadablePath(this.sessionPaths.setupStatePath, LEGACY_SETUP_STATE_PATH);
+    if (!setupStatePath) {
       this.clearSetupState();
       return;
     }
-    const raw = YAML.parse(fs.readFileSync(SETUP_STATE_PATH, "utf8"));
+    const raw = YAML.parse(fs.readFileSync(setupStatePath, "utf8"));
     if (typeof raw !== "object" || raw === null) {
       this.clearSetupState();
       return;
@@ -169,5 +218,15 @@ export class Session {
       step = "model";
     }
     this._setupState = { active, step };
+  }
+
+  private resolveReadablePath(primaryPath: string, fallbackPath: string): string | null {
+    if (fs.existsSync(primaryPath)) {
+      return primaryPath;
+    }
+    if (fs.existsSync(fallbackPath)) {
+      return fallbackPath;
+    }
+    return null;
   }
 }
