@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { RepoStoreClient } from "../api/repo-store.js";
+import { loadRunConfigSnapshot } from "../dashboard.js";
 import type { OrchestratorConfig } from "../config/types.js";
 import { deserialize, readEvents } from "../state.js";
 import { buildLayout, updateAll } from "./layout.js";
@@ -20,18 +21,20 @@ export async function renderLiveTUI(
     refreshRequested = true;
   });
   let lastEventCount = 0;
+  let latestConfig = config;
   try {
     while (true) {
+      latestConfig = await loadRunConfigSnapshot(repoStore, runId, latestConfig);
       const jsonStr = await repoStore.readFile(runId, "state.json");
       const state = deserialize(jsonStr);
       const events = await readEvents(repoStore, runId);
-      const tuiState: TUIState = { state, config, events };
+      const tuiState: TUIState = { state, config: latestConfig, events };
       lastEventCount = updateAll(widgets, tuiState, lastEventCount);
       screen.render();
       if (TERMINAL_STATES.has(state.status)) {
-        await delay(2000);
-        screen.destroy();
-        break;
+        while (true) {
+          await delay(500);
+        }
       }
       const deadline = Date.now() + POLL_INTERVAL * 1000;
       while (Date.now() < deadline) {

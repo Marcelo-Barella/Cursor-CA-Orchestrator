@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { RepoStoreClient } from "./api/repo-store.js";
+import { parseConfig } from "./config/index.js";
 import type { OrchestratorConfig } from "./config/types.js";
 import { type OrchestrationEvent, type OrchestrationState, deserialize, readEvents } from "./state.js";
 import { isQuietProgress } from "./tui/progress.js";
@@ -107,13 +108,28 @@ export async function pollOnce(
   return { state, events, terminal: TERMINAL_STATES.has(state.status) };
 }
 
+export async function loadRunConfigSnapshot(
+  repoStore: RepoStoreClient,
+  runId: string,
+  fallback: OrchestratorConfig,
+): Promise<OrchestratorConfig> {
+  const content = await repoStore.readFile(runId, "config.yaml");
+  if (!content) return fallback;
+  try {
+    return parseConfig(content);
+  } catch {
+    return fallback;
+  }
+}
+
 export async function renderLiveInline(repoStore: RepoStoreClient, runId: string, config: OrchestratorConfig): Promise<void> {
+  let latestConfig = config;
   while (true) {
-    const { state, events, terminal } = await pollOnce(repoStore, runId, config);
+    latestConfig = await loadRunConfigSnapshot(repoStore, runId, latestConfig);
+    const { state, events, terminal } = await pollOnce(repoStore, runId, latestConfig);
     console.clear();
-    await renderSnapshot(state, config, events);
+    await renderSnapshot(state, latestConfig, events);
     if (terminal) {
-      await delay(2000);
       break;
     }
     await delay(POLL_INTERVAL * 1000);
