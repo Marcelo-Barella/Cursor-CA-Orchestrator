@@ -35,6 +35,7 @@ export interface OrchestrationState {
   orchestrator_agent_id: string | null;
   status: string;
   started_at: string | null;
+  delegation_phase_index: number | null;
   agents: Record<string, AgentState>;
   main_agent: LifecycleAgentState | null;
   phase_agents: Record<string, LifecycleAgentState>;
@@ -117,6 +118,7 @@ export function createInitialState(config: OrchestratorConfig, runId: string): O
     orchestrator_agent_id: null,
     status: "pending",
     started_at: null,
+    delegation_phase_index: null,
     agents,
     main_agent: null,
     phase_agents: {},
@@ -268,6 +270,7 @@ export function deserialize(jsonStr: string): OrchestrationState {
     orchestrator_agent_id: (raw.orchestrator_agent_id as string) ?? null,
     status: String(raw.status ?? "pending"),
     started_at: (raw.started_at as string) ?? null,
+    delegation_phase_index: typeof raw.delegation_phase_index === "number" ? raw.delegation_phase_index : null,
     agents,
     main_agent: mainAgent,
     phase_agents: phaseAgents,

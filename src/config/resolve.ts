@@ -630,7 +630,7 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
 
   const model = resolveStringValue({
     fieldName: "model",
-    defaultValue: "default",
+    defaultValue: "composer-2",
     flagValue: null,
     flagRef: "",
     envName: "CURSOR_ORCH_MODEL",

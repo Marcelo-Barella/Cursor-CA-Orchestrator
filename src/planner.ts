@@ -1,5 +1,5 @@
 import { jsonrepair } from "jsonrepair";
-import type { OrchestratorConfig, TaskConfig } from "./config/types.js";
+import type { DelegationGroupConfig, DelegationMapConfig, DelegationPhaseConfig, OrchestratorConfig, TaskConfig } from "./config/types.js";
 import { PLANNER_SYSTEM_PROMPT } from "./system-prompt.js";
 import type { RepoStoreClient } from "./api/repo-store.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -28,6 +28,20 @@ a file named \`task-plan.json\`.
 
 \`\`\`json
 {
+  "delegation_map": {
+    "version": 1,
+    "phases": [
+      {
+        "id": "<phase-id>",
+        "parallel_groups": [
+          {
+            "id": "<group-id>",
+            "tasks": ["<task-id>", "..."]
+          }
+        ]
+      }
+    ]
+  },
   "tasks": [
     {
       "id": "<unique-kebab-case-id>",
@@ -41,6 +55,8 @@ a file named \`task-plan.json\`.
   ]
 }
 \`\`\`
+
+The \`delegation_map\` must include all tasks exactly once unless there is a clear reason to omit a task from phased launch control.
 
 ## Dynamic Repository Creation
 
@@ -64,7 +80,7 @@ orchestrator will resolve the actual repo URL from upstream task outputs.
 ### Rules
 
 - \`id\` must be unique across all tasks and use kebab-case (e.g. \`add-auth-backend\`).
-- \`repo\` must exactly match one of the repository aliases listed above.
+- \`repo\` must exactly match one of the GitHub repository URLs listed above (same string as shown).
 - \`prompt\` must contain enough detail for an autonomous agent to complete the task \
 without additional context.
 - \`depends_on\` is a list of task IDs that must complete before this task starts. \
@@ -72,6 +88,10 @@ Use an empty list if there are no dependencies.
 - \`timeout_minutes\` is the estimated maximum time for the task (default 30).
 - Do NOT create circular dependencies.
 - Maximum 20 tasks.
+- For tasks targeting the same repository, do not claim unsafe parallel independence. \
+If two tasks can conflict, serialize them with \`depends_on\` and place them in separate phases or groups.
+- Use \`delegation_map.phases[].parallel_groups[].tasks\` to express safe launch waves. \
+Only place tasks in the same parallel group when they are truly safe to run together.
 
 ### Output Write Instructions
 
@@ -95,8 +115,9 @@ export function buildPlannerPrompt(
   bootstrapRepo: string,
 ): string {
   const repoLines: string[] = [];
-  for (const [alias, repo] of Object.entries(config.repositories)) {
-    repoLines.push(`- **${alias}**: \`${repo.url}\` (ref: \`${repo.ref}\`)`);
+  for (const [key, repo] of Object.entries(config.repositories)) {
+    if (key === "__bootstrap__") continue;
+    repoLines.push(`- \`${repo.url}\` (ref: \`${repo.ref}\`)`);
   }
   const repoList = repoLines.join("\n");
   const body = PLANNER_PROMPT_TEMPLATE.replace("{prompt}", config.prompt)
@@ -233,6 +254,72 @@ function resolveRepoAlias(
   return [...matches][0] ?? null;
 }
 
+function parseDelegationMap(rawMap: unknown, taskIds: Set<string>): DelegationMapConfig | null {
+  if (rawMap === undefined || rawMap === null) {
+    return null;
+  }
+  if (typeof rawMap !== "object") {
+    throw new Error("'delegation_map' must be an object");
+  }
+  const mapObj = rawMap as Record<string, unknown>;
+  if (!("phases" in mapObj) || mapObj.phases === undefined || mapObj.phases === null) {
+    return null;
+  }
+  if (!Array.isArray(mapObj.phases)) {
+    throw new Error("'delegation_map.phases' must be a list");
+  }
+  const assignedTaskIds = new Set<string>();
+  const phases: DelegationPhaseConfig[] = [];
+  let phaseIndex = 0;
+  for (const phase of mapObj.phases) {
+    phaseIndex += 1;
+    if (typeof phase !== "object" || phase === null) {
+      throw new Error("Each delegation phase must be an object");
+    }
+    const phaseObj = phase as Record<string, unknown>;
+    if (!("id" in phaseObj) || typeof phaseObj.id !== "string" || !phaseObj.id.trim()) {
+      throw new Error("Each delegation phase must have a non-empty string 'id'");
+    }
+    const rawGroups = phaseObj.parallel_groups ?? phaseObj.parallelGroups ?? phaseObj.groups;
+    if (!Array.isArray(rawGroups)) {
+      throw new Error(`Delegation phase '${phaseObj.id}' must include 'parallel_groups' as a list`);
+    }
+    const groups: DelegationGroupConfig[] = [];
+    let groupIndex = 0;
+    for (const group of rawGroups) {
+      groupIndex += 1;
+      if (typeof group !== "object" || group === null) {
+        throw new Error(`Each parallel group in phase '${phaseObj.id}' must be an object`);
+      }
+      const groupObj = group as Record<string, unknown>;
+      if (!("id" in groupObj) || typeof groupObj.id !== "string" || !groupObj.id.trim()) {
+        throw new Error(`Each parallel group in phase '${phaseObj.id}' must have a non-empty string 'id'`);
+      }
+      const rawTasks = groupObj.tasks ?? groupObj.task_ids ?? groupObj.taskIds;
+      if (!Array.isArray(rawTasks)) {
+        throw new Error(`Parallel group '${groupObj.id}' in phase '${phaseObj.id}' must include 'tasks' as a list`);
+      }
+      const taskIdsInGroup: string[] = [];
+      for (const taskId of rawTasks) {
+        if (typeof taskId !== "string" || !taskId.trim()) {
+          throw new Error(`Parallel group '${groupObj.id}' in phase '${phaseObj.id}' contains an invalid task id`);
+        }
+        if (!taskIds.has(taskId)) {
+          throw new Error(`Delegation map references unknown task '${taskId}'. Valid IDs: ${[...taskIds].sort().join(", ")}`);
+        }
+        if (assignedTaskIds.has(taskId)) {
+          throw new Error(`Delegation map assigns task '${taskId}' more than once`);
+        }
+        assignedTaskIds.add(taskId);
+        taskIdsInGroup.push(taskId);
+      }
+      groups.push({ id: String(groupObj.id).trim() || `group-${groupIndex}`, task_ids: taskIdsInGroup });
+    }
+    phases.push({ id: String(phaseObj.id).trim() || `phase-${phaseIndex}`, groups });
+  }
+  return { phases };
+}
+
 export function parseTaskPlan(planJson: string, config: OrchestratorConfig): TaskConfig[] {
   let data: unknown;
   try {
@@ -249,7 +336,8 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
   if (typeof data !== "object" || data === null || !("tasks" in data)) {
     throw new Error("Task plan must be a JSON object with a 'tasks' key");
   }
-  const rawTasks = (data as { tasks: unknown }).tasks;
+  const planObject = data as { tasks: unknown; delegation_map?: unknown; delegationMap?: unknown };
+  const rawTasks = planObject.tasks;
   if (!Array.isArray(rawTasks)) {
     throw new Error("'tasks' must be a list");
   }
@@ -279,7 +367,10 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
         : resolveRepoAlias(requestedRepoAlias, config.repositories, repoTokenIndex);
     if (requestedRepoAlias !== "__new__" && !isCreateRepo && !resolvedRepoAlias) {
       throw new Error(
-        `Task '${taskId}' references unknown repository '${requestedRepoAlias}'. Valid aliases: ${Object.keys(config.repositories).sort().join(", ")}`,
+        `Task '${taskId}' references unknown repository '${requestedRepoAlias}'. Valid repository URLs: ${Object.keys(config.repositories)
+          .filter((k) => k !== "__bootstrap__")
+          .sort()
+          .join(", ")}`,
       );
     }
     const dependsOn = Array.isArray(o.depends_on) ? (o.depends_on as string[]) : [];
@@ -335,6 +426,7 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
       );
     }
   }
+  config.delegation_map = parseDelegationMap(planObject.delegation_map ?? planObject.delegationMap, taskIds);
   return tasks;
 }
 

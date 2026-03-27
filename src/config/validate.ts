@@ -1,4 +1,5 @@
-import type { OrchestratorConfig, TaskConfig } from "./types.js";
+import type { DelegationMapConfig, OrchestratorConfig, TaskConfig } from "./types.js";
+import { resolveRepoTarget } from "../lib/repo-target.js";
 
 const BRANCH_NAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9._/-]*[a-zA-Z0-9])?$/;
 
@@ -104,6 +105,17 @@ function buildRepoTokenIndex(repositories: Record<string, { url: string; ref: st
   return tokenIndex;
 }
 
+function validateRepositoryResolvableUrls(repositories: Record<string, { url: string; ref: string }>): void {
+  for (const [alias, rc] of Object.entries(repositories)) {
+    const resolved = resolveRepoTarget(rc.url, repositories, rc.ref);
+    if (!resolved) {
+      throw new Error(
+        `repositories entry '${alias}' has url '${rc.url}' that cannot be resolved to a GitHub repository (use https://github.com/owner/repo or owner/repo)`,
+      );
+    }
+  }
+}
+
 export function validateRepoRefs(tasks: TaskConfig[], repositories: Record<string, { url: string; ref: string }>): void {
   const repoTokenIndex = buildRepoTokenIndex(repositories);
   for (const task of tasks) {
@@ -135,11 +147,92 @@ function validateBranchNames(config: OrchestratorConfig): void {
   }
 }
 
+function validateDelegationMap(
+  delegationMap: DelegationMapConfig,
+  tasks: TaskConfig[],
+  taskIds: Set<string>,
+): void {
+  if (!Array.isArray(delegationMap.phases) || delegationMap.phases.length === 0) {
+    throw new Error("delegation_map must define a non-empty 'phases' array");
+  }
+  const phaseIds = new Set<string>();
+  const assignedTasks = new Map<string, { phaseId: string; groupId: string; phaseIndex: number; groupIndex: number }>();
+  for (const [phaseIndex, phase] of delegationMap.phases.entries()) {
+    if (!phase.id || typeof phase.id !== "string") {
+      throw new Error(`delegation_map phase at index ${phaseIndex} must define a non-empty 'id'`);
+    }
+    if (phaseIds.has(phase.id)) {
+      throw new Error(`delegation_map has duplicate phase id '${phase.id}'`);
+    }
+    phaseIds.add(phase.id);
+    if (!Array.isArray(phase.groups) || phase.groups.length === 0) {
+      throw new Error(`delegation_map phase '${phase.id}' must define a non-empty 'groups' array`);
+    }
+    const groupIds = new Set<string>();
+    for (const [groupIndex, group] of phase.groups.entries()) {
+      if (!group.id || typeof group.id !== "string") {
+        throw new Error(`delegation_map phase '${phase.id}' group at index ${groupIndex} must define a non-empty 'id'`);
+      }
+      if (groupIds.has(group.id)) {
+        throw new Error(`delegation_map phase '${phase.id}' has duplicate group id '${group.id}'`);
+      }
+      groupIds.add(group.id);
+      if (!Array.isArray(group.task_ids) || group.task_ids.length === 0) {
+        throw new Error(`delegation_map phase '${phase.id}' group '${group.id}' must define a non-empty 'task_ids' array`);
+      }
+      const inGroup = new Set<string>();
+      for (const taskId of group.task_ids) {
+        if (!taskIds.has(taskId)) {
+          throw new Error(`delegation_map phase '${phase.id}' group '${group.id}' references unknown task '${taskId}'`);
+        }
+        if (inGroup.has(taskId)) {
+          throw new Error(`delegation_map phase '${phase.id}' group '${group.id}' repeats task '${taskId}'`);
+        }
+        inGroup.add(taskId);
+        if (assignedTasks.has(taskId)) {
+          const previous = assignedTasks.get(taskId)!;
+          throw new Error(
+            `delegation_map task '${taskId}' appears multiple times: '${previous.phaseId}/${previous.groupId}' and '${phase.id}/${group.id}'`,
+          );
+        }
+        assignedTasks.set(taskId, { phaseId: phase.id, groupId: group.id, phaseIndex, groupIndex });
+      }
+    }
+  }
+
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  for (const [taskId, assignment] of assignedTasks.entries()) {
+    const task = taskById.get(taskId);
+    if (!task) {
+      continue;
+    }
+    for (const depId of task.depends_on) {
+      const depAssignment = assignedTasks.get(depId);
+      if (!depAssignment) {
+        continue;
+      }
+      if (depAssignment.phaseIndex > assignment.phaseIndex) {
+        throw new Error(
+          `delegation_map impossible ordering: task '${taskId}' in phase '${assignment.phaseId}' depends on '${depId}' in later phase '${depAssignment.phaseId}'`,
+        );
+      }
+      if (depAssignment.phaseIndex === assignment.phaseIndex && depAssignment.groupIndex !== assignment.groupIndex) {
+        throw new Error(
+          `delegation_map impossible ordering: task '${taskId}' in '${assignment.phaseId}/${assignment.groupId}' depends on '${depId}' in parallel group '${depAssignment.groupId}'`,
+        );
+      }
+    }
+  }
+}
+
 export function validateConfig(config: OrchestratorConfig): void {
   if (!config.prompt && config.tasks.length === 0) {
     throw new Error("Config must specify either 'prompt' or 'tasks'");
   }
   validateBranchName(config.target.branch_prefix, "branch_prefix");
+  if (Object.keys(config.repositories).length > 0) {
+    validateRepositoryResolvableUrls(config.repositories);
+  }
   if (config.prompt && config.tasks.length === 0) {
     return;
   }
@@ -147,6 +240,9 @@ export function validateConfig(config: OrchestratorConfig): void {
   const taskIds = validateUniqueIds(config.tasks);
   validateRepoRefs(config.tasks, config.repositories);
   validateDepRefs(config.tasks, taskIds);
+  if (config.delegation_map) {
+    validateDelegationMap(config.delegation_map, config.tasks, taskIds);
+  }
   const cycle = detectCycle(config.tasks);
   if (cycle) {
     throw new Error(`Circular dependency detected: ${cycle}`);

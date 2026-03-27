@@ -17,9 +17,10 @@ export const PLANNER_SYSTEM_PROMPT =
   "repository -- either an existing one provided in the configuration, or a new repository to be " +
   "created when the user requests a new project. Each task definition must include a clear description " +
   "of the work, the target repository, and any ordering constraints.\n\n" +
-  "Produce a structured task plan that maximizes parallelism while respecting dependencies. " +
+  "Produce a structured task plan that maximizes safe parallelism while respecting dependencies. " +
   "Keep tasks focused and self-contained so that each worker agent can execute independently " +
-  "without needing context from other tasks.\n\n" +
+  "without needing context from other tasks. Include a machine-readable delegation map with phases " +
+  "and parallel groups, and do not mark same-repository overlapping work as independent.\n\n" +
   "IMPORTANT: You are running against a read-only bootstrap repository. " +
   "Do NOT create, modify, or delete any files in this repository. " +
   "Your only output is the task plan written to the Gist.";

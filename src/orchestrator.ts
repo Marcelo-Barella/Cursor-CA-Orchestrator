@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { CursorClient, type AgentInfo } from "./api/cursor-client.js";
 import { RepoStoreClient } from "./api/repo-store.js";
 import type { OrchestratorConfig, TaskConfig } from "./config/types.js";
+import { canonicalizeOrchestratorConfig } from "./config/canonicalize.js";
 import { parseConfig, toYaml } from "./config/parse.js";
 import { buildPlannerPrompt, parseTaskPlan, waitForPlan } from "./planner.js";
 import { buildRepoCreationPrompt, buildWorkerPrompt } from "./prompt-builder.js";
@@ -19,6 +20,7 @@ import {
   syncFromRepo,
   syncToRepo,
 } from "./state.js";
+import { resolveRepoTarget } from "./lib/repo-target.js";
 
 const POLL_INTERVAL = 30;
 const BLOCKED_TIMEOUT_SECONDS = 300;
@@ -44,6 +46,133 @@ export function getReadyTasks(graph: Record<string, Set<string>>, agents: Record
       return [...deps].every((d) => agents[d]?.status === "finished");
     })
     .map(([taskId]) => taskId);
+}
+
+type DelegationPhase = {
+  id: string;
+  task_ids: string[];
+};
+
+function toTaskIdList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const id = item.trim();
+    if (!id) continue;
+    out.push(id);
+  }
+  return out;
+}
+
+function extractDelegationPhases(config: OrchestratorConfig, knownTaskIds: Set<string>): DelegationPhase[] | null {
+  if (config.delegation_map && Array.isArray(config.delegation_map.phases) && config.delegation_map.phases.length > 0) {
+    const phases: DelegationPhase[] = [];
+    for (const [index, phase] of config.delegation_map.phases.entries()) {
+      const ids = new Set<string>();
+      for (const group of phase.groups) {
+        for (const taskId of group.task_ids) {
+          if (knownTaskIds.has(taskId)) ids.add(taskId);
+        }
+      }
+      if (ids.size === 0) continue;
+      const phaseId = phase.id || `phase-${index + 1}`;
+      phases.push({ id: phaseId, task_ids: [...ids] });
+    }
+    if (phases.length > 0) {
+      return phases;
+    }
+  }
+  const rawConfig = config as unknown as {
+    delegation_map?: unknown;
+    delegationMap?: unknown;
+  };
+  const rawMap = rawConfig.delegation_map ?? rawConfig.delegationMap;
+  if (typeof rawMap !== "object" || rawMap === null) return null;
+  const mapObj = rawMap as {
+    phases?: unknown;
+    waves?: unknown;
+  };
+  const rawPhases = Array.isArray(mapObj.phases) ? mapObj.phases : Array.isArray(mapObj.waves) ? mapObj.waves : null;
+  if (!rawPhases) return null;
+  const phases: DelegationPhase[] = [];
+  for (let index = 0; index < rawPhases.length; index += 1) {
+    const phaseEntry = rawPhases[index];
+    if (typeof phaseEntry !== "object" || phaseEntry === null) continue;
+    const phaseObj = phaseEntry as {
+      id?: unknown;
+      phase_id?: unknown;
+      name?: unknown;
+      tasks?: unknown;
+      parallel_groups?: unknown;
+      parallelGroups?: unknown;
+      groups?: unknown;
+    };
+    const ids = new Set<string>();
+    for (const taskId of toTaskIdList(phaseObj.tasks)) {
+      if (knownTaskIds.has(taskId)) ids.add(taskId);
+    }
+    const rawGroups = Array.isArray(phaseObj.parallel_groups)
+      ? phaseObj.parallel_groups
+      : Array.isArray(phaseObj.parallelGroups)
+        ? phaseObj.parallelGroups
+        : Array.isArray(phaseObj.groups)
+          ? phaseObj.groups
+          : [];
+    for (const groupEntry of rawGroups) {
+      if (typeof groupEntry !== "object" || groupEntry === null) continue;
+      const groupObj = groupEntry as { task_ids?: unknown; taskIds?: unknown; tasks?: unknown };
+      for (const taskId of toTaskIdList(groupObj.task_ids ?? groupObj.taskIds ?? groupObj.tasks)) {
+        if (knownTaskIds.has(taskId)) ids.add(taskId);
+      }
+    }
+    if (ids.size === 0) continue;
+    const rawId = phaseObj.id ?? phaseObj.phase_id ?? phaseObj.name;
+    const phaseId = typeof rawId === "string" && rawId.trim() ? rawId.trim() : `phase-${index + 1}`;
+    phases.push({ id: phaseId, task_ids: [...ids] });
+  }
+  if (phases.length === 0) return null;
+  return phases;
+}
+
+function isTerminalStatus(status: string): boolean {
+  return status === "finished" || status === "failed" || status === "stopped";
+}
+
+function buildPhaseIndexMap(phases: DelegationPhase[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (let index = 0; index < phases.length; index += 1) {
+    for (const taskId of phases[index]!.task_ids) {
+      if (!map.has(taskId)) {
+        map.set(taskId, index);
+      }
+    }
+  }
+  return map;
+}
+
+function phaseIsTerminal(state: OrchestrationState, phase: DelegationPhase): boolean {
+  return phase.task_ids.every((taskId) => isTerminalStatus(state.agents[taskId]?.status ?? "finished"));
+}
+
+export function filterEligibleReadyTasks(state: OrchestrationState, config: OrchestratorConfig, readyTasks: string[]): string[] {
+  const phases = extractDelegationPhases(config, new Set(Object.keys(state.agents)));
+  if (!phases) return readyTasks;
+  const phaseIndexByTask = buildPhaseIndexMap(phases);
+  let phaseIndex = state.delegation_phase_index ?? 0;
+  if (phaseIndex < 0) phaseIndex = 0;
+  while (phaseIndex < phases.length && phaseIsTerminal(state, phases[phaseIndex]!)) {
+    phaseIndex += 1;
+  }
+  state.delegation_phase_index = phaseIndex;
+  if (phaseIndex >= phases.length) {
+    return readyTasks.filter((taskId) => !phaseIndexByTask.has(taskId));
+  }
+  return readyTasks.filter((taskId) => {
+    const mappedIndex = phaseIndexByTask.get(taskId);
+    if (mappedIndex === undefined) return true;
+    return mappedIndex === phaseIndex;
+  });
 }
 
 export function getBlockedTasks(agents: Record<string, AgentState>): AgentState[] {
@@ -377,14 +506,22 @@ async function resolveRepoForTask(
   }
   if (task.repo in config.repositories) {
     const rc = config.repositories[task.repo]!;
-    return [rc.url, rc.ref];
+    const resolved = resolveRepoTarget(rc.url, config.repositories, rc.ref);
+    if (resolved) {
+      return resolved;
+    }
+    throw new Error(`Repository '${task.repo}' resolved to invalid repository target '${rc.url}'`);
   }
   for (const [, outputs] of Object.entries(depOutputs)) {
     if (outputs && typeof outputs.repo_url === "string") {
-      return [outputs.repo_url as string, "main"];
+      const fallbackRef = typeof outputs.repo_ref === "string" ? outputs.repo_ref : "main";
+      const resolved = resolveRepoTarget(outputs.repo_url as string, config.repositories, fallbackRef);
+      if (resolved) {
+        return resolved;
+      }
     }
   }
-  throw new Error(`Cannot resolve repository for task ${task.id}: repo alias '${task.repo}' not found and no upstream repo_url`);
+  throw new Error(`Cannot resolve repository for task ${task.id}: repo '${task.repo}' not found and no upstream repo_url`);
 }
 
 async function gatherDepOutputs(task: TaskConfig, repoStore: RepoStoreClient, runId: string): Promise<Record<string, Record<string, unknown>>> {
@@ -404,12 +541,12 @@ async function tryLaunchAgent(
   model: string,
   branch: string,
   autoPr: boolean,
-): Promise<AgentInfo | null> {
+): Promise<{ info: AgentInfo | null; error: string | null }> {
   try {
-    return await cursorClient.launchAgent(prompt, repoUrl, ref, model, branch, autoPr);
-  } catch {
-    console.error("Failed to launch agent");
-    return null;
+    return { info: await cursorClient.launchAgent(prompt, repoUrl, ref, model, branch, autoPr), error: null };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { info: null, error: detail };
   }
 }
 
@@ -433,13 +570,23 @@ async function launchSingleTask(
     : buildWorkerPrompt(task, runId, ghToken, depOutputs);
   const branch = computeBranchName(config.target.branch_prefix, taskId, state.agents[taskId]!.retry_count);
   const model = task.model ?? config.model;
-  const info = await tryLaunchAgent(cursorClient, prompt, repoUrl, ref, model, branch, config.target.auto_create_pr);
-  if (!info) {
+  const launch = await tryLaunchAgent(cursorClient, prompt, repoUrl, ref, model, branch, config.target.auto_create_pr);
+  if (!launch.info) {
+    const detail = launch.error ?? "unknown launch error";
+    const summary = `Failed to launch agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${ref})`;
+    console.error(summary);
     state.agents[taskId]!.status = "failed";
-    state.agents[taskId]!.summary = "Failed to launch agent";
-    await appendEvent(repoStore, runId, makeEvent("task_failed", `Task ${taskId} failed: launch error`, taskId));
+    state.agents[taskId]!.summary = summary;
+    await appendEvent(
+      repoStore,
+      runId,
+      makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
+        payload: { repository: repoUrl, ref },
+      }),
+    );
     return;
   }
+  const info = launch.info;
   const agent = state.agents[taskId]!;
   agent.agent_id = info.id;
   agent.status = "launching";
@@ -458,13 +605,12 @@ async function launchSingleTask(
 async function launchReadyTasks(
   state: OrchestrationState,
   config: OrchestratorConfig,
-  graph: Record<string, Set<string>>,
+  taskIds: string[],
   cursorClient: CursorClient,
   repoStore: RepoStoreClient,
   runId: string,
 ): Promise<void> {
-  const ready = getReadyTasks(graph, state.agents);
-  for (const taskId of ready) {
+  for (const taskId of taskIds) {
     await launchSingleTask(taskId, state, config, cursorClient, repoStore, runId);
   }
 }
@@ -547,6 +693,10 @@ async function runPlanningPhase(
     config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
     const parsedTasks = parseTaskPlan(planContent, config);
     config.tasks = parsedTasks;
+    const canonPlan = canonicalizeOrchestratorConfig(config);
+    config.repositories = canonPlan.repositories;
+    config.tasks = canonPlan.tasks;
+    config.delegation_map = canonPlan.delegation_map;
     await repoStore.writeFile(runId, "config.yaml", toYaml(config));
     await appendEvent(
       repoStore,
@@ -592,7 +742,8 @@ async function persistUnexpectedFailure(state: OrchestrationState, repoStore: Re
 
 export async function runOrchestration(runId: string, cursorClient: CursorClient, repoStore: RepoStoreClient): Promise<void> {
   const configStr = await repoStore.readFile(runId, "config.yaml");
-  const config = parseConfig(configStr);
+  let config = parseConfig(configStr);
+  config = canonicalizeOrchestratorConfig(config);
 
   let planningRan = false;
   let planningOk = false;
@@ -607,6 +758,10 @@ export async function runOrchestration(runId: string, cursorClient: CursorClient
         config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
         const parsedTasks = parseTaskPlan(planContent, config);
         config.tasks = parsedTasks;
+        const canonReuse = canonicalizeOrchestratorConfig(config);
+        config.repositories = canonReuse.repositories;
+        config.tasks = canonReuse.tasks;
+        config.delegation_map = canonReuse.delegation_map;
         await repoStore.writeFile(runId, "config.yaml", toYaml(config));
         await appendEvent(
           repoStore,
@@ -679,7 +834,9 @@ async function orchestrationLoop(
     }
     await pollAgents(state, cursorClient, repoStore, runId);
     await handleBlocked(state, cursorClient, repoStore, runId, graph);
-    await launchReadyTasks(state, config, graph, cursorClient, repoStore, runId);
+    const readyTasks = getReadyTasks(graph, state.agents);
+    const eligibleReadyTasks = filterEligibleReadyTasks(state, config, readyTasks);
+    await launchReadyTasks(state, config, eligibleReadyTasks, cursorClient, repoStore, runId);
     await writeProgress(state, config, repoStore, runId);
     if (await checkCompletion(state, repoStore, runId)) {
       break;
@@ -747,7 +904,6 @@ async function checkFailure(state: OrchestrationState, graph: Record<string, Set
     runId,
     makeEvent("orchestration_failed", `Orchestration failed: ${state.error}`, null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
   );
-  console.error(`Orchestration failed: ${state.error}`);
   return true;
 }
 

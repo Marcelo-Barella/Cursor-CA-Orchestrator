@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execute } from "@oclif/core";
-import { toYaml } from "./config/index.js";
+import { canonicalizeOrchestratorConfig, toYaml } from "./config/index.js";
 import { loadEnvFile } from "./env.js";
 import { requireEnv, runOrchestrationCli } from "./lib/commands/run-impl.js";
 import { runRepl } from "./repl.js";
@@ -11,8 +11,9 @@ export async function runInteractive(): Promise<void> {
     console.log("Exiting.");
     return;
   }
-  console.log(`Validating config: ${config.name} (${config.tasks.length} tasks, ${Object.keys(config.repositories).length} repos)...`);
-  const configYaml = toYaml(config);
+  const runConfig = canonicalizeOrchestratorConfig(config);
+  console.log(`Validating config: ${runConfig.name} (${runConfig.tasks.length} tasks, ${Object.keys(runConfig.repositories).length} repos)...`);
+  const configYaml = toYaml(runConfig);
   const env = requireEnv(["CURSOR_API_KEY", "GH_TOKEN"], {
     code: "RUN-004",
     severity: "FATAL",
@@ -23,7 +24,7 @@ export async function runInteractive(): Promise<void> {
     example: "CURSOR_API_KEY=... GH_TOKEN=... cursor-orch run --config ./orchestrator.yaml",
     exitCode: 1,
   });
-  await runOrchestrationCli(config, configYaml, env.CURSOR_API_KEY!, env.GH_TOKEN!, undefined);
+  await runOrchestrationCli(runConfig, configYaml, env.CURSOR_API_KEY!, env.GH_TOKEN!, undefined);
 }
 
 async function main(): Promise<void> {
