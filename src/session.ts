@@ -11,20 +11,24 @@ export const SESSION_PATH = path.join(SESSION_DIR, "session.yaml");
 export const SETUP_STATE_PATH = path.join(SESSION_DIR, "setup-state.yaml");
 export const VALID_SETUP_STEPS = new Set(["model", "prompt", "confirm"]);
 
+export function createDefaultOrchestratorConfig(): OrchestratorConfig {
+  return {
+    name: "",
+    model: "",
+    prompt: "",
+    repositories: {},
+    tasks: [],
+    target: { auto_create_pr: true, branch_prefix: "cursor-orch" },
+    bootstrap_repo_name: "cursor-orch-bootstrap",
+  };
+}
+
 export class Session {
   private _config: OrchestratorConfig;
   private _setupState: { active: boolean; step: string };
 
   constructor() {
-    this._config = {
-      name: "",
-      model: "",
-      prompt: "",
-      repositories: {},
-      tasks: [],
-      target: { auto_create_pr: true, branch_prefix: "cursor-orch" },
-      bootstrap_repo_name: "cursor-orch-bootstrap",
-    };
+    this._config = createDefaultOrchestratorConfig();
     this._setupState = { active: false, step: "model" };
   }
 
@@ -70,6 +74,11 @@ export class Session {
 
   setBootstrapRepo(name: string): void {
     this._config.bootstrap_repo_name = name;
+  }
+
+  resetSessionToDefaults(): void {
+    this._config = createDefaultOrchestratorConfig();
+    this.clearSetupState();
   }
 
   get config(): OrchestratorConfig {

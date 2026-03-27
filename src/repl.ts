@@ -5,21 +5,26 @@ import tty from "node:tty";
 import type { Interface as ReadlineInterface } from "node:readline/promises";
 import {
   COMMANDS,
+  cmdConfig,
+  cmdConfigClear,
   cmdHelp,
   cmdPromptSet,
+  cmdRepo,
   cmdRun,
+  formatRepoEquivalentCommand,
   promptSetCommandText,
   setupSummaryLines,
   validateModelValue,
   validatePromptValue,
 } from "./commands.js";
+import { classifyRepoPositionalArgs, needsRepoInteractive } from "./lib/repo-interactive.js";
 import type { OrchestratorConfig } from "./config/types.js";
 import { Session } from "./session.js";
 import { readReplLineTTY } from "./lib/repl/tty-line-editor.js";
 import { readVersion } from "./version.js";
 import { tui } from "./tui/style.js";
 
-const NON_MUTATION = new Set(["help", "config", "repos", "run"]);
+const NON_MUTATION = new Set(["help", "config", "repos", "run", "prompt"]);
 
 function parseInput(raw: string): [string, string[]] {
   const parts = raw.slice(1).trim().split(/\s+/);
@@ -47,6 +52,78 @@ function isInteractiveTty(): boolean {
 }
 
 type RlHolder = { rl: ReadlineInterface };
+
+async function readPromptLine(
+  holder: RlHolder,
+  useTtyEditor: boolean,
+  prompt: string,
+): Promise<string | null> {
+  if (!useTtyEditor) {
+    return readLineOrEof(holder.rl, prompt);
+  }
+  process.stdin.resume();
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true,
+  });
+  try {
+    return await readLineOrEof(rl, prompt);
+  } finally {
+    rl.close();
+  }
+}
+
+async function promptRepoFields(
+  session: Session,
+  holder: RlHolder,
+  useTtyEditor: boolean,
+  _historyPath: string,
+  initialArgs: string[],
+): Promise<string | null> {
+  let { alias, url, ref } = classifyRepoPositionalArgs(initialArgs);
+
+  while (!alias.trim()) {
+    const raw = await readPromptLine(holder, useTtyEditor, "Repository alias: ");
+    if (raw === null) {
+      return null;
+    }
+    if (isControl(raw, "exit")) {
+      return null;
+    }
+    alias = raw.trim();
+    if (!alias) {
+      console.log(tui.red("Repository alias cannot be empty."));
+    }
+  }
+
+  while (!url.trim()) {
+    const raw = await readPromptLine(holder, useTtyEditor, "Repository URL: ");
+    if (raw === null) {
+      return null;
+    }
+    if (isControl(raw, "exit")) {
+      return null;
+    }
+    url = raw.trim();
+    if (!url) {
+      console.log(tui.red("Repository URL cannot be empty."));
+    }
+  }
+
+  const refRaw = await readPromptLine(holder, useTtyEditor, "Git ref [main]: ");
+  if (refRaw === null) {
+    return null;
+  }
+  if (isControl(refRaw, "exit")) {
+    return null;
+  }
+  ref = refRaw.trim() || "main";
+
+  const out = cmdRepo(session, alias, url, ref);
+  const equiv = formatRepoEquivalentCommand(alias, url, ref);
+  return [out, `Equivalent command: ${equiv}`].join("\n");
+}
 
 async function readLineOrEof(rl: ReadlineInterface, prompt: string): Promise<string | null> {
   return new Promise((resolve, reject) => {
@@ -95,7 +172,7 @@ async function runGuidedSetup(
   while (true) {
     if (step === "model") {
       console.log("Step 1/2 - Model");
-      const raw = await readLineOrEof(holder.rl, "AI model [default: gpt-5]: ");
+      const raw = await readLineOrEof(holder.rl, "AI model [default: composer-2]: ");
       if (raw === null) {
         return null;
       }
@@ -111,7 +188,7 @@ async function runGuidedSetup(
       }
       let value: string;
       if (text === "" || isControl(text, "skip")) {
-        value = "gpt-5";
+        value = "composer-2";
       } else {
         const err = validateModelValue(text);
         if (err) {
@@ -273,6 +350,11 @@ function dispatch(cmd: string, args: string[], session: Session): string | null 
         return cmdInfo.handler(session, args[0]) as string;
       case "bootstrap-repo":
         return cmdInfo.handler(session, args[0] ?? "") as string;
+      case "config":
+        if (args[0]?.toLowerCase() === "clear") {
+          return cmdConfigClear(session);
+        }
+        return cmdConfig(session);
       case "save":
         return cmdInfo.handler(session, args[0]) as string;
       case "load":
@@ -382,6 +464,14 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
         console.log(tui.red(`Unknown command: /${cmd}. Type /help for available commands.`));
         continue;
       }
+      if (cmd === "repo" && needsRepoInteractive(args)) {
+        const msg = await promptRepoFields(session, holder, useTtyEditor, historyPath, args);
+        if (msg) {
+          console.log(msg);
+          session.saveSession();
+        }
+        continue;
+      }
       if (cmd === "run") {
         const result = cmdRun(session);
         if ("errors" in result) {
@@ -398,7 +488,9 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
       if (output) {
         console.log(output);
       }
-      if (!NON_MUTATION.has(cmd)) {
+      const persistSession =
+        !NON_MUTATION.has(cmd) || (cmd === "config" && args[0]?.toLowerCase() === "clear");
+      if (persistSession) {
         session.saveSession();
       }
     }
