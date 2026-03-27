@@ -21,6 +21,12 @@ const EXTRA_LABELS: SuggestionEntry[] = [
     description: "Remove a repository (same as /repo-remove).",
     dispatchKey: "repo-remove",
   },
+  {
+    label: "/config clear",
+    usage: "/config clear",
+    description: "Reset session to defaults (same as /config clear).",
+    dispatchKey: "config",
+  },
 ];
 
 const ALL_SORTED: SuggestionEntry[] = (() => {

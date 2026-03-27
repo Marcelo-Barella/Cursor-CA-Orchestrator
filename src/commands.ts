@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
+import { copyToClipboard } from "./lib/clipboard.js";
 import type { Session } from "./session.js";
 import { tui } from "./tui/style.js";
 
@@ -24,6 +25,26 @@ export function validatePromptValue(prompt: string): string | null {
   return null;
 }
 
+export function validateRepoAdd(alias: string, url: string): string | null {
+  if (!alias) {
+    return "Repository alias cannot be empty.";
+  }
+  if (!url) {
+    return "Repository URL cannot be empty.";
+  }
+  return null;
+}
+
+export function formatRepoEquivalentCommand(alias: string, url: string, ref: string): string {
+  const a = alias.trim();
+  const u = url.trim();
+  const r = ref.trim() || "main";
+  if (r === "main") {
+    return `/repo ${a} ${u}`;
+  }
+  return `/repo ${a} ${u} ${r}`;
+}
+
 export function promptPreview(prompt: string, maxChars = 120): string {
   const text = prompt
     .split("\n")
@@ -46,7 +67,7 @@ export function promptSetCommandText(prompt: string): string {
 
 export function setupSummaryLines(session: Session): string[] {
   const cfg = session.config;
-  const model = cfg.model || "gpt-5";
+  const model = cfg.model || "composer-2";
   const prompt = promptPreview(cfg.prompt, 120);
   const name = cfg.name || "<empty>";
   const repoCount = Object.keys(cfg.repositories).length;
@@ -77,12 +98,19 @@ export function cmdModel(session: Session, model: string): string {
 }
 
 export function cmdRepo(session: Session, alias: string, url: string, ref = "main"): string {
-  const replaced = session.addRepo(alias, url, ref);
+  const aliasNorm = alias.trim();
+  const urlNorm = url.trim();
+  const error = validateRepoAdd(aliasNorm, urlNorm);
+  if (error) {
+    return tui.red(error);
+  }
+  const refNorm = ref.trim() || "main";
+  const replaced = session.addRepo(aliasNorm, urlNorm, refNorm);
   const parts: string[] = [];
   if (replaced) {
-    parts.push(`${tui.red("Replacing existing repo")} ${tui.bold(alias)}`);
+    parts.push(`${tui.red("Replacing existing repo")} ${tui.bold(aliasNorm)}`);
   }
-  parts.push(`${tui.green("Repo added:")} ${tui.bold(alias)} -> ${url} ${tui.dim(`(ref: ${ref})`)}`);
+  parts.push(`${tui.green("Repo added:")} ${tui.bold(aliasNorm)} -> ${urlNorm} ${tui.dim(`(ref: ${refNorm})`)}`);
   return parts.join("\n");
 }
 
@@ -115,6 +143,16 @@ export function cmdPromptSet(session: Session, text: string): string {
   return `${tui.green("Prompt set")} ${tui.dim(`(${text.length} characters)`)}`;
 }
 
+export function cmdPrompt(session: Session): string {
+  const text = session.config.prompt;
+  const lines = [tui.bold("Prompt:"), text || tui.dim("(not set)")];
+  const copied = copyToClipboard(text);
+  lines.push(
+    copied ? tui.green("Copied to clipboard.") : tui.yellow("Could not copy to clipboard."),
+  );
+  return lines.join("\n");
+}
+
 export function cmdBranchPrefix(session: Session, prefix: string): string {
   session.setBranchPrefix(prefix);
   return `${tui.green("Branch prefix set to")} ${tui.bold(prefix)}`;
@@ -139,6 +177,14 @@ export function cmdAutoPr(session: Session, toggle?: string): string {
 export function cmdBootstrapRepo(session: Session, name: string): string {
   session.setBootstrapRepo(name);
   return `${tui.green("Bootstrap repo set to")} ${tui.bold(name)}`;
+}
+
+export function cmdConfigClear(session: Session): string {
+  session.resetSessionToDefaults();
+  return [
+    tui.green("Cleared session configuration."),
+    tui.dim("All settings reset to defaults; guided setup state cleared."),
+  ].join("\n");
 }
 
 export function cmdConfig(session: Session): string {
@@ -200,7 +246,13 @@ export function cmdRun(session: Session): { errors: string[] } | { config: impor
 export const COMMANDS: Record<string, CommandInfo> = {
   name: { name: "name", handler: cmdName as (...args: unknown[]) => unknown, usage: "/name <session-name>", description: "Set the session name." },
   model: { name: "model", handler: cmdModel as (...args: unknown[]) => unknown, usage: "/model <model-name>", description: "Set the AI model to use." },
-  repo: { name: "repo", handler: cmdRepo as (...args: unknown[]) => unknown, usage: "/repo <alias> <url> [ref]", description: "Add or replace a repository." },
+  repo: {
+    name: "repo",
+    handler: cmdRepo as (...args: unknown[]) => unknown,
+    usage: "/repo [<alias> <url> [ref]]",
+    description:
+      "Add or replace a repository. With no args or only an alias or URL, the REPL prompts for the rest (type exit or EOF to cancel).",
+  },
   "repo-remove": {
     name: "repo-remove",
     handler: cmdRepoRemove as (...args: unknown[]) => unknown,
@@ -213,6 +265,12 @@ export const COMMANDS: Record<string, CommandInfo> = {
     handler: cmdPromptSet as (...args: unknown[]) => unknown,
     usage: "/prompt-set <text>",
     description: "Set the prompt text directly.",
+  },
+  prompt: {
+    name: "prompt",
+    handler: cmdPrompt as (...args: unknown[]) => unknown,
+    usage: "/prompt",
+    description: "Print the full configured prompt and copy it to the clipboard.",
   },
   "branch-prefix": {
     name: "branch-prefix",
@@ -232,7 +290,12 @@ export const COMMANDS: Record<string, CommandInfo> = {
     usage: "/bootstrap-repo <name>",
     description: "Set the bootstrap repository name.",
   },
-  config: { name: "config", handler: cmdConfig as (...args: unknown[]) => unknown, usage: "/config", description: "Show current configuration summary." },
+  config: {
+    name: "config",
+    handler: cmdConfig as (...args: unknown[]) => unknown,
+    usage: "/config [clear]",
+    description: "Show current configuration summary, or reset all settings to defaults.",
+  },
   save: { name: "save", handler: cmdSave as (...args: unknown[]) => unknown, usage: "/save [path]", description: "Save config to file or session." },
   load: { name: "load", handler: cmdLoad as (...args: unknown[]) => unknown, usage: "/load <path>", description: "Load config from a YAML file." },
   help: { name: "help", handler: cmdHelp as (...args: unknown[]) => unknown, usage: "/help", description: "Show this help message." },

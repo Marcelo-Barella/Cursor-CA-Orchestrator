@@ -180,7 +180,7 @@ $ cursor-orch
 | `/branch-prefix` | `/branch-prefix <prefix>` | Set the branch name prefix |
 | `/auto-pr` | `/auto-pr [on\|off]` | Toggle or set automatic PR creation |
 | `/bootstrap-repo` | `/bootstrap-repo <name>` | Set the bootstrap repository name |
-| `/config` | `/config` | Show current configuration summary |
+| `/config` | `/config` or `/config clear` | Show current configuration summary, or reset all settings to defaults |
 | `/save` | `/save [path]` | Save config to file or session |
 | `/load` | `/load <path>` | Load config from a YAML file |
 | `/run` | `/run` | Validate and start the orchestration |

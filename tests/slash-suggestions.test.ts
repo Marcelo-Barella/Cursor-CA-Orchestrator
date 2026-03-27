@@ -48,6 +48,14 @@ describe("slash-suggestions", () => {
     expect(rm?.dispatchKey).toBe("repo-remove");
   });
 
+  it("includes /config clear for config", () => {
+    const m = filterSlashSuggestions("config");
+    const labels = m.map((e) => e.label);
+    expect(labels.some((l) => l.includes("config clear"))).toBe(true);
+    const cl = m.find((e) => e.label.includes("config clear"));
+    expect(cl?.dispatchKey).toBe("config");
+  });
+
   it("longestCommonStemPrefix for shared prefix", () => {
     const m = filterSlashSuggestions("re");
     const lcp = longestCommonStemPrefix(m);
