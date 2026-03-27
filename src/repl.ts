@@ -287,7 +287,7 @@ function dispatch(cmd: string, args: string[], session: Session): string | null 
 
 export async function runRepl(): Promise<OrchestratorConfig | null> {
   const session = new Session();
-  const historyPath = path.join(process.env.HOME ?? ".", ".cursor-orch", "history");
+  const historyPath = session.historyPath;
   fs.mkdirSync(path.dirname(historyPath), { recursive: true });
 
   const holder: RlHolder = {

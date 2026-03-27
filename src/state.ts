@@ -296,11 +296,11 @@ export async function syncFromRepo(repoStore: RepoStoreClient, runId: string): P
 }
 
 export async function appendEvent(repoStore: RepoStoreClient, runId: string, event: OrchestrationEvent): Promise<void> {
-  const existing = await repoStore.readFile(runId, "events.jsonl");
   const line = serializeEvent(event);
-  let content = existing ? `${existing}${line}\n` : `${line}\n`;
-  content = rotateEvents(content);
-  await repoStore.writeFile(runId, "events.jsonl", content);
+  await repoStore.updateFile(runId, "events.jsonl", (current) => {
+    const nextContent = current ? `${current}${line}\n` : `${line}\n`;
+    return rotateEvents(nextContent);
+  });
 }
 
 function rotateEvents(content: string): string {
