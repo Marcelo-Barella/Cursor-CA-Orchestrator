@@ -3,6 +3,10 @@ import { WORKER_SYSTEM_PROMPT } from "./system-prompt.js";
 
 const MAX_DEP_OUTPUT_BYTES = 50 * 1024;
 
+function buildWorkerPayloadPath(runId: string, taskId: string): string {
+  return `/tmp/cursor-orch-${runId}-${taskId}-payload.json`;
+}
+
 export function buildWorkerPrompt(
   task: TaskConfig,
   runId: string,
@@ -97,6 +101,7 @@ function sectionOutputProtocol(
   bootstrapOwner: string,
   bootstrapRepo: string,
 ): string {
+  const payloadPath = buildWorkerPayloadPath(runId, task.id);
   return `WHEN YOU ARE DONE:
 Run the following commands in the shell to report your results.
 Replace the placeholder values with your actual output.
@@ -113,14 +118,14 @@ const output = {
 };
 const content = Buffer.from(JSON.stringify(output, null, 2)).toString("base64");
 fs.writeFileSync(
-  "/tmp/agent-${task.id}-payload.json",
+  "${payloadPath}",
   JSON.stringify({ message: "agent output", content, branch: "run/${runId}" }),
 );
 NJS
 
 GH_TOKEN="${ghToken}" gh api --method PUT \\
   /repos/${bootstrapOwner}/${bootstrapRepo}/contents/agent-${task.id}.json \\
-  --input /tmp/agent-${task.id}-payload.json
+  --input ${payloadPath}
 \`\`\`
 
 Edit the \`output\` dict before running:
