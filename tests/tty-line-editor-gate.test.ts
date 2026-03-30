@@ -38,6 +38,15 @@ describe("parseKeysChunk CR/LF/CRLF/paste", () => {
     expect(keys).toEqual([{ kind: "enter" }]);
   });
 
+  it("standalone CR between chars produces newline (Mac / paste line breaks)", () => {
+    const { keys } = parseKeysChunk(Buffer.alloc(0), Buffer.from("a\rb"));
+    expect(keys).toEqual([
+      { kind: "char", value: "a" },
+      { kind: "newline" },
+      { kind: "char", value: "b" },
+    ]);
+  });
+
   it("LF (0x0a) produces newline", () => {
     const { keys } = parseKeysChunk(Buffer.alloc(0), Buffer.from([0x0a]));
     expect(keys).toEqual([{ kind: "newline" }]);
@@ -48,11 +57,11 @@ describe("parseKeysChunk CR/LF/CRLF/paste", () => {
     expect(keys).toEqual([{ kind: "enter" }]);
   });
 
-  it("CRLF between chars produces single enter between chars", () => {
+  it("CRLF between chars produces newline between chars (unbracketed multi-line paste)", () => {
     const { keys } = parseKeysChunk(Buffer.alloc(0), Buffer.from("a\r\nb"));
     expect(keys).toEqual([
       { kind: "char", value: "a" },
-      { kind: "enter" },
+      { kind: "newline" },
       { kind: "char", value: "b" },
     ]);
   });
