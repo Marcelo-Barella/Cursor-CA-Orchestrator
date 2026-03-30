@@ -236,8 +236,23 @@ export function parseKeysChunk(residual: Buffer, chunk: Buffer): { keys: Key[]; 
       continue;
     }
     if (byte === 0x0d) {
-      if (i + 1 < buf.length && buf[i + 1] === 0x0a) {
-        i++;
+      const hasLf = i + 1 < buf.length && buf[i + 1] === 0x0a;
+      if (hasLf) {
+        const afterCrlf = i + 2;
+        if (afterCrlf < buf.length) {
+          keys.push({ kind: "newline" });
+          i += 2;
+          continue;
+        }
+        i += 1;
+        keys.push({ kind: "enter" });
+        i += 1;
+        continue;
+      }
+      if (i + 1 < buf.length) {
+        keys.push({ kind: "newline" });
+        i += 1;
+        continue;
       }
       keys.push({ kind: "enter" });
       i++;
