@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-04-07
+
+- **Consolidated PRs:** With `target.auto_create_pr` and `target.consolidate_prs` (default true), worker launches skip per-task PR creation; when all tasks finish, the orchestrator merges task branches into one integration branch per GitHub repo and opens a single PR per repo. `CURSOR_ORCH_CONSOLIDATE_PRS` overrides the boolean. Summary output and the TTY dashboard list consolidated PR URLs (and errors) when present.
+- **Branch layout:** `target.branch_layout` is `consolidated` (default) or `per_task`; `per_task` enforces validation of `branch_prefix/task_id` segments. `CURSOR_ORCH_BRANCH_LAYOUT` overrides.
+- **GitHub helpers:** New `src/lib/github-consolidated-pr.ts` (merge API flow, integration branch naming, topo-sort for merge order) and `parseGithubOwnerRepo` in `repo-target`.
+- **Run preflight:** `cursor-orch run` validates `GH_TOKEN` against the GitHub API before starting orchestration.
+- **Delegation validation enforcement:** Orchestration fails fast through `validateConfig` before scheduling starts, including planner-produced `config.yaml` paths.
+- **Config precedence:** `resolveConfigPrecedence` carries `delegation_map` into the merged config so delegation validation applies consistently in `run` and `config doctor`.
+- **Delegation semantics:** Runtime eligibility enforces ordered phase and parallel-group waves; tasks outside `delegation_map` are not eligible while waves are active when a map is present. Dependency ordering checks treat only **later** parallel groups in the same phase as invalid (earlier groups are allowed).
+- **Delegation completeness:** `validateConfig` requires every configured task to appear exactly once in `delegation_map` when it is set.
+- **State resume:** `delegation_group_index` is serialized and deserialized with `delegation_phase_index` for deterministic resume. Agent state records `branch_name` for consolidation. `deserialize` normalizes legacy agent objects.
+- **REPL:** `/consolidate-prs [on|off]` toggles `target.consolidate_prs`; setup summary and `/config` show the flag.
+- **Planner / prompts:** Planner instructions and system prompt describe wave ordering, full task coverage in `delegation_map`, and dependency alignment with phases and groups.
+
 ## 0.4.8 - 2026-03-27
 
 - **REPL:** `/prompt` prints the full orchestration prompt and copies it to the clipboard (terminal OSC52 or host tools such as `wl-copy` / `xclip` / `pbcopy` when available); `/config clear` resets the session to defaults; guided setup and config defaults use `composer-2` where applicable; `/repo` rejects empty alias or URL; slash-completion includes `/config clear` as an explicit suggestion.

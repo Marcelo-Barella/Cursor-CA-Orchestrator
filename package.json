@@ -1,6 +1,6 @@
 {
   "name": "cursor-orch",
-  "version": "0.4.8",
+  "version": "0.5.0",
   "description": "CLI to orchestrate multiple Cursor Cloud Agents across GitHub repositories",
   "type": "module",
   "main": "./dist/index.js",
