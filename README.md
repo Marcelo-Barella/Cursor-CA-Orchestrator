@@ -179,6 +179,7 @@ $ cursor-orch
 | `/prompt-set` | `/prompt-set <text>` | Set the orchestration prompt text directly |
 | `/branch-prefix` | `/branch-prefix <prefix>` | Set the branch name prefix |
 | `/auto-pr` | `/auto-pr [on\|off]` | Toggle or set automatic PR creation |
+| `/consolidate-prs` | `/consolidate-prs [on\|off]` | Toggle one consolidated PR per repo at end (with Auto PR on) |
 | `/bootstrap-repo` | `/bootstrap-repo <name>` | Set the bootstrap repository name |
 | `/config` | `/config` or `/config clear` | Show current configuration summary, or reset all settings to defaults |
 | `/save` | `/save [path]` | Save config to file or session |
@@ -237,6 +238,7 @@ tasks:
 
 target:
   auto_create_pr: true
+  consolidate_prs: true
   branch_prefix: "cursor-orch"
 ```
 
@@ -257,7 +259,10 @@ target:
 | `tasks[].model` | string | no | Per-task model override |
 | `tasks[].timeout_minutes` | int | no | Task timeout in minutes (default: 30) |
 | `target.auto_create_pr` | bool | no | Auto-create PRs for worker branches (default: true) |
+| `target.consolidate_prs` | bool | no | When `auto_create_pr` is true, defer PRs and open one PR per GitHub repo at the end by merging task branches (default: true). Multi-repo runs yield one PR per repo. |
 | `target.branch_prefix` | string | yes | Prefix for worker branch names |
+
+Environment variable `CURSOR_ORCH_CONSOLIDATE_PRS` overrides `target.consolidate_prs` when set to a boolean string (`true` / `false` / `1` / `0` / `yes` / `no` / `on` / `off`).
 
 ## Architecture
 
