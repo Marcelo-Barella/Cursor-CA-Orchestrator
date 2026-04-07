@@ -76,7 +76,9 @@ export function resolutionToJson(resolution: ConfigResolution, redact: string): 
       bootstrap_repo_name: resolution.config.bootstrap_repo_name,
       target: {
         auto_create_pr: resolution.config.target.auto_create_pr,
+        consolidate_prs: resolution.config.target.consolidate_prs,
         branch_prefix: resolution.config.target.branch_prefix,
+        branch_layout: resolution.config.target.branch_layout,
       },
       repositories_count: Object.keys(resolution.config.repositories).length,
       tasks_count: resolution.config.tasks.length,

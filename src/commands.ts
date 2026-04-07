@@ -72,6 +72,7 @@ export function setupSummaryLines(session: Session): string[] {
   const name = cfg.name || "<empty>";
   const repoCount = Object.keys(cfg.repositories).length;
   const autoPr = cfg.target.auto_create_pr ? "on" : "off";
+  const consolidatePrs = cfg.target.consolidate_prs ? "on" : "off";
   return [
     `- Model: ${model}`,
     `- Prompt: ${prompt}`,
@@ -79,6 +80,7 @@ export function setupSummaryLines(session: Session): string[] {
     `- Repositories: ${repoCount}`,
     `- Branch prefix: ${cfg.target.branch_prefix}`,
     `- Auto PR: ${autoPr}`,
+    `- Consolidate PRs: ${consolidatePrs}`,
     `- Bootstrap repo: ${cfg.bootstrap_repo_name}`,
   ];
 }
@@ -174,6 +176,22 @@ export function cmdAutoPr(session: Session, toggle?: string): string {
   return `${tui.green("Auto PR:")} ${stateLabel}`;
 }
 
+export function cmdConsolidatePrs(session: Session, toggle?: string): string {
+  let newState: boolean;
+  if (toggle === undefined) {
+    newState = !session.config.target.consolidate_prs;
+  } else if (toggle.toLowerCase() === "on") {
+    newState = true;
+  } else if (toggle.toLowerCase() === "off") {
+    newState = false;
+  } else {
+    return `${tui.red("Invalid value:")} ${toggle}. Use ${tui.bold("on")} or ${tui.bold("off")}.`;
+  }
+  session.setConsolidatePrs(newState);
+  const stateLabel = newState ? tui.green("on") : tui.red("off");
+  return `${tui.green("Consolidate PRs:")} ${stateLabel}`;
+}
+
 export function cmdBootstrapRepo(session: Session, name: string): string {
   session.setBootstrapRepo(name);
   return `${tui.green("Bootstrap repo set to")} ${tui.bold(name)}`;
@@ -192,6 +210,7 @@ export function cmdConfig(session: Session): string {
   const preview = cfg.prompt.length > 80 ? `${cfg.prompt.slice(0, 80)}...` : cfg.prompt;
   const repoCount = Object.keys(cfg.repositories).length;
   const autoPr = cfg.target.auto_create_pr ? tui.green("on") : tui.red("off");
+  const consolidatePrs = cfg.target.consolidate_prs ? tui.green("on") : tui.red("off");
   return [
     tui.bold("Current Configuration:"),
     `  ${tui.bold("Name:")}           ${cfg.name}`,
@@ -200,6 +219,7 @@ export function cmdConfig(session: Session): string {
     `  ${tui.bold("Prompt:")}         ${preview || tui.dim("not set")}`,
     `  ${tui.bold("Branch prefix:")}  ${cfg.target.branch_prefix}`,
     `  ${tui.bold("Auto PR:")}        ${autoPr}`,
+    `  ${tui.bold("Consolidate PRs:")} ${consolidatePrs}`,
     `  ${tui.bold("Bootstrap repo:")} ${cfg.bootstrap_repo_name}`,
   ].join("\n");
 }
@@ -283,6 +303,12 @@ export const COMMANDS: Record<string, CommandInfo> = {
     handler: cmdAutoPr as (...args: unknown[]) => unknown,
     usage: "/auto-pr [on|off]",
     description: "Toggle or set automatic PR creation.",
+  },
+  "consolidate-prs": {
+    name: "consolidate-prs",
+    handler: cmdConsolidatePrs as (...args: unknown[]) => unknown,
+    usage: "/consolidate-prs [on|off]",
+    description: "Toggle or set one consolidated PR per repo at end (requires Auto PR on).",
   },
   "bootstrap-repo": {
     name: "bootstrap-repo",

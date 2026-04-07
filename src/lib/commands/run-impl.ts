@@ -1,6 +1,6 @@
 import { CursorClient } from "../../api/cursor-client.js";
 import { RepoStoreClient } from "../../api/repo-store.js";
-import { ensureBootstrapRepo, BOOTSTRAP_ENTRYPOINT, BOOTSTRAP_INSTALL_COMMAND } from "../../bootstrap.js";
+import { ensureBootstrapRepo, resolveGithubUser, BOOTSTRAP_ENTRYPOINT, BOOTSTRAP_INSTALL_COMMAND } from "../../bootstrap.js";
 import {
   canonicalizeOrchestratorConfig,
   resolveConfigPrecedence,
@@ -125,7 +125,9 @@ export function printResolutionSummary(resolution: ConfigResolution): void {
     "prompt",
     "bootstrap_repo_name",
     "target.auto_create_pr",
+    "target.consolidate_prs",
     "target.branch_prefix",
+    "target.branch_layout",
     "repositories",
     "tasks",
     "secrets.CURSOR_API_KEY",
@@ -179,6 +181,27 @@ export function resolveBootstrapName(
   if (cliName) return cliName;
   if (config?.bootstrap_repo_name) return config.bootstrap_repo_name;
   return "cursor-orch-bootstrap";
+}
+
+export async function validateGithubToken(ghToken: string): Promise<void> {
+  try {
+    await resolveGithubUser({
+      Authorization: `token ${ghToken}`,
+      Accept: "application/vnd.github+json",
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    fail({
+      code: "RUN-006",
+      severity: "FATAL",
+      title: "Invalid GH_TOKEN",
+      what_happened: `GitHub rejected GH_TOKEN during preflight validation. ${detail}`,
+      next_step: "Set GH_TOKEN to a valid personal access token and rerun.",
+      alternative: "Provide GH_TOKEN inline for this invocation after rotating credentials.",
+      example: "CURSOR_API_KEY=... GH_TOKEN=... cursor-orch run --config ./orchestrator.yaml",
+      exitCode: 1,
+    });
+  }
 }
 
 export function buildOrchestrationLaunchPrompt(opts: {
@@ -312,6 +335,7 @@ export async function runCommand(opts: {
     example: "CURSOR_API_KEY=... GH_TOKEN=... cursor-orch run --config ./orchestrator.yaml",
     exitCode: 1,
   });
+  await validateGithubToken(env.GH_TOKEN!);
   try {
     await runOrchestrationCli(
       config,

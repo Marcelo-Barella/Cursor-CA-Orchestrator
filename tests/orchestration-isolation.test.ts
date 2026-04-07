@@ -23,7 +23,7 @@ const plannerConfig: OrchestratorConfig = {
     backend: { url: "https://github.com/acme/backend", ref: "main" },
   },
   tasks: [],
-  target: { auto_create_pr: true, branch_prefix: "cursor-orch" },
+  target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
   bootstrap_repo_name: "cursor-orch-bootstrap",
 };
 

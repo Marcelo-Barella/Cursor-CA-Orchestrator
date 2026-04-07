@@ -19,8 +19,9 @@ export const PLANNER_SYSTEM_PROMPT =
   "of the work, the target repository, and any ordering constraints.\n\n" +
   "Produce a structured task plan that maximizes safe parallelism while respecting dependencies. " +
   "Keep tasks focused and self-contained so that each worker agent can execute independently " +
-  "without needing context from other tasks. Include a machine-readable delegation map with phases " +
-  "and parallel groups, and do not mark same-repository overlapping work as independent.\n\n" +
+  "without needing context from other tasks. When you emit delegation_map, use phases and parallel_groups " +
+  "as sequential waves (phase order, then group order within each phase), assign every task ID exactly once, " +
+  "align depends_on with that ordering, and do not treat same-repo conflicting work as parallel-safe.\n\n" +
   "IMPORTANT: You are running against a read-only bootstrap repository. " +
   "Do NOT create, modify, or delete any files in this repository. " +
   "Your only output is the task plan written to the Gist.";

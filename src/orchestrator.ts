@@ -5,6 +5,7 @@ import { RepoStoreClient } from "./api/repo-store.js";
 import type { OrchestratorConfig, TaskConfig } from "./config/types.js";
 import { canonicalizeOrchestratorConfig } from "./config/canonicalize.js";
 import { parseConfig, toYaml } from "./config/parse.js";
+import { validateConfig } from "./config/validate.js";
 import { buildPlannerPrompt, parseTaskPlan, waitForPlan } from "./planner.js";
 import { buildRepoCreationPrompt, buildWorkerPrompt } from "./prompt-builder.js";
 import {
@@ -20,7 +21,13 @@ import {
   syncFromRepo,
   syncToRepo,
 } from "./state.js";
-import { resolveRepoTarget } from "./lib/repo-target.js";
+import {
+  consolidateOneRepo,
+  groupKeyForRepo,
+  integrationBranchName,
+  topoSortTaskGroup,
+} from "./lib/github-consolidated-pr.js";
+import { parseGithubOwnerRepo, resolveRepoTarget } from "./lib/repo-target.js";
 
 const POLL_INTERVAL = 30;
 const BLOCKED_TIMEOUT_SECONDS = 300;
@@ -48,9 +55,14 @@ export function getReadyTasks(graph: Record<string, Set<string>>, agents: Record
     .map(([taskId]) => taskId);
 }
 
-type DelegationPhase = {
+type DelegationGroup = {
   id: string;
   task_ids: string[];
+};
+
+type DelegationPhase = {
+  id: string;
+  groups: DelegationGroup[];
 };
 
 function toTaskIdList(value: unknown): string[] {
@@ -69,15 +81,16 @@ function extractDelegationPhases(config: OrchestratorConfig, knownTaskIds: Set<s
   if (config.delegation_map && Array.isArray(config.delegation_map.phases) && config.delegation_map.phases.length > 0) {
     const phases: DelegationPhase[] = [];
     for (const [index, phase] of config.delegation_map.phases.entries()) {
-      const ids = new Set<string>();
-      for (const group of phase.groups) {
-        for (const taskId of group.task_ids) {
-          if (knownTaskIds.has(taskId)) ids.add(taskId);
-        }
+      const groups: DelegationGroup[] = [];
+      for (const [gi, group] of phase.groups.entries()) {
+        const task_ids = group.task_ids.filter((taskId) => knownTaskIds.has(taskId));
+        if (task_ids.length === 0) continue;
+        const groupId = group.id?.trim() ? group.id : `group-${gi + 1}`;
+        groups.push({ id: groupId, task_ids });
       }
-      if (ids.size === 0) continue;
+      if (groups.length === 0) continue;
       const phaseId = phase.id || `phase-${index + 1}`;
-      phases.push({ id: phaseId, task_ids: [...ids] });
+      phases.push({ id: phaseId, groups });
     }
     if (phases.length > 0) {
       return phases;
@@ -129,7 +142,7 @@ function extractDelegationPhases(config: OrchestratorConfig, knownTaskIds: Set<s
     if (ids.size === 0) continue;
     const rawId = phaseObj.id ?? phaseObj.phase_id ?? phaseObj.name;
     const phaseId = typeof rawId === "string" && rawId.trim() ? rawId.trim() : `phase-${index + 1}`;
-    phases.push({ id: phaseId, task_ids: [...ids] });
+    phases.push({ id: phaseId, groups: [{ id: "group-1", task_ids: [...ids] }] });
   }
   if (phases.length === 0) return null;
   return phases;
@@ -139,39 +152,68 @@ function isTerminalStatus(status: string): boolean {
   return status === "finished" || status === "failed" || status === "stopped";
 }
 
-function buildPhaseIndexMap(phases: DelegationPhase[]): Map<string, number> {
-  const map = new Map<string, number>();
-  for (let index = 0; index < phases.length; index += 1) {
-    for (const taskId of phases[index]!.task_ids) {
-      if (!map.has(taskId)) {
-        map.set(taskId, index);
+function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
+  return group.task_ids.every((taskId) => isTerminalStatus(state.agents[taskId]?.status ?? "finished"));
+}
+
+function normalizeDelegationCursors(state: OrchestrationState, phases: DelegationPhase[]): { phaseIndex: number; groupIndex: number } {
+  let p = state.delegation_phase_index ?? 0;
+  let g = state.delegation_group_index ?? 0;
+  if (p < 0) p = 0;
+  if (g < 0) g = 0;
+  while (p < phases.length) {
+    const phase = phases[p]!;
+    const groups = phase.groups;
+    if (g > groups.length) g = groups.length;
+    while (g > 0 && !groupIsTerminal(state, groups[g - 1]!)) {
+      g -= 1;
+    }
+    while (g < groups.length && groupIsTerminal(state, groups[g]!)) {
+      g += 1;
+    }
+    if (g >= groups.length) {
+      p += 1;
+      g = 0;
+      continue;
+    }
+    break;
+  }
+  return { phaseIndex: p, groupIndex: g };
+}
+
+function buildDelegationTaskIndex(phases: DelegationPhase[]): {
+  mappedTaskIds: Set<string>;
+  taskLocation: Map<string, { phaseIndex: number; groupIndex: number }>;
+} {
+  const mappedTaskIds = new Set<string>();
+  const taskLocation = new Map<string, { phaseIndex: number; groupIndex: number }>();
+  for (let pi = 0; pi < phases.length; pi += 1) {
+    const phase = phases[pi]!;
+    for (let gi = 0; gi < phase.groups.length; gi += 1) {
+      const group = phase.groups[gi]!;
+      for (const taskId of group.task_ids) {
+        mappedTaskIds.add(taskId);
+        taskLocation.set(taskId, { phaseIndex: pi, groupIndex: gi });
       }
     }
   }
-  return map;
-}
-
-function phaseIsTerminal(state: OrchestrationState, phase: DelegationPhase): boolean {
-  return phase.task_ids.every((taskId) => isTerminalStatus(state.agents[taskId]?.status ?? "finished"));
+  return { mappedTaskIds, taskLocation };
 }
 
 export function filterEligibleReadyTasks(state: OrchestrationState, config: OrchestratorConfig, readyTasks: string[]): string[] {
   const phases = extractDelegationPhases(config, new Set(Object.keys(state.agents)));
   if (!phases) return readyTasks;
-  const phaseIndexByTask = buildPhaseIndexMap(phases);
-  let phaseIndex = state.delegation_phase_index ?? 0;
-  if (phaseIndex < 0) phaseIndex = 0;
-  while (phaseIndex < phases.length && phaseIsTerminal(state, phases[phaseIndex]!)) {
-    phaseIndex += 1;
-  }
+  const { mappedTaskIds, taskLocation } = buildDelegationTaskIndex(phases);
+  const { phaseIndex, groupIndex } = normalizeDelegationCursors(state, phases);
   state.delegation_phase_index = phaseIndex;
+  state.delegation_group_index = groupIndex;
   if (phaseIndex >= phases.length) {
-    return readyTasks.filter((taskId) => !phaseIndexByTask.has(taskId));
+    return readyTasks.filter((taskId) => !mappedTaskIds.has(taskId));
   }
   return readyTasks.filter((taskId) => {
-    const mappedIndex = phaseIndexByTask.get(taskId);
-    if (mappedIndex === undefined) return true;
-    return mappedIndex === phaseIndex;
+    const loc = taskLocation.get(taskId);
+    if (!loc) return false;
+    return loc.phaseIndex === phaseIndex && loc.groupIndex === groupIndex;
   });
 }
 
@@ -273,11 +315,24 @@ function buildSummaryMd(config: OrchestratorConfig, state: OrchestrationState): 
     "|------|------|--------|----|",
   ];
   const taskMap = Object.fromEntries(config.tasks.map((t) => [t.id, t]));
+  const perTaskPr = config.target.consolidate_prs && config.target.auto_create_pr ? "--" : null;
   for (const [taskId, agent] of Object.entries(state.agents)) {
     const task = taskMap[taskId];
     const repo = task ? task.repo : "?";
-    const pr = agent.pr_url ?? "--";
+    const pr = perTaskPr !== null ? perTaskPr : agent.pr_url ?? "--";
     lines.push(`| ${taskId} | ${repo} | ${agent.status} | ${pr} |`);
+  }
+  if (state.consolidated_pr_urls && Object.keys(state.consolidated_pr_urls).length > 0) {
+    lines.push("", "## Consolidated pull requests", "");
+    for (const [k, url] of Object.entries(state.consolidated_pr_urls)) {
+      lines.push(`- ${k.split("\0").join(" @ ")}: ${url}`);
+    }
+  }
+  if (state.consolidated_pr_errors && Object.keys(state.consolidated_pr_errors).length > 0) {
+    lines.push("", "## Consolidated PR errors", "");
+    for (const [k, err] of Object.entries(state.consolidated_pr_errors)) {
+      lines.push(`- ${k.split("\0").join(" @ ")}: ${err}`);
+    }
   }
   return lines.join("\n");
 }
@@ -309,6 +364,7 @@ async function pollSingleAgent(
   repoStore: RepoStoreClient,
   runId: string,
   state: OrchestrationState,
+  config: OrchestratorConfig,
 ): Promise<void> {
   if ((agent.status !== "running" && agent.status !== "launching") || !agent.agent_id) {
     return;
@@ -320,7 +376,7 @@ async function pollSingleAgent(
     console.error(`Failed to poll agent ${agent.agent_id} for task ${taskId}`);
     return;
   }
-  await updateAgentFromPoll(taskId, agent, info, repoStore, runId, state);
+  await updateAgentFromPoll(taskId, agent, info, repoStore, runId, state, config);
 }
 
 async function updateAgentFromPoll(
@@ -330,10 +386,11 @@ async function updateAgentFromPoll(
   repoStore: RepoStoreClient,
   runId: string,
   state: OrchestrationState,
+  config: OrchestratorConfig,
 ): Promise<void> {
   const st = info.status.toUpperCase();
   if (st === "FINISHED") {
-    await markAgentFinished(taskId, agent, info, repoStore, runId, state);
+    await markAgentFinished(taskId, agent, info, repoStore, runId, state, config);
     return;
   }
   if (st === "ERROR") {
@@ -352,9 +409,11 @@ async function markAgentFinished(
   repoStore: RepoStoreClient,
   runId: string,
   state: OrchestrationState,
+  config: OrchestratorConfig,
 ): Promise<void> {
   agent.status = "finished";
   agent.finished_at = nowIso();
+  agent.branch_name = info.branch_name?.trim() || computeBranchName(config.target.branch_prefix, runId, taskId, agent.retry_count);
   agent.pr_url = info.pr_url;
   agent.summary = info.summary;
   await readWorkerOutput(repoStore, runId, taskId);
@@ -394,9 +453,15 @@ async function checkRunningAgent(taskId: string, agent: AgentState, repoStore: R
   await appendEvent(repoStore, runId, makeEvent("task_blocked", `Task ${taskId} blocked: ${agent.blocked_reason}`, taskId));
 }
 
-async function pollAgents(state: OrchestrationState, cursorClient: CursorClient, repoStore: RepoStoreClient, runId: string): Promise<void> {
+async function pollAgents(
+  state: OrchestrationState,
+  config: OrchestratorConfig,
+  cursorClient: CursorClient,
+  repoStore: RepoStoreClient,
+  runId: string,
+): Promise<void> {
   for (const [taskId, agent] of Object.entries(state.agents)) {
-    await pollSingleAgent(taskId, agent, cursorClient, repoStore, runId, state);
+    await pollSingleAgent(taskId, agent, cursorClient, repoStore, runId, state, config);
   }
 }
 
@@ -570,7 +635,8 @@ async function launchSingleTask(
     : buildWorkerPrompt(task, runId, ghToken, depOutputs);
   const branch = computeBranchName(config.target.branch_prefix, runId, taskId, state.agents[taskId]!.retry_count);
   const model = task.model ?? config.model;
-  const launch = await tryLaunchAgent(cursorClient, prompt, repoUrl, ref, model, branch, config.target.auto_create_pr);
+  const autoPr = config.target.auto_create_pr && !config.target.consolidate_prs;
+  const launch = await tryLaunchAgent(cursorClient, prompt, repoUrl, ref, model, branch, autoPr);
   if (!launch.info) {
     const detail = launch.error ?? "unknown launch error";
     const summary = `Failed to launch agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${ref})`;
@@ -632,7 +698,19 @@ async function stopAllRunning(state: OrchestrationState, cursorClient: CursorCli
 function reconcileAgentsFromConfig(state: OrchestrationState, config: OrchestratorConfig): void {
   for (const task of config.tasks) {
     if (!state.agents[task.id]) {
-      state.agents[task.id] = { task_id: task.id, agent_id: null, status: "pending", started_at: null, finished_at: null, pr_url: null, summary: null, blocked_reason: null, blocked_since: null, retry_count: 0 };
+      state.agents[task.id] = {
+        task_id: task.id,
+        agent_id: null,
+        status: "pending",
+        started_at: null,
+        finished_at: null,
+        branch_name: null,
+        pr_url: null,
+        summary: null,
+        blocked_reason: null,
+        blocked_since: null,
+        retry_count: 0,
+      };
     }
   }
 }
@@ -781,6 +859,8 @@ export async function runOrchestration(runId: string, cursorClient: CursorClient
     }
   }
 
+  validateConfig(config);
+
   let state: OrchestrationState;
   try {
     state = await syncFromRepo(repoStore, runId);
@@ -832,13 +912,13 @@ async function orchestrationLoop(
     if (await checkStopRequested(state, cursorClient, repoStore, runId, config)) {
       break;
     }
-    await pollAgents(state, cursorClient, repoStore, runId);
+    await pollAgents(state, config, cursorClient, repoStore, runId);
     await handleBlocked(state, cursorClient, repoStore, runId, graph);
     const readyTasks = getReadyTasks(graph, state.agents);
     const eligibleReadyTasks = filterEligibleReadyTasks(state, config, readyTasks);
     await launchReadyTasks(state, config, eligibleReadyTasks, cursorClient, repoStore, runId);
     await writeProgress(state, config, repoStore, runId);
-    if (await checkCompletion(state, repoStore, runId)) {
+    if (await checkCompletion(state, config, graph, repoStore, runId)) {
       break;
     }
     if (await checkFailure(state, graph, repoStore, runId)) {
@@ -876,8 +956,121 @@ async function writeProgress(state: OrchestrationState, config: OrchestratorConf
   await syncToRepo(repoStore, runId, state);
 }
 
-async function checkCompletion(state: OrchestrationState, repoStore: RepoStoreClient, runId: string): Promise<boolean> {
+async function maybeConsolidatePullRequests(
+  state: OrchestrationState,
+  config: OrchestratorConfig,
+  graph: Record<string, Set<string>>,
+  runId: string,
+  repoStore: RepoStoreClient,
+): Promise<void> {
+  const ghToken = process.env.GH_TOKEN;
+  if (!ghToken) return;
+  if (state.consolidated_pr_urls && Object.keys(state.consolidated_pr_urls).length > 0) return;
+
+  const groups = new Map<string, { repoUrl: string; ref: string; taskIds: string[] }>();
+
+  for (const task of config.tasks) {
+    const agent = state.agents[task.id];
+    if (!agent || agent.status !== "finished") continue;
+    const depOutputs = await gatherDepOutputs(task, repoStore, runId);
+    let resolved: [string, string] | null = null;
+    if (task.create_repo) {
+      const workerOut = await readWorkerOutput(repoStore, runId, task.id);
+      const outputs = (workerOut?.outputs as Record<string, unknown>) ?? {};
+      const url = typeof outputs.repo_url === "string" ? outputs.repo_url : null;
+      if (url && parseGithubOwnerRepo(url)) {
+        const ref = typeof outputs.repo_ref === "string" ? outputs.repo_ref : "main";
+        resolved = [url, ref];
+      }
+    } else {
+      try {
+        resolved = await resolveRepoForTask(task, config, depOutputs, ghToken);
+      } catch {
+        continue;
+      }
+    }
+    if (!resolved) continue;
+    const [repoUrl, ref] = resolved;
+    const key = groupKeyForRepo(repoUrl, ref);
+    if (!groups.has(key)) {
+      groups.set(key, { repoUrl, ref, taskIds: [] });
+    }
+    groups.get(key)!.taskIds.push(task.id);
+  }
+
+  const urls: Record<string, string> = {};
+  const errors: Record<string, string> = {};
+
+  for (const [gKey, g] of groups) {
+    const ownerRepo = parseGithubOwnerRepo(g.repoUrl);
+    if (!ownerRepo) {
+      errors[gKey] = `not a GitHub repo URL: ${g.repoUrl}`;
+      continue;
+    }
+    let sorted: string[];
+    try {
+      sorted = topoSortTaskGroup(g.taskIds, graph);
+    } catch (e) {
+      errors[gKey] = e instanceof Error ? e.message : String(e);
+      continue;
+    }
+    const branches: string[] = [];
+    for (const tid of sorted) {
+      const bn = state.agents[tid]?.branch_name;
+      if (bn) branches.push(bn);
+    }
+    if (branches.length === 0) {
+      errors[gKey] = "no task branches to merge";
+      continue;
+    }
+    const integrationBranch = integrationBranchName(config.target.branch_prefix, runId, g.ref);
+    const title = `cursor-orch: ${config.name} (${runId})`;
+    const body = `Consolidated tasks: ${sorted.join(", ")}\n\nRun: ${runId}`;
+    const r = await consolidateOneRepo(
+      ghToken,
+      {
+        groupKey: gKey,
+        owner: ownerRepo.owner,
+        repo: ownerRepo.repo,
+        baseRef: g.ref,
+        taskBranches: branches,
+        title,
+        body,
+      },
+      integrationBranch,
+    );
+    if (r.error) {
+      errors[gKey] = r.error;
+    } else if (r.prUrl) {
+      urls[gKey] = r.prUrl;
+    }
+    await appendEvent(
+      repoStore,
+      runId,
+      makeEvent(
+        r.error ? "consolidated_pr_failed" : "consolidated_pr_created",
+        r.error ?? `Consolidated PR ${r.prUrl ?? ""}`,
+        null,
+        { agent_node_id: "main-orchestrator", agent_kind: "main", payload: { group_key: gKey.replace(/\0/g, "|") } },
+      ),
+    );
+  }
+
+  state.consolidated_pr_urls = Object.keys(urls).length ? urls : null;
+  state.consolidated_pr_errors = Object.keys(errors).length ? errors : null;
+}
+
+async function checkCompletion(
+  state: OrchestrationState,
+  config: OrchestratorConfig,
+  graph: Record<string, Set<string>>,
+  repoStore: RepoStoreClient,
+  runId: string,
+): Promise<boolean> {
   if (!checkAllFinished(state)) return false;
+  if (config.target.auto_create_pr && config.target.consolidate_prs) {
+    await maybeConsolidatePullRequests(state, config, graph, runId, repoStore);
+  }
   state.status = "completed";
   await syncToRepo(repoStore, runId, state);
   await appendEvent(

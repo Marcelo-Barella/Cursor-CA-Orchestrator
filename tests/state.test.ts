@@ -21,7 +21,7 @@ describe("state", () => {
           repo_config: null,
         },
       ],
-      target: { auto_create_pr: true, branch_prefix: "x" },
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "x", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
     };
     const state = createInitialState(config, "run1");
@@ -29,6 +29,53 @@ describe("state", () => {
     const back = deserialize(s);
     expect(back.run_id).toBe("run1");
     expect(back.agents.a).toBeDefined();
+  });
+
+  it("roundtrip preserves delegation phase and group cursors", () => {
+    const config: OrchestratorConfig = {
+      name: "n",
+      model: "m",
+      prompt: "",
+      repositories: {},
+      tasks: [
+        {
+          id: "a",
+          repo: "r",
+          prompt: "p",
+          model: null,
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+        },
+      ],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "x", branch_layout: "consolidated" },
+      bootstrap_repo_name: "b",
+    };
+    const state = createInitialState(config, "run1");
+    state.delegation_phase_index = 2;
+    state.delegation_group_index = 1;
+    const back = deserialize(serialize(state));
+    expect(back.delegation_phase_index).toBe(2);
+    expect(back.delegation_group_index).toBe(1);
+  });
+
+  it("deserialize defaults missing delegation_group_index to null", () => {
+    const raw = JSON.stringify({
+      orchestration_id: "run1",
+      run_id: "run1",
+      orchestrator_agent_id: null,
+      status: "pending",
+      started_at: null,
+      delegation_phase_index: 0,
+      agents: {},
+      main_agent: null,
+      phase_agents: {},
+      task_phase_map: {},
+      error: null,
+    });
+    const back = deserialize(raw);
+    expect(back.delegation_group_index).toBeNull();
   });
 
   it("appends events onto the latest repo content", async () => {

@@ -60,13 +60,25 @@ function buildHeader(state: OrchestrationState, config: OrchestratorConfig): str
 function buildTable(state: OrchestrationState, config: OrchestratorConfig): string {
   const taskMap = Object.fromEntries(config.tasks.map((t) => [t.id, t]));
   const rows: string[][] = [];
+  const hidePerTaskPr = config.target.consolidate_prs && config.target.auto_create_pr;
   for (const [taskId, agent] of Object.entries(state.agents)) {
     const task = taskMap[taskId];
     const repo = task ? task.repo : "?";
     const st = paintStatus(agent.status)(agent.status.toUpperCase());
-    rows.push([taskId, repo, st, durationStr(agent.started_at, agent.finished_at), agent.pr_url ?? "--"]);
+    const prCol = hidePerTaskPr ? "--" : agent.pr_url ?? "--";
+    rows.push([taskId, repo, st, durationStr(agent.started_at, agent.finished_at), prCol]);
   }
   return table(["Task", "Repo", "Status", "Time", "PR"], rows);
+}
+
+function consolidatedPrLines(state: OrchestrationState): string[] {
+  const urls = state.consolidated_pr_urls;
+  if (!urls || !Object.keys(urls).length) return [];
+  const lines: string[] = [tui.bold("Consolidated PRs:")];
+  for (const [k, url] of Object.entries(urls)) {
+    lines.push(`  ${k.split("\0").join(" @ ")}  ${url}`);
+  }
+  return lines;
 }
 
 function formatEvent(ev: OrchestrationEvent): string {
@@ -84,6 +96,13 @@ export async function renderSnapshot(state: OrchestrationState, config: Orchestr
   console.log(buildHeader(state, config));
   console.log();
   console.log(buildTable(state, config));
+  const cpl = consolidatedPrLines(state);
+  if (cpl.length) {
+    console.log();
+    for (const line of cpl) {
+      console.log(line);
+    }
+  }
   console.log();
   console.log(tui.dim("Events:"));
   const recent = events.slice(-10);
