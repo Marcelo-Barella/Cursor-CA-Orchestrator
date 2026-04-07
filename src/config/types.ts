@@ -16,9 +16,13 @@ export interface TaskConfig {
   repo_config: Record<string, unknown> | null;
 }
 
+export type BranchLayout = "consolidated" | "per_task";
+
 export interface TargetConfig {
   auto_create_pr: boolean;
+  consolidate_prs: boolean;
   branch_prefix: string;
+  branch_layout: BranchLayout;
 }
 
 export interface DelegationGroupConfig {

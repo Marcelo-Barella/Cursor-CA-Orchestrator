@@ -68,18 +68,14 @@ export function updateTaskTable(
   const nowMs = Date.now();
   const header: string[] = ["Task", "Repo", "Status", "Time", "PR"];
   const rows: string[][] = [header];
+  const hidePerTaskPr = config.target.consolidate_prs && config.target.auto_create_pr;
   for (const id of ids) {
     const agent = state.agents[id];
     if (!agent) continue;
     const task = taskById.get(agent.task_id);
     const repo = task?.repo ?? "--";
-    rows.push([
-      agent.task_id,
-      repo,
-      statusTagged(agent.status),
-      timeCell(agent.started_at, agent.finished_at, nowMs),
-      agent.pr_url ?? "--",
-    ]);
+    const prCol = hidePerTaskPr ? "--" : agent.pr_url ?? "--";
+    rows.push([agent.task_id, repo, statusTagged(agent.status), timeCell(agent.started_at, agent.finished_at, nowMs), prCol]);
   }
   table.setData(rows);
 }

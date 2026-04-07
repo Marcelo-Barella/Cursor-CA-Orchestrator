@@ -348,6 +348,8 @@ function dispatch(cmd: string, args: string[], session: Session): string | null 
         return cmdInfo.handler(session, args[0] ?? "") as string;
       case "auto-pr":
         return cmdInfo.handler(session, args[0]) as string;
+      case "consolidate-prs":
+        return cmdInfo.handler(session, args[0]) as string;
       case "bootstrap-repo":
         return cmdInfo.handler(session, args[0] ?? "") as string;
       case "config":

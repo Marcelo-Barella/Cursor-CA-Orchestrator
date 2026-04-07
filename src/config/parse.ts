@@ -1,5 +1,6 @@
 import YAML from "yaml";
 import type {
+  BranchLayout,
   DelegationGroupConfig,
   DelegationMapConfig,
   DelegationPhaseConfig,
@@ -68,7 +69,9 @@ export function toYaml(config: OrchestratorConfig): string {
   }
   data.target = {
     auto_create_pr: config.target.auto_create_pr,
+    consolidate_prs: config.target.consolidate_prs,
     branch_prefix: config.target.branch_prefix,
+    branch_layout: config.target.branch_layout,
   };
   if (config.bootstrap_repo_name !== "cursor-orch-bootstrap") {
     data.bootstrap_repo_name = config.bootstrap_repo_name;
@@ -119,9 +122,16 @@ function parseTasks(raw: unknown[]): TaskConfig[] {
 }
 
 function parseTarget(raw: Record<string, unknown>): TargetConfig {
+  const layoutRaw = raw.branch_layout;
+  let branch_layout: BranchLayout = "consolidated";
+  if (layoutRaw !== undefined && layoutRaw !== null) {
+    branch_layout = String(layoutRaw).trim() as BranchLayout;
+  }
   return {
     auto_create_pr: raw.auto_create_pr !== undefined ? Boolean(raw.auto_create_pr) : true,
+    consolidate_prs: raw.consolidate_prs !== undefined ? Boolean(raw.consolidate_prs) : true,
     branch_prefix: (raw.branch_prefix as string) ?? "cursor-orch",
+    branch_layout,
   };
 }
 

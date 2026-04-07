@@ -30,7 +30,7 @@ function baseConfig(): OrchestratorConfig {
         repo_config: null,
       },
     ],
-    target: { auto_create_pr: true, branch_prefix: "x" },
+    target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "x", branch_layout: "consolidated" },
     bootstrap_repo_name: "b",
   };
 }

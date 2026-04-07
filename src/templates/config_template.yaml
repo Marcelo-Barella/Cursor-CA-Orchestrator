@@ -35,4 +35,5 @@ tasks:
 # Target branch and PR settings
 target:
   auto_create_pr: true
+  consolidate_prs: true
   branch_prefix: "cursor-orch"

@@ -56,7 +56,15 @@ a file named \`task-plan.json\`.
 }
 \`\`\`
 
-The \`delegation_map\` must include all tasks exactly once unless there is a clear reason to omit a task from phased launch control.
+### Delegation map
+
+If you include \`delegation_map\`, the orchestrator runs **ordered waves**: \`phases\` run in array order; within each phase, \`parallel_groups\` run in array order. The next group does not start until every task in the current group has a terminal status (finished, failed, or stopped). Tasks in the same group may run together when \`depends_on\` allows.
+
+**Coverage:** list every task \`id\` from \`tasks\` **exactly once** in the map. A task ID left out of the map is not launched while any mapped wave is active; it only becomes eligible after **all** mapped phase/group waves complete, which is usually wrong for the plan.
+
+**Dependencies vs waves:** a task may depend only on tasks in the **same** parallel group or an **earlier** group in map order (an earlier group in the same phase, or any group in an earlier phase). The runtime rejects a dependency on a task in a later phase or a later parallel group in the same phase.
+
+**Conflicts:** do not put the same task ID in more than one group. For the same repository, if work would conflict, serialize with \`depends_on\` and separate phases or parallel groups (later groups wait for earlier groups).
 
 ## Dynamic Repository Creation
 
@@ -88,10 +96,7 @@ Use an empty list if there are no dependencies.
 - \`timeout_minutes\` is the estimated maximum time for the task (default 30).
 - Do NOT create circular dependencies.
 - Maximum 20 tasks.
-- For tasks targeting the same repository, do not claim unsafe parallel independence. \
-If two tasks can conflict, serialize them with \`depends_on\` and place them in separate phases or groups.
-- Use \`delegation_map.phases[].parallel_groups[].tasks\` to express safe launch waves. \
-Only place tasks in the same parallel group when they are truly safe to run together.
+- Use \`delegation_map.phases[].parallel_groups[].tasks\` for launch waves; only co-locate task IDs in one group when they are safe to run in parallel under \`depends_on\`.
 
 ### Output Write Instructions
 

@@ -1,4 +1,5 @@
 export type {
+  BranchLayout,
   ConfigResolution,
   DiagnosticFinding,
   OrchestratorConfig,

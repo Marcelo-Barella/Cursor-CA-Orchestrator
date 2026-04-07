@@ -10,7 +10,7 @@ describe("planner", () => {
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [],
-      target: { auto_create_pr: true, branch_prefix: "p" },
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
     };
     const json = JSON.stringify({
@@ -37,7 +37,7 @@ describe("planner", () => {
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [],
-      target: { auto_create_pr: true, branch_prefix: "p" },
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
     };
     const json = JSON.stringify({
@@ -75,7 +75,7 @@ describe("planner", () => {
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [],
-      target: { auto_create_pr: true, branch_prefix: "p" },
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
     };
     const json = JSON.stringify({
@@ -108,7 +108,7 @@ describe("planner", () => {
       prompt: "",
       repositories: { "https://github.com/o/bergamota.git": { url: "https://github.com/o/bergamota.git", ref: "main" } },
       tasks: [],
-      target: { auto_create_pr: true, branch_prefix: "p" },
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
     };
     const json = JSON.stringify({

@@ -10,6 +10,7 @@ export interface AgentState {
   status: string;
   started_at: string | null;
   finished_at: string | null;
+  branch_name: string | null;
   pr_url: string | null;
   summary: string | null;
   blocked_reason: string | null;
@@ -36,11 +37,14 @@ export interface OrchestrationState {
   status: string;
   started_at: string | null;
   delegation_phase_index: number | null;
+  delegation_group_index: number | null;
   agents: Record<string, AgentState>;
   main_agent: LifecycleAgentState | null;
   phase_agents: Record<string, LifecycleAgentState>;
   task_phase_map: Record<string, string>;
   error: string | null;
+  consolidated_pr_urls: Record<string, string> | null;
+  consolidated_pr_errors: Record<string, string> | null;
 }
 
 export interface OrchestrationEvent {
@@ -110,7 +114,19 @@ function defaultPhaseAgents(): Record<string, LifecycleAgentState> {
 export function createInitialState(config: OrchestratorConfig, runId: string): OrchestrationState {
   const agents: Record<string, AgentState> = {};
   for (const task of config.tasks) {
-    agents[task.id] = { task_id: task.id, agent_id: null, status: "pending", started_at: null, finished_at: null, pr_url: null, summary: null, blocked_reason: null, blocked_since: null, retry_count: 0 };
+    agents[task.id] = {
+      task_id: task.id,
+      agent_id: null,
+      status: "pending",
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+    };
   }
   const state: OrchestrationState = {
     orchestration_id: runId,
@@ -119,11 +135,14 @@ export function createInitialState(config: OrchestratorConfig, runId: string): O
     status: "pending",
     started_at: null,
     delegation_phase_index: null,
+    delegation_group_index: null,
     agents,
     main_agent: null,
     phase_agents: {},
     task_phase_map: {},
     error: null,
+    consolidated_pr_urls: null,
+    consolidated_pr_errors: null,
   };
   ensureLifecycleAgents(state);
   return state;
@@ -244,7 +263,20 @@ export function deserialize(jsonStr: string): OrchestrationState {
   const agentsRaw = (raw.agents as Record<string, Record<string, unknown>>) || {};
   const agents: Record<string, AgentState> = {};
   for (const [k, v] of Object.entries(agentsRaw)) {
-    agents[k] = v as unknown as AgentState;
+    const a = v as Record<string, unknown>;
+    agents[k] = {
+      task_id: String(a.task_id ?? k),
+      agent_id: (a.agent_id as string) ?? null,
+      status: String(a.status ?? "pending"),
+      started_at: (a.started_at as string) ?? null,
+      finished_at: (a.finished_at as string) ?? null,
+      branch_name: (a.branch_name as string) ?? null,
+      pr_url: (a.pr_url as string) ?? null,
+      summary: (a.summary as string) ?? null,
+      blocked_reason: (a.blocked_reason as string) ?? null,
+      blocked_since: (a.blocked_since as string) ?? null,
+      retry_count: typeof a.retry_count === "number" ? a.retry_count : 0,
+    };
   }
   const rawMain = raw.main_agent as Record<string, unknown> | null | undefined;
   const mainAgent =
@@ -271,11 +303,20 @@ export function deserialize(jsonStr: string): OrchestrationState {
     status: String(raw.status ?? "pending"),
     started_at: (raw.started_at as string) ?? null,
     delegation_phase_index: typeof raw.delegation_phase_index === "number" ? raw.delegation_phase_index : null,
+    delegation_group_index: typeof raw.delegation_group_index === "number" ? raw.delegation_group_index : null,
     agents,
     main_agent: mainAgent,
     phase_agents: phaseAgents,
     task_phase_map: taskPhaseMap,
     error: (raw.error as string) ?? null,
+    consolidated_pr_urls:
+      raw.consolidated_pr_urls && typeof raw.consolidated_pr_urls === "object" && raw.consolidated_pr_urls !== null
+        ? (raw.consolidated_pr_urls as Record<string, string>)
+        : null,
+    consolidated_pr_errors:
+      raw.consolidated_pr_errors && typeof raw.consolidated_pr_errors === "object" && raw.consolidated_pr_errors !== null
+        ? (raw.consolidated_pr_errors as Record<string, string>)
+        : null,
   };
   ensureLifecycleAgents(state);
   return state;

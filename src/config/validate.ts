@@ -1,5 +1,13 @@
-import type { DelegationMapConfig, OrchestratorConfig, TaskConfig } from "./types.js";
+import type { BranchLayout, DelegationMapConfig, OrchestratorConfig, TaskConfig } from "./types.js";
 import { resolveRepoTarget } from "../lib/repo-target.js";
+
+const BRANCH_LAYOUT_VALUES = new Set<BranchLayout>(["consolidated", "per_task"]);
+
+function validateBranchLayout(layout: string): asserts layout is BranchLayout {
+  if (!BRANCH_LAYOUT_VALUES.has(layout as BranchLayout)) {
+    throw new Error(`target.branch_layout must be 'consolidated' or 'per_task', got '${layout}'`);
+  }
+}
 
 const BRANCH_NAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9._/-]*[a-zA-Z0-9])?$/;
 
@@ -139,11 +147,12 @@ function validateDepRefs(tasks: TaskConfig[], taskIds: Set<string>): void {
 }
 
 function validateBranchNames(config: OrchestratorConfig): void {
-  validateBranchName(config.target.branch_prefix, "branch_prefix");
   for (const task of config.tasks) {
     validateBranchName(task.id, `task_id '${task.id}'`);
-    const combined = `${config.target.branch_prefix}/${task.id}`;
-    validateBranchName(combined, `branch name '${combined}'`);
+    if (config.target.branch_layout === "per_task") {
+      const combined = `${config.target.branch_prefix}/${task.id}`;
+      validateBranchName(combined, `branch name '${combined}'`);
+    }
   }
 }
 
@@ -200,6 +209,14 @@ function validateDelegationMap(
     }
   }
 
+  if (assignedTasks.size !== taskIds.size) {
+    const missingTaskIds: string[] = [];
+    for (const taskId of taskIds) {
+      if (!assignedTasks.has(taskId)) missingTaskIds.push(taskId);
+    }
+    throw new Error(`delegation_map must assign every task exactly once; missing: ${missingTaskIds.join(", ")}`);
+  }
+
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   for (const [taskId, assignment] of assignedTasks.entries()) {
     const task = taskById.get(taskId);
@@ -216,9 +233,9 @@ function validateDelegationMap(
           `delegation_map impossible ordering: task '${taskId}' in phase '${assignment.phaseId}' depends on '${depId}' in later phase '${depAssignment.phaseId}'`,
         );
       }
-      if (depAssignment.phaseIndex === assignment.phaseIndex && depAssignment.groupIndex !== assignment.groupIndex) {
+      if (depAssignment.phaseIndex === assignment.phaseIndex && depAssignment.groupIndex > assignment.groupIndex) {
         throw new Error(
-          `delegation_map impossible ordering: task '${taskId}' in '${assignment.phaseId}/${assignment.groupId}' depends on '${depId}' in parallel group '${depAssignment.groupId}'`,
+          `delegation_map impossible ordering: task '${taskId}' in '${assignment.phaseId}/${assignment.groupId}' depends on '${depId}' in later parallel group '${depAssignment.groupId}'`,
         );
       }
     }
@@ -230,6 +247,7 @@ export function validateConfig(config: OrchestratorConfig): void {
     throw new Error("Config must specify either 'prompt' or 'tasks'");
   }
   validateBranchName(config.target.branch_prefix, "branch_prefix");
+  validateBranchLayout(config.target.branch_layout);
   if (Object.keys(config.repositories).length > 0) {
     validateRepositoryResolvableUrls(config.repositories);
   }

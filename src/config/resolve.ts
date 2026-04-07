@@ -4,7 +4,9 @@ import * as path from "node:path";
 import YAML from "yaml";
 import { parseConfig } from "./parse.js";
 import type {
+  BranchLayout,
   ConfigResolution,
+  DelegationMapConfig,
   DiagnosticFinding,
   OrchestratorConfig,
   RepoConfig,
@@ -599,6 +601,38 @@ function resolveTasks(
   return [[], { value: 0, source: "default", source_ref: "default:tasks" }];
 }
 
+function resolveDelegationMap(
+  projectConfig: OrchestratorConfig | null,
+  projectRaw: Record<string, unknown> | null,
+  sessionConfig: OrchestratorConfig | null,
+  sessionRaw: Record<string, unknown> | null,
+  projectSourceRef: string,
+): [DelegationMapConfig | null, ResolvedValue] {
+  if (projectConfig && projectRaw && ("delegation_map" in projectRaw || "delegationMap" in projectRaw)) {
+    const dm = projectConfig.delegation_map ?? null;
+    return [
+      dm,
+      {
+        value: dm?.phases?.length ?? 0,
+        source: "project",
+        source_ref: `${projectSourceRef}:delegation_map`,
+      },
+    ];
+  }
+  if (sessionConfig && sessionRaw && ("delegation_map" in sessionRaw || "delegationMap" in sessionRaw)) {
+    const dm = sessionConfig.delegation_map ?? null;
+    return [
+      dm,
+      {
+        value: dm?.phases?.length ?? 0,
+        source: "session",
+        source_ref: "~/.cursor-orch/session.yaml:delegation_map",
+      },
+    ];
+  }
+  return [null, { value: 0, source: "default", source_ref: "default:delegation_map" }];
+}
+
 export function resolveConfigPrecedence(configPathFlag: string | null | undefined, bootstrapRepoFlag: string | null | undefined): ConfigResolution {
   const findings: DiagnosticFinding[] = [];
   const provenance: Record<string, ResolvedValue> = {};
@@ -706,11 +740,50 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
   });
   provenance["target.branch_prefix"] = branchPrefix;
 
+  const branchLayout = resolveStringValue({
+    fieldName: "target.branch_layout",
+    defaultValue: "consolidated",
+    flagValue: null,
+    flagRef: "",
+    envName: "CURSOR_ORCH_BRANCH_LAYOUT",
+    projectRaw,
+    projectKeyPath: ["target", "branch_layout"],
+    projectRef: `${configPathRef}:target.branch_layout`,
+    sessionRaw,
+    sessionKeyPath: ["target", "branch_layout"],
+    sessionRef: "~/.cursor-orch/session.yaml:target.branch_layout",
+    findings,
+  });
+  provenance["target.branch_layout"] = branchLayout;
+
+  const consolidatePrs = resolveBoolValue({
+    fieldName: "target.consolidate_prs",
+    defaultValue: true,
+    envName: "CURSOR_ORCH_CONSOLIDATE_PRS",
+    projectRaw,
+    projectKeyPath: ["target", "consolidate_prs"],
+    projectRef: `${configPathRef}:target.consolidate_prs`,
+    sessionRaw,
+    sessionKeyPath: ["target", "consolidate_prs"],
+    sessionRef: "~/.cursor-orch/session.yaml:target.consolidate_prs",
+    findings,
+  });
+  provenance["target.consolidate_prs"] = consolidatePrs;
+
   const [repositories, repositoriesSource] = resolveRepositories(projectConfig, projectRaw, sessionConfig, sessionRaw, configPathRef);
   provenance.repositories = repositoriesSource;
 
   const [tasks, tasksSource] = resolveTasks(projectConfig, projectRaw, sessionConfig, sessionRaw, configPathRef);
   provenance.tasks = tasksSource;
+
+  const [delegation_map, delegationMapSource] = resolveDelegationMap(
+    projectConfig,
+    projectRaw,
+    sessionConfig,
+    sessionRaw,
+    configPathRef,
+  );
+  provenance.delegation_map = delegationMapSource;
 
   const cursorApiKey = resolveRequiredSecret("CURSOR_API_KEY", findings);
   const ghToken = resolveRequiredSecret("GH_TOKEN", findings);
@@ -723,9 +796,12 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
     prompt: String(prompt.value),
     repositories,
     tasks,
+    delegation_map,
     target: {
       auto_create_pr: Boolean(autoPr.value),
+      consolidate_prs: Boolean(consolidatePrs.value),
       branch_prefix: String(branchPrefix.value),
+      branch_layout: String(branchLayout.value) as BranchLayout,
     },
     bootstrap_repo_name: String(bootstrapRepo.value),
   };
