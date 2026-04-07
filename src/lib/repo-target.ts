@@ -2,6 +2,13 @@ export function looksLikeGithubRepoHttpsUrl(value: string): boolean {
   return /^https?:\/\/github\.com\/[^/\s]+\/[^/\s]+/.test(value.trim());
 }
 
+export function parseGithubOwnerRepo(url: string): { owner: string; repo: string } | null {
+  const n = normalizeRepoToken(url);
+  const m = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)$/.exec(n);
+  if (!m) return null;
+  return { owner: m[1], repo: m[2] };
+}
+
 export function normalizeRepoToken(value: string): string {
   return value.trim().replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase();
 }
