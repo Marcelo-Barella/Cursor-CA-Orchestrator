@@ -68,6 +68,11 @@ export function integrationBranchName(branchPrefix: string, runId: string, baseR
   return base.replace(/[^a-zA-Z0-9/._-]/g, "-").replace(/\/+/g, "/");
 }
 
+export function runBranchName(branchPrefix: string, runId: string, baseRef: string): string {
+  const base = `${branchPrefix}/${runId}/${sanitizeRefSegment(baseRef)}/run`;
+  return base.replace(/[^a-zA-Z0-9/._-]/g, "-").replace(/\/+/g, "/");
+}
+
 export interface ConsolidateGroupInput {
   groupKey: string;
   owner: string;
@@ -146,5 +151,99 @@ export async function consolidateOneRepo(
 
 export function groupKeyForRepo(repoUrl: string, ref: string): string {
   return `${normalizeRepoToken(repoUrl)}\0${ref}`;
+}
+
+export async function ensureRunBranchFromBase(
+  token: string,
+  owner: string,
+  repo: string,
+  baseRef: string,
+  runBranch: string,
+): Promise<{ error: string | null }> {
+  const repoPath = `/repos/${owner}/${repo}`;
+  const runRefResp = await ghJson(token, "GET", `${repoPath}/git/ref/heads/${encodeURIComponent(runBranch)}`);
+  if (runRefResp.ok) {
+    return { error: null };
+  }
+  const refPath = `${repoPath}/git/ref/heads/${encodeURIComponent(baseRef)}`;
+  const refResp = await ghJson(token, "GET", refPath);
+  if (!refResp.ok) {
+    return { error: `resolve base ref ${baseRef}: HTTP ${refResp.status} ${refResp.text.slice(0, 300)}` };
+  }
+  const baseSha = (refResp.json as { object?: { sha?: string } }).object?.sha;
+  if (!baseSha) {
+    return { error: `missing SHA for ${baseRef}` };
+  }
+  const createRef = await ghJson(token, "POST", `${repoPath}/git/refs`, {
+    ref: `refs/heads/${runBranch}`,
+    sha: baseSha,
+  });
+  if (!createRef.ok) {
+    return { error: `create run branch ${runBranch}: HTTP ${createRef.status} ${createRef.text.slice(0, 400)}` };
+  }
+  return { error: null };
+}
+
+async function mergeBranches(
+  token: string,
+  owner: string,
+  repo: string,
+  base: string,
+  head: string,
+  commitMessage: string,
+): Promise<{ ok: boolean; status: number; text: string }> {
+  const repoPath = `/repos/${owner}/${repo}`;
+  const merge = await ghJson(token, "POST", `${repoPath}/merges`, {
+    base,
+    head,
+    commit_message: commitMessage,
+  });
+  return { ok: merge.ok, status: merge.status, text: merge.text };
+}
+
+export async function openPullRequestForRunBranch(
+  token: string,
+  input: {
+    groupKey: string;
+    owner: string;
+    repo: string;
+    baseRef: string;
+    runBranch: string;
+    title: string;
+    body: string;
+  },
+): Promise<ConsolidateResult> {
+  const { groupKey, owner, repo, baseRef, runBranch, title, body } = input;
+  const repoPath = `/repos/${owner}/${repo}`;
+  const runRef = await ghJson(token, "GET", `${repoPath}/git/ref/heads/${encodeURIComponent(runBranch)}`);
+  if (!runRef.ok) {
+    return { groupKey, prUrl: null, error: `resolve run branch ${runBranch}: HTTP ${runRef.status} ${runRef.text.slice(0, 300)}` };
+  }
+  const sync = await mergeBranches(
+    token,
+    owner,
+    repo,
+    runBranch,
+    baseRef,
+    `Merge ${baseRef} into ${runBranch}`,
+  );
+  if (!sync.ok) {
+    return {
+      groupKey,
+      prUrl: null,
+      error: `sync ${baseRef} into ${runBranch}: HTTP ${sync.status} ${sync.text.slice(0, 500)}`,
+    };
+  }
+  const pulls = await ghJson(token, "POST", `${repoPath}/pulls`, {
+    title,
+    body,
+    head: runBranch,
+    base: baseRef,
+  });
+  if (!pulls.ok) {
+    return { groupKey, prUrl: null, error: `open PR: HTTP ${pulls.status} ${pulls.text.slice(0, 400)}` };
+  }
+  const pr = pulls.json as { html_url?: string };
+  return { groupKey, prUrl: pr.html_url ?? null, error: pr.html_url ? null : "PR response missing html_url" };
 }
 
