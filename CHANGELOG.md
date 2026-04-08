@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.3 - 2026-04-08
+
+- **Validation:** Under consolidated layout with consolidated PRs, `validateConfig` requires `delegation_map` when multiple tasks target the same repository alias, forbids two such tasks in the same parallel group, and exports `canonicalRepoAliasForTask` for consistent repo resolution.
+
 ## 0.5.2 - 2026-04-08
 
 - **State:** `repo_run_head` records the per-repo-group run branch name for resume and launch ref selection (serialized with run state).

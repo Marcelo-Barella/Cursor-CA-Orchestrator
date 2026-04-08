@@ -197,14 +197,24 @@ delegationMap:
     - id: phase-a
       parallelGroups:
         - id: group-a
-          taskIds: [t1, t2]
+          taskIds: [t1]
+        - id: group-b
+          taskIds: [t2]
 target:
   auto_create_pr: true
   branch_prefix: cursor-orch
 `;
     const config = parseConfig(yaml);
     expect(config.delegation_map).toEqual({
-      phases: [{ id: "phase-a", groups: [{ id: "group-a", task_ids: ["t1", "t2"] }] }],
+      phases: [
+        {
+          id: "phase-a",
+          groups: [
+            { id: "group-a", task_ids: ["t1"] },
+            { id: "group-b", task_ids: ["t2"] },
+          ],
+        },
+      ],
     });
   });
 
@@ -445,6 +455,77 @@ target:
       bootstrap_repo_name: "cursor-orch-bootstrap",
     };
     expect(() => validateConfig(config)).toThrow(/later parallel group/);
+  });
+
+  it("validateConfig requires delegation_map when multiple tasks hit the same repo under consolidated consolidate_prs", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: "composer-2",
+      prompt: "",
+      repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "p1",
+          model: null,
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+        },
+        {
+          id: "t2",
+          repo: "svc",
+          prompt: "p2",
+          model: null,
+          depends_on: ["t1"],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+        },
+      ],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+    };
+    expect(() => validateConfig(config)).toThrow(/delegation_map/);
+  });
+
+  it("validateConfig rejects same-repo tasks in the same parallel group for run-line workflow", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: "composer-2",
+      prompt: "",
+      repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "p1",
+          model: null,
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+        },
+        {
+          id: "t2",
+          repo: "svc",
+          prompt: "p2",
+          model: null,
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+        },
+      ],
+      delegation_map: {
+        phases: [{ id: "phase-1", groups: [{ id: "g1", task_ids: ["t1", "t2"] }] }],
+      },
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+    };
+    expect(() => validateConfig(config)).toThrow(/same parallel group/);
   });
 
   it("resolveConfigPrecedence includes delegation_map from project YAML for validateConfig", () => {
