@@ -64,7 +64,7 @@ If you include \`delegation_map\`, the orchestrator runs **ordered waves**: \`ph
 
 **Dependencies vs waves:** a task may depend only on tasks in the **same** parallel group or an **earlier** group in map order (an earlier group in the same phase, or any group in an earlier phase). The runtime rejects a dependency on a task in a later phase or a later parallel group in the same phase.
 
-**Conflicts:** do not put the same task ID in more than one group. For the same repository, if work would conflict, serialize with \`depends_on\` and separate phases or parallel groups (later groups wait for earlier groups).
+**Conflicts:** do not put the same task ID in more than one group. For the same repository, if work would conflict, serialize with \`depends_on\` and separate phases or parallel groups (later groups wait for earlier groups). With consolidated PR mode, the runtime requires tasks that touch the same repo to sit in **different** parallel groups so agents push sequentially to one shared run branch per repo.
 
 ## Dynamic Repository Creation
 
