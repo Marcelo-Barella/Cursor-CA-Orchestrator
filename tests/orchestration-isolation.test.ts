@@ -54,6 +54,17 @@ describe("orchestration isolation", () => {
     expect(prompt).toContain('branch: "run/run-123"');
   });
 
+  it("injects git run-line section when opts.runBranch is set", () => {
+    const prompt = buildWorkerPrompt(workerTask, "run-123", "gh-token", {}, "o", "b", {
+      runBranch: "cursor-orch/run-123/main/run",
+      launchRef: "main",
+      perTaskBranch: "cursor-orch/run-123/sync-backend",
+    });
+    expect(prompt).toContain("GIT TARGET (run-line workflow):");
+    expect(prompt).toContain('branch "cursor-orch/run-123/main/run"');
+    expect(prompt).toContain("Do not create a pull request yourself");
+  });
+
   it("writes planner output to a run-scoped temp path", () => {
     const prompt = buildPlannerPrompt(
       plannerConfig,

@@ -5,7 +5,7 @@ import { RepoStoreClient } from "./api/repo-store.js";
 import type { OrchestratorConfig, TaskConfig } from "./config/types.js";
 import { canonicalizeOrchestratorConfig } from "./config/canonicalize.js";
 import { parseConfig, toYaml } from "./config/parse.js";
-import { validateConfig } from "./config/validate.js";
+import { canonicalRepoAliasForTask, validateConfig } from "./config/validate.js";
 import { buildPlannerPrompt, parseTaskPlan, waitForPlan } from "./planner.js";
 import { buildRepoCreationPrompt, buildWorkerPrompt } from "./prompt-builder.js";
 import {
@@ -23,8 +23,11 @@ import {
 } from "./state.js";
 import {
   consolidateOneRepo,
+  ensureRunBranchFromBase,
   groupKeyForRepo,
   integrationBranchName,
+  openPullRequestForRunBranch,
+  runBranchName,
   topoSortTaskGroup,
 } from "./lib/github-consolidated-pr.js";
 import { parseGithubOwnerRepo, resolveRepoTarget } from "./lib/repo-target.js";
@@ -229,6 +232,15 @@ export function computeBranchName(branchPrefix: string, runId: string, taskId: s
   return base;
 }
 
+function resolvePlanRefForTask(task: TaskConfig, config: OrchestratorConfig): string | null {
+  const alias = canonicalRepoAliasForTask(task, config.repositories);
+  if (!alias) {
+    return null;
+  }
+  const rc = config.repositories[alias];
+  return rc ? rc.ref : null;
+}
+
 function makeEvent(
   eventType: string,
   detail: string,
@@ -413,10 +425,39 @@ async function markAgentFinished(
 ): Promise<void> {
   agent.status = "finished";
   agent.finished_at = nowIso();
-  agent.branch_name = info.branch_name?.trim() || computeBranchName(config.target.branch_prefix, runId, taskId, agent.retry_count);
+  const taskMap = Object.fromEntries(config.tasks.map((t) => [t.id, t]));
+  const task = taskMap[taskId]!;
+  let branchRecorded = info.branch_name?.trim() || computeBranchName(config.target.branch_prefix, runId, taskId, agent.retry_count);
+  const runLine =
+    !task.create_repo && config.target.branch_layout === "consolidated" && config.target.consolidate_prs;
+  if (runLine) {
+    const planRef = resolvePlanRefForTask(task, config);
+    if (planRef) {
+      const ghToken = process.env.GH_TOKEN;
+      if (ghToken) {
+        try {
+          const depOutputs = await gatherDepOutputs(task, repoStore, runId);
+          const [repoUrl] = await resolveRepoForTask(task, config, depOutputs, ghToken);
+          const gk = groupKeyForRepo(repoUrl, planRef);
+          const rb = runBranchName(config.target.branch_prefix, runId, planRef);
+          state.repo_run_head = state.repo_run_head ?? {};
+          state.repo_run_head[gk] = rb;
+          branchRecorded = rb;
+        } catch {
+          branchRecorded = runBranchName(config.target.branch_prefix, runId, planRef);
+        }
+      } else {
+        branchRecorded = runBranchName(config.target.branch_prefix, runId, planRef);
+      }
+    }
+  }
+  agent.branch_name = branchRecorded;
   agent.pr_url = info.pr_url;
   agent.summary = info.summary;
   await readWorkerOutput(repoStore, runId, taskId);
+  if (runLine && state.repo_run_head && Object.keys(state.repo_run_head).length > 0) {
+    await syncToRepo(repoStore, runId, state);
+  }
   const phaseId = state.task_phase_map[taskId];
   await appendEvent(
     repoStore,
@@ -630,13 +671,48 @@ async function launchSingleTask(
   const ghToken = process.env.GH_TOKEN!;
   const depOutputs = await gatherDepOutputs(task, repoStore, runId);
   const [repoUrl, ref] = await resolveRepoForTask(task, config, depOutputs, ghToken);
+  const planRef = resolvePlanRefForTask(task, config);
+  const runLine =
+    !task.create_repo && config.target.branch_layout === "consolidated" && config.target.consolidate_prs && planRef;
+  let launchRef = ref;
+  let workerBranch = computeBranchName(config.target.branch_prefix, runId, taskId, state.agents[taskId]!.retry_count);
+  let runBranchForPrompt: string | undefined;
+  if (runLine && planRef) {
+    const ownerRepo = parseGithubOwnerRepo(repoUrl);
+    const rb = runBranchName(config.target.branch_prefix, runId, planRef);
+    if (ownerRepo) {
+      const ensured = await ensureRunBranchFromBase(ghToken, ownerRepo.owner, ownerRepo.repo, planRef, rb);
+      if (ensured.error) {
+        const summary = `Failed to prepare run branch for task ${taskId}: ${ensured.error}`;
+        console.error(summary);
+        state.agents[taskId]!.status = "failed";
+        state.agents[taskId]!.summary = summary;
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("task_failed", `Task ${taskId} failed: ${ensured.error}`, taskId, {
+            payload: { repository: repoUrl, ref: planRef },
+          }),
+        );
+        return;
+      }
+    }
+    const gk = groupKeyForRepo(repoUrl, planRef);
+    launchRef = state.repo_run_head?.[gk] ?? planRef;
+    workerBranch = rb;
+    runBranchForPrompt = rb;
+  }
   const prompt = task.create_repo
     ? buildRepoCreationPrompt(task, runId, ghToken, depOutputs)
-    : buildWorkerPrompt(task, runId, ghToken, depOutputs);
-  const branch = computeBranchName(config.target.branch_prefix, runId, taskId, state.agents[taskId]!.retry_count);
+    : buildWorkerPrompt(task, runId, ghToken, depOutputs, "", "", {
+        runBranch: runBranchForPrompt,
+        launchRef,
+        perTaskBranch: computeBranchName(config.target.branch_prefix, runId, taskId, state.agents[taskId]!.retry_count),
+      });
+  const branch = workerBranch;
   const model = task.model ?? config.model;
   const autoPr = config.target.auto_create_pr && !config.target.consolidate_prs;
-  const launch = await tryLaunchAgent(cursorClient, prompt, repoUrl, ref, model, branch, autoPr);
+  const launch = await tryLaunchAgent(cursorClient, prompt, repoUrl, launchRef, model, branch, autoPr);
   if (!launch.info) {
     const detail = launch.error ?? "unknown launch error";
     const summary = `Failed to launch agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${ref})`;
@@ -1023,22 +1099,35 @@ async function maybeConsolidatePullRequests(
       errors[gKey] = "no task branches to merge";
       continue;
     }
-    const integrationBranch = integrationBranchName(config.target.branch_prefix, runId, g.ref);
     const title = `cursor-orch: ${config.name} (${runId})`;
     const body = `Consolidated tasks: ${sorted.join(", ")}\n\nRun: ${runId}`;
-    const r = await consolidateOneRepo(
-      ghToken,
-      {
-        groupKey: gKey,
-        owner: ownerRepo.owner,
-        repo: ownerRepo.repo,
-        baseRef: g.ref,
-        taskBranches: branches,
-        title,
-        body,
-      },
-      integrationBranch,
-    );
+    const expectedRun = runBranchName(config.target.branch_prefix, runId, g.ref);
+    const uniqueHeads = [...new Set(branches)];
+    const useRunLine =
+      config.target.branch_layout === "consolidated" && uniqueHeads.length === 1 && uniqueHeads[0] === expectedRun;
+    const r = useRunLine
+      ? await openPullRequestForRunBranch(ghToken, {
+          groupKey: gKey,
+          owner: ownerRepo.owner,
+          repo: ownerRepo.repo,
+          baseRef: g.ref,
+          runBranch: expectedRun,
+          title,
+          body,
+        })
+      : await consolidateOneRepo(
+          ghToken,
+          {
+            groupKey: gKey,
+            owner: ownerRepo.owner,
+            repo: ownerRepo.repo,
+            baseRef: g.ref,
+            taskBranches: branches,
+            title,
+            body,
+          },
+          integrationBranchName(config.target.branch_prefix, runId, g.ref),
+        );
     if (r.error) {
       errors[gKey] = r.error;
     } else if (r.prUrl) {

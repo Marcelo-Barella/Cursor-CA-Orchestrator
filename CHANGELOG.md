@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.5.4 - 2026-04-08
+
+- **Run-line orchestration:** With `target.branch_layout: consolidated` and `target.consolidate_prs`, workers share one run branch per repo group (`{branch_prefix}/{run_id}/{plan_ref}/run`); the first task launches from the plan ref, later tasks from the run branch; consolidated PR opening uses `openPullRequestForRunBranch` when finished agents agree on the run branch, otherwise the prior integration-branch merge path applies. `repo_run_head` updates after tasks finish when set.
+- **Worker prompts:** Run-line launches add a GIT TARGET section (push the run branch only, do not open a PR) and adjusted rules; the planner notes same-repo serialization across parallel groups for consolidated PR mode.
+- **Docs:** README `target.consolidate_prs` describes run-line branches, PR behavior, and the `delegation_map` requirement for same-repo multi-task runs.
+
 ## 0.5.3 - 2026-04-08
 
 - **Validation:** Under consolidated layout with consolidated PRs, `validateConfig` requires `delegation_map` when multiple tasks target the same repository alias, forbids two such tasks in the same parallel group, and exports `canonicalRepoAliasForTask` for consistent repo resolution.

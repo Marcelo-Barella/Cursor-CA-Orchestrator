@@ -3,6 +3,12 @@ import { WORKER_SYSTEM_PROMPT } from "./system-prompt.js";
 
 const MAX_DEP_OUTPUT_BYTES = 50 * 1024;
 
+export type WorkerPromptOpts = {
+  runBranch?: string;
+  launchRef?: string;
+  perTaskBranch?: string;
+};
+
 function buildWorkerPayloadPath(runId: string, taskId: string): string {
   return `/tmp/cursor-orch-${runId}-${taskId}-payload.json`;
 }
@@ -14,13 +20,15 @@ export function buildWorkerPrompt(
   dependencyOutputs: Record<string, Record<string, unknown>>,
   bootstrapOwner = "",
   bootstrapRepo = "",
+  opts?: WorkerPromptOpts,
 ): string {
   const sections = [
     WORKER_SYSTEM_PROMPT,
     sectionTask(task),
     sectionDependencies(task, dependencyOutputs),
+    opts?.runBranch ? sectionGitRunLine(opts.runBranch, opts.launchRef, opts.perTaskBranch) : "",
     sectionOutputProtocol(task, runId, ghToken, bootstrapOwner, bootstrapRepo),
-    sectionRules(),
+    sectionRules(opts?.runBranch),
   ];
   return sections.filter(Boolean).join("\n\n");
 }
@@ -67,6 +75,25 @@ function sectionRepoCreation(task: TaskConfig): string {
 
 function sectionTask(task: TaskConfig): string {
   return `You are working on task "${task.id}" as part of an orchestrated multi-repo workflow.\n\nYOUR TASK:\n${task.prompt.trim()}`;
+}
+
+function sectionGitRunLine(runBranch: string, launchRef?: string, perTaskBranch?: string): string {
+  const refLine =
+    launchRef !== undefined && launchRef !== ""
+      ? `Your workspace was created from ref "${launchRef}"; accumulated work for this orchestration run lives on branch "${runBranch}".`
+      : `Accumulated work for this orchestration run lives on branch "${runBranch}".`;
+  const retryNote = perTaskBranch
+    ? `If you must use a differently named branch (e.g. retry), still merge or cherry-pick into "${runBranch}" and push "${runBranch}" so the next task sees your commits.`
+    : "";
+  return [
+    "GIT TARGET (run-line workflow):",
+    refLine,
+    `Commit and push all code changes to branch "${runBranch}" only (e.g. push to origin ${runBranch}).`,
+    "Do not open a pull request; the orchestrator opens one PR from this branch when all tasks complete.",
+    retryNote,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function sectionDependencies(task: TaskConfig, dependencyOutputs: Record<string, Record<string, unknown>>): string {
@@ -134,7 +161,15 @@ Edit the \`output\` dict before running:
 - If you are blocked, set "status" to "blocked" and "blocked_reason" to a specific explanation.`;
 }
 
-function sectionRules(): string {
+function sectionRules(runLineBranch?: string): string {
+  if (runLineBranch) {
+    return `RULES:
+- Focus only on your assigned task. Do not modify unrelated code.
+- If you are blocked, report it using the output script with status "blocked" and a specific blocked_reason.
+- Do not attempt to communicate with other agents. Only write to your designated output file on the bootstrap repo (per the protocol above).
+- Do not create a pull request yourself.
+# MANDATORY: Commit and push your changes to branch "${runLineBranch}" on the task repository before reporting completion`;
+  }
   return `RULES:
 - Focus only on your assigned task. Do not modify unrelated code.
 - If you are blocked, report it using the output script with status "blocked" and a specific blocked_reason.

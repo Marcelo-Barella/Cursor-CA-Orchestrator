@@ -259,7 +259,7 @@ target:
 | `tasks[].model` | string | no | Per-task model override |
 | `tasks[].timeout_minutes` | int | no | Task timeout in minutes (default: 30) |
 | `target.auto_create_pr` | bool | no | Auto-create PRs for worker branches (default: true) |
-| `target.consolidate_prs` | bool | no | When `auto_create_pr` is true, defer PRs and open one PR per GitHub repo at the end by merging task branches (default: true). Multi-repo runs yield one PR per repo. |
+| `target.consolidate_prs` | bool | no | When `auto_create_pr` is true, defer PRs and open one PR per GitHub repo at the end (default: true). With `branch_layout: consolidated`, workers push to a single run branch per repo (`{branch_prefix}/{run_id}/{ref}/run`); the orchestrator merges the base ref into that branch then opens the PR. Otherwise task branches are merged as before. Multi-repo runs yield one PR per repo. Same-repo multi-task runs need `delegation_map` with one task per parallel group for that repo. |
 | `target.branch_prefix` | string | yes | Prefix for worker branch names |
 
 Environment variable `CURSOR_ORCH_CONSOLIDATE_PRS` overrides `target.consolidate_prs` when set to a boolean string (`true` / `false` / `1` / `0` / `yes` / `no` / `on` / `off`).

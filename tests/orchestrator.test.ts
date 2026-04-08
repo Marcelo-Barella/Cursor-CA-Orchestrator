@@ -6,18 +6,26 @@ import { toYaml } from "../src/config/parse.js";
 import { filterEligibleReadyTasks, runOrchestration } from "../src/orchestrator.js";
 import { createInitialState, deserialize, serialize } from "../src/state.js";
 
-function createConfig(taskIds: string[]): OrchestratorConfig {
+function createConfig(
+  taskIds: string[],
+  opts?: { deps?: Record<string, string[]>; repoFor?: Record<string, string> },
+): OrchestratorConfig {
+  const deps = opts?.deps ?? {};
+  const repoFor = opts?.repoFor ?? {};
   return {
     name: "n",
     model: "m",
     prompt: "",
-    repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
+    repositories: {
+      svc: { url: "https://github.com/o/r", ref: "main" },
+      svc2: { url: "https://github.com/o/r2", ref: "main" },
+    },
     tasks: taskIds.map((taskId) => ({
       id: taskId,
-      repo: "svc",
+      repo: repoFor[taskId] ?? "svc",
       prompt: `task ${taskId}`,
       model: null,
-      depends_on: [],
+      depends_on: deps[taskId] ?? [],
       timeout_minutes: 30,
       create_repo: false,
       repo_config: null,
@@ -29,9 +37,9 @@ function createConfig(taskIds: string[]): OrchestratorConfig {
 
 describe("orchestrator launch eligibility", () => {
   it("keeps current behavior when delegation map is absent", () => {
-    const config = createConfig(["a", "b"]);
+    const config = createConfig(["a"]);
     const state = createInitialState(config, "run1");
-    const ready = ["a", "b"];
+    const ready = ["a"];
     const eligible = filterEligibleReadyTasks(state, config, ready);
     expect(eligible).toEqual(ready);
     expect(state.delegation_phase_index).toBeNull();
@@ -39,7 +47,10 @@ describe("orchestrator launch eligibility", () => {
   });
 
   it("filters ready tasks by current delegation phase", () => {
-    const config = createConfig(["a", "b", "c"]);
+    const config = createConfig(["a", "b", "c"], {
+      deps: { b: ["a"] },
+      repoFor: { c: "svc2" },
+    });
     config.delegation_map = {
       phases: [
         { id: "phase-1", groups: [{ id: "group-1", task_ids: ["a"] }] },
@@ -55,7 +66,10 @@ describe("orchestrator launch eligibility", () => {
   });
 
   it("advances phase when the current phase is terminal", () => {
-    const config = createConfig(["a", "b", "c"]);
+    const config = createConfig(["a", "b", "c"], {
+      deps: { b: ["a"] },
+      repoFor: { c: "svc2" },
+    });
     config.delegation_map = {
       phases: [
         { id: "phase-1", groups: [{ id: "group-1", task_ids: ["a"] }] },
@@ -72,7 +86,10 @@ describe("orchestrator launch eligibility", () => {
   });
 
   it("does not schedule a later group in the same phase until the earlier group is terminal", () => {
-    const config = createConfig(["a", "b", "c"]);
+    const config = createConfig(["a", "b", "c"], {
+      deps: { b: ["a"] },
+      repoFor: { c: "svc2" },
+    });
     config.delegation_map = {
       phases: [
         {
@@ -93,7 +110,10 @@ describe("orchestrator launch eligibility", () => {
   });
 
   it("advances to the next group within a phase when the prior group is terminal", () => {
-    const config = createConfig(["a", "b", "c"]);
+    const config = createConfig(["a", "b", "c"], {
+      deps: { b: ["a"] },
+      repoFor: { c: "svc2" },
+    });
     config.delegation_map = {
       phases: [
         {
@@ -115,7 +135,7 @@ describe("orchestrator launch eligibility", () => {
   });
 
   it("excludes tasks not assigned in the delegation map", () => {
-    const config = createConfig(["a", "b", "x"]);
+    const config = createConfig(["a", "b", "x"], { deps: { b: ["a"] } });
     config.delegation_map = {
       phases: [
         { id: "phase-1", groups: [{ id: "group-1", task_ids: ["a"] }] },
@@ -131,7 +151,10 @@ describe("orchestrator launch eligibility", () => {
   });
 
   it("preserves eligibility after deserialize when delegation cursors were set", () => {
-    const config = createConfig(["a", "b", "c"]);
+    const config = createConfig(["a", "b", "c"], {
+      deps: { b: ["a"] },
+      repoFor: { c: "svc2" },
+    });
     config.delegation_map = {
       phases: [
         {
