@@ -156,6 +156,74 @@ function validateBranchNames(config: OrchestratorConfig): void {
   }
 }
 
+export function canonicalRepoAliasForTask(task: TaskConfig, repositories: Record<string, { url: string; ref: string }>): string | null {
+  if (task.create_repo) {
+    return null;
+  }
+  if (task.repo in repositories) {
+    return task.repo;
+  }
+  const repoTokenIndex = buildRepoTokenIndex(repositories);
+  const matches = repoTokenIndex.get(normalizeRepoToken(task.repo));
+  if (!matches || matches.size !== 1) {
+    return null;
+  }
+  return [...matches][0]!;
+}
+
+function validateRunLineForConsolidated(config: OrchestratorConfig): void {
+  if (config.target.branch_layout !== "consolidated" || !config.target.consolidate_prs) {
+    return;
+  }
+  const byAlias = new Map<string, TaskConfig[]>();
+  for (const task of config.tasks) {
+    const alias = canonicalRepoAliasForTask(task, config.repositories);
+    if (!alias) {
+      continue;
+    }
+    if (!byAlias.has(alias)) {
+      byAlias.set(alias, []);
+    }
+    byAlias.get(alias)!.push(task);
+  }
+  for (const [alias, groupTasks] of byAlias) {
+    if (groupTasks.length <= 1) {
+      continue;
+    }
+    if (!config.delegation_map) {
+      throw new Error(
+        `Run-line workflow requires delegation_map when multiple tasks target repository '${alias}' (consolidated + consolidate_prs); serialize them in separate parallel_groups`,
+      );
+    }
+    const assigned = new Map<string, { phaseIndex: number; groupIndex: number }>();
+    for (const [phaseIndex, phase] of config.delegation_map.phases.entries()) {
+      for (const [groupIndex, g] of phase.groups.entries()) {
+        for (const taskId of g.task_ids) {
+          assigned.set(taskId, { phaseIndex, groupIndex });
+        }
+      }
+    }
+    const placements: { taskId: string; phaseIndex: number; groupIndex: number }[] = [];
+    for (const t of groupTasks) {
+      const p = assigned.get(t.id);
+      if (!p) {
+        throw new Error(`delegation_map must assign task '${t.id}' for run-line repo '${alias}'`);
+      }
+      placements.push({ taskId: t.id, phaseIndex: p.phaseIndex, groupIndex: p.groupIndex });
+    }
+    placements.sort((a, b) => (a.phaseIndex !== b.phaseIndex ? a.phaseIndex - b.phaseIndex : a.groupIndex - b.groupIndex));
+    for (let i = 1; i < placements.length; i += 1) {
+      const prev = placements[i - 1]!;
+      const cur = placements[i]!;
+      if (prev.phaseIndex === cur.phaseIndex && prev.groupIndex === cur.groupIndex) {
+        throw new Error(
+          `Run-line workflow: tasks '${prev.taskId}' and '${cur.taskId}' both target repo '${alias}' in the same parallel group; move one to a later group`,
+        );
+      }
+    }
+  }
+}
+
 function validateDelegationMap(
   delegationMap: DelegationMapConfig,
   tasks: TaskConfig[],
@@ -266,4 +334,5 @@ export function validateConfig(config: OrchestratorConfig): void {
     throw new Error(`Circular dependency detected: ${cycle}`);
   }
   validateBranchNames(config);
+  validateRunLineForConsolidated(config);
 }
