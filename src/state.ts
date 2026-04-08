@@ -45,6 +45,7 @@ export interface OrchestrationState {
   error: string | null;
   consolidated_pr_urls: Record<string, string> | null;
   consolidated_pr_errors: Record<string, string> | null;
+  repo_run_head: Record<string, string> | null;
 }
 
 export interface OrchestrationEvent {
@@ -143,6 +144,7 @@ export function createInitialState(config: OrchestratorConfig, runId: string): O
     error: null,
     consolidated_pr_urls: null,
     consolidated_pr_errors: null,
+    repo_run_head: null,
   };
   ensureLifecycleAgents(state);
   return state;
@@ -316,6 +318,10 @@ export function deserialize(jsonStr: string): OrchestrationState {
     consolidated_pr_errors:
       raw.consolidated_pr_errors && typeof raw.consolidated_pr_errors === "object" && raw.consolidated_pr_errors !== null
         ? (raw.consolidated_pr_errors as Record<string, string>)
+        : null,
+    repo_run_head:
+      raw.repo_run_head && typeof raw.repo_run_head === "object" && raw.repo_run_head !== null
+        ? (raw.repo_run_head as Record<string, string>)
         : null,
   };
   ensureLifecycleAgents(state);

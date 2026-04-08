@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.2 - 2026-04-08
+
+- **State:** `repo_run_head` records the per-repo-group run branch name for resume and launch ref selection (serialized with run state).
+
 ## 0.5.1 - 2026-04-08
 
 - **GitHub run-line helpers:** Added `runBranchName`, `ensureRunBranchFromBase`, and `openPullRequestForRunBranch` for consolidated run branches (create from base when missing, sync base into run branch, open PR from run branch).
