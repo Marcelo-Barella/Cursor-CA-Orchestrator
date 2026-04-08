@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-04-08
+
+- **GitHub run-line helpers:** Added `runBranchName`, `ensureRunBranchFromBase`, and `openPullRequestForRunBranch` for consolidated run branches (create from base when missing, sync base into run branch, open PR from run branch).
+
 ## 0.5.0 - 2026-04-07
 
 - **Consolidated PRs:** With `target.auto_create_pr` and `target.consolidate_prs` (default true), worker launches skip per-task PR creation; when all tasks finish, the orchestrator merges task branches into one integration branch per GitHub repo and opens a single PR per repo. `CURSOR_ORCH_CONSOLIDATE_PRS` overrides the boolean. Summary output and the TTY dashboard list consolidated PR URLs (and errors) when present.

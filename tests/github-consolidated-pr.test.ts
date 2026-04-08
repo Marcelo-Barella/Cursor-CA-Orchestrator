@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupKeyForRepo, integrationBranchName, topoSortTaskGroup } from "../src/lib/github-consolidated-pr.js";
+import { groupKeyForRepo, integrationBranchName, runBranchName, topoSortTaskGroup } from "../src/lib/github-consolidated-pr.js";
 import { parseGithubOwnerRepo } from "../src/lib/repo-target.js";
 
 describe("topoSortTaskGroup", () => {
@@ -24,6 +24,12 @@ describe("topoSortTaskGroup", () => {
 describe("integrationBranchName", () => {
   it("includes sanitized base ref", () => {
     expect(integrationBranchName("p", "run1", "main")).toBe("p/run1/main/consolidated");
+  });
+});
+
+describe("runBranchName", () => {
+  it("includes sanitized base ref", () => {
+    expect(runBranchName("p", "run1", "main")).toBe("p/run1/main/run");
   });
 });
 
