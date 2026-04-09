@@ -8,6 +8,7 @@ import { parseConfig, toYaml } from "./config/parse.js";
 import { canonicalRepoAliasForTask, validateConfig } from "./config/validate.js";
 import { buildPlannerPrompt, parseTaskPlan, waitForPlan } from "./planner.js";
 import { buildRepoCreationPrompt, buildWorkerPrompt } from "./prompt-builder.js";
+import { extractConstraintsFromPrompt, validateTaskPromptsAgainstConstraints } from "./lib/constraint-validator.js";
 import {
   type AgentState,
   type OrchestrationEvent,
@@ -851,6 +852,16 @@ async function runPlanningPhase(
     }
     config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
     const parsedTasks = parseTaskPlan(planContent, config);
+    const constraints = extractConstraintsFromPrompt(config.prompt);
+    if (constraints.length > 0) {
+      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+      if (!result.valid) {
+        const detail = result.violations
+          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+          .join("; ");
+        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+      }
+    }
     config.tasks = parsedTasks;
     const canonPlan = canonicalizeOrchestratorConfig(config);
     config.repositories = canonPlan.repositories;
