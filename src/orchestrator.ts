@@ -80,7 +80,11 @@ function toTaskIdList(value: unknown): string[] {
   return out;
 }
 
-function extractDelegationPhases(config: OrchestratorConfig, knownTaskIds: Set<string>): DelegationPhase[] | null {
+function taskIdsFromConfig(config: OrchestratorConfig): Set<string> {
+  return new Set(config.tasks.map((t) => t.id));
+}
+
+export function extractDelegationPhases(config: OrchestratorConfig, knownTaskIds: Set<string>): DelegationPhase[] | null {
   if (config.delegation_map && Array.isArray(config.delegation_map.phases) && config.delegation_map.phases.length > 0) {
     const phases: DelegationPhase[] = [];
     for (const [index, phase] of config.delegation_map.phases.entries()) {
@@ -98,6 +102,7 @@ function extractDelegationPhases(config: OrchestratorConfig, knownTaskIds: Set<s
     if (phases.length > 0) {
       return phases;
     }
+    return null;
   }
   const rawConfig = config as unknown as {
     delegation_map?: unknown;
@@ -204,7 +209,7 @@ function buildDelegationTaskIndex(phases: DelegationPhase[]): {
 }
 
 export function filterEligibleReadyTasks(state: OrchestrationState, config: OrchestratorConfig, readyTasks: string[]): string[] {
-  const phases = extractDelegationPhases(config, new Set(Object.keys(state.agents)));
+  const phases = extractDelegationPhases(config, taskIdsFromConfig(config));
   if (!phases) return readyTasks;
   const { mappedTaskIds, taskLocation } = buildDelegationTaskIndex(phases);
   const { phaseIndex, groupIndex } = normalizeDelegationCursors(state, phases);
