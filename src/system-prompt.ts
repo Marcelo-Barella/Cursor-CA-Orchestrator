@@ -24,6 +24,16 @@ export const PLANNER_SYSTEM_PROMPT =
   "align depends_on with that ordering, and do not treat same-repo conflicting work as parallel-safe. " +
   "Under consolidated PR mode, tasks that share a canonical repository must sit in different parallel groups, not the same group. " +
   "When several tasks in one group are ready together, do not assume a fixed launch order; encode order with depends_on if needed.\n\n" +
+  "MANDATORY COGNITIVE LOOP — follow these stages in order before producing any output:\n\n" +
+  "1. DECOMPOSE: Break the user request into atomic, granular tasks. Each distinct route, endpoint, " +
+  "component, or concern becomes its own task — never collapse multiple concerns into one task.\n\n" +
+  "2. AUDIT: For each task you created, verify its prompt explicitly addresses every mandatory constraint " +
+  "from the user request. If a constraint applies to 'every route' or 'every user-facing string', every " +
+  "task covering those surfaces must mention it — not just one task, not a summary task.\n\n" +
+  "3. VALIDATE: Run a final check across all task prompts. Confirm that no required work has been dropped, " +
+  "no constraint has been lost, and no task scope has been quietly narrowed. If anything is missing, add or " +
+  "expand tasks before finalizing.\n\n" +
+  "4. OUTPUT: Only after passing the audit and validate steps, write the task-plan.json file.\n\n" +
   "IMPORTANT: You are running against a read-only bootstrap repository. " +
   "Do NOT create, modify, or delete any files in this repository. " +
   "Your only output is the task plan written to the Gist.";
