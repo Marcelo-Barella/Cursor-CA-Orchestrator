@@ -3,7 +3,7 @@ import type { RepoStoreClient } from "../src/api/repo-store.js";
 import type { CursorClient } from "../src/api/cursor-client.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import { toYaml } from "../src/config/parse.js";
-import { filterEligibleReadyTasks, runOrchestration } from "../src/orchestrator.js";
+import { extractDelegationPhases, filterEligibleReadyTasks, runOrchestration } from "../src/orchestrator.js";
 import { createInitialState, deserialize, serialize } from "../src/state.js";
 
 function createConfig(
@@ -145,6 +145,108 @@ describe("orchestrator launch eligibility", () => {
     const state = createInitialState(config, "run1");
     const ready = ["a", "b", "x"];
     const eligible = filterEligibleReadyTasks(state, config, ready);
+    expect(eligible).toEqual(["a"]);
+    expect(state.delegation_phase_index).toBe(0);
+    expect(state.delegation_group_index).toBe(0);
+  });
+
+  it("extractDelegationPhases keeps multiple parallel groups from typed delegation_map", () => {
+    const config = createConfig(["a", "b", "c"]);
+    config.delegation_map = {
+      phases: [
+        {
+          id: "phase-1",
+          groups: [
+            { id: "g1", task_ids: ["a"] },
+            { id: "g2", task_ids: ["b", "c"] },
+          ],
+        },
+      ],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b", "c"]));
+    expect(phases).not.toBeNull();
+    expect(phases![0]!.groups).toHaveLength(2);
+    expect(phases![0]!.groups[0]!.task_ids).toEqual(["a"]);
+    expect(phases![0]!.groups[1]!.task_ids).toEqual(["b", "c"]);
+  });
+
+  it("extractDelegationPhases returns null when typed map has no overlap with known task ids", () => {
+    const config = createConfig(["a"]);
+    config.delegation_map = {
+      phases: [{ id: "p1", groups: [{ id: "g1", task_ids: ["a"] }] }],
+    };
+    expect(extractDelegationPhases(config, new Set())).toBeNull();
+  });
+
+  it("eligibles multiple tasks in the same parallel group when both are ready", () => {
+    const config = createConfig(["a", "b", "c"]);
+    config.delegation_map = {
+      phases: [
+        {
+          id: "phase-1",
+          groups: [
+            { id: "g0", task_ids: ["a"] },
+            { id: "g1", task_ids: ["b", "c"] },
+          ],
+        },
+      ],
+    };
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "finished";
+    const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
+    expect(eligible).toEqual(["b", "c"]);
+  });
+
+  it("treats a failed task in the prior group as terminal for wave advancement", () => {
+    const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
+    config.delegation_map = {
+      phases: [
+        {
+          id: "phase-1",
+          groups: [
+            { id: "g1", task_ids: ["a"] },
+            { id: "g2", task_ids: ["b", "c"] },
+          ],
+        },
+      ],
+    };
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "failed";
+    const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
+    expect(eligible).toEqual(["b", "c"]);
+    expect(state.delegation_group_index).toBe(1);
+  });
+
+  it("after mapped waves complete, eligible ready tasks are only those not in the delegation map (defensive)", () => {
+    const config = createConfig(["a", "b", "u"]);
+    config.delegation_map = {
+      phases: [
+        { id: "phase-1", groups: [{ id: "g1", task_ids: ["a"] }] },
+        { id: "phase-2", groups: [{ id: "g1", task_ids: ["b"] }] },
+      ],
+    };
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "finished";
+    state.agents.b!.status = "finished";
+    const eligible = filterEligibleReadyTasks(state, config, ["u", "a"]);
+    expect(eligible).toEqual(["u"]);
+  });
+
+  it("repairs negative delegation cursor indices", () => {
+    const config = createConfig(["a", "b", "c"], {
+      deps: { b: ["a"] },
+      repoFor: { c: "svc2" },
+    });
+    config.delegation_map = {
+      phases: [
+        { id: "phase-1", groups: [{ id: "g1", task_ids: ["a"] }] },
+        { id: "phase-2", groups: [{ id: "g1", task_ids: ["b", "c"] }] },
+      ],
+    };
+    const state = createInitialState(config, "run1");
+    state.delegation_phase_index = -3;
+    state.delegation_group_index = -1;
+    const eligible = filterEligibleReadyTasks(state, config, ["a"]);
     expect(eligible).toEqual(["a"]);
     expect(state.delegation_phase_index).toBe(0);
     expect(state.delegation_group_index).toBe(0);

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.5 - 2026-04-09
+
+- **Delegation extraction:** Scheduling uses task ids from `config.tasks` when building delegation phases so runtime extraction matches validated config. When `delegation_map.phases` is non-empty but produces no groups after filtering task ids, extraction returns null instead of falling through to the legacy path that merged parallel groups into one group per phase.
+
 ## 0.5.4 - 2026-04-08
 
 - **Run-line orchestration:** With `target.branch_layout: consolidated` and `target.consolidate_prs`, workers share one run branch per repo group (`{branch_prefix}/{run_id}/{plan_ref}/run`); the first task launches from the plan ref, later tasks from the run branch; consolidated PR opening uses `openPullRequestForRunBranch` when finished agents agree on the run branch, otherwise the prior integration-branch merge path applies. `repo_run_head` updates after tasks finish when set.
