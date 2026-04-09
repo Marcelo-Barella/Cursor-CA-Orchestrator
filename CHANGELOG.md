@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.8 - 2026-04-09
+
+- **Tests:** Expanded coverage for parallel-group concurrency, failed upstream as terminal for wave advance, post-map defensive eligibility, corrupted delegation cursors, `parseTaskPlan` + `validateConfig` on incomplete delegation map, and `validateConfig` early return when `prompt` is set and `tasks` is empty.
+
 ## 0.5.7 - 2026-04-09
 
 - **REPL:** `/tokens` prints a GPT-4o tokenizer estimate for the configured orchestration prompt; `/prompt set` acknowledgment includes token count.

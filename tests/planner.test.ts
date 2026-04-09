@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseTaskPlan } from "../src/planner.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
+import { validateConfig } from "../src/config/validate.js";
 
 describe("planner", () => {
   it("parses minimal legacy task plan without delegation map", () => {
@@ -66,6 +67,43 @@ describe("planner", () => {
     expect(config.delegation_map).toEqual({
       phases: [{ id: "phase-1", groups: [{ id: "group-a", task_ids: ["t1"] }] }],
     });
+  });
+
+  it("parseTaskPlan merged config fails validateConfig when delegation_map omits a task", () => {
+    const config: OrchestratorConfig = {
+      name: "n",
+      model: "m",
+      prompt: "",
+      repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
+      bootstrap_repo_name: "b",
+    };
+    const json = JSON.stringify({
+      delegation_map: {
+        version: 1,
+        phases: [{ id: "phase-1", parallel_groups: [{ id: "group-a", tasks: ["t1"] }] }],
+      },
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "do work",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+        {
+          id: "t2",
+          repo: "svc",
+          prompt: "more work",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const tasks = parseTaskPlan(json, config);
+    config.tasks = tasks;
+    expect(() => validateConfig(config)).toThrow(/must assign every task exactly once/);
   });
 
   it("rejects delegation map that references unknown task IDs", () => {
