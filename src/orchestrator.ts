@@ -708,8 +708,8 @@ async function launchSingleTask(
     runBranchForPrompt = rb;
   }
   const prompt = task.create_repo
-    ? buildRepoCreationPrompt(task, runId, ghToken, depOutputs)
-    : buildWorkerPrompt(task, runId, ghToken, depOutputs, "", "", {
+    ? buildRepoCreationPrompt(task, runId, depOutputs)
+    : buildWorkerPrompt(task, runId, depOutputs, "", "", {
         runBranch: runBranchForPrompt,
         launchRef,
         perTaskBranch: computeBranchName(config.target.branch_prefix, runId, taskId, state.agents[taskId]!.retry_count),
@@ -835,7 +835,7 @@ async function runPlanningPhase(
   try {
     const ghToken = process.env.GH_TOKEN!;
     const ghUser = await resolveGithubUsername(ghToken);
-    const plannerPrompt = buildPlannerPrompt(config, runId, ghToken, ghUser, config.bootstrap_repo_name);
+    const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
     const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
     await cursorClient.launchAgent(
       plannerPrompt,
