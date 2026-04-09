@@ -24,7 +24,7 @@ import { readReplLineTTY } from "./lib/repl/tty-line-editor.js";
 import { readVersion } from "./version.js";
 import { tui } from "./tui/style.js";
 
-const NON_MUTATION = new Set(["help", "config", "repos", "run", "prompt"]);
+const NON_MUTATION = new Set(["help", "config", "repos", "run", "prompt", "tokens"]);
 
 function parseInput(raw: string): [string, string[]] {
   const parts = raw.slice(1).trim().split(/\s+/);
