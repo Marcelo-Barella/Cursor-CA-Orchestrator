@@ -327,6 +327,22 @@ target:
     expect(() => validateConfig(config)).toThrow(/must assign every task exactly once/);
   });
 
+  it("validateConfig returns early without delegation checks when prompt is set and tasks is empty", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: "composer-2",
+      prompt: "planning only",
+      repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
+      tasks: [],
+      delegation_map: {
+        phases: [{ id: "phase-1", groups: [{ id: "group-a", task_ids: ["ghost"] }] }],
+      },
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+    };
+    expect(() => validateConfig(config)).not.toThrow();
+  });
+
   it("validateConfig rejects impossible cross-phase dependency ordering", () => {
     const config: OrchestratorConfig = {
       name: "t",
