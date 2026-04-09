@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildWorkerPrompt } from "../src/prompt-builder.js";
+import { buildRepoCreationPrompt, buildWorkerPrompt } from "../src/prompt-builder.js";
 import { buildPlannerPrompt } from "../src/planner.js";
 import { computeBranchName } from "../src/orchestrator.js";
 import type { OrchestratorConfig, TaskConfig } from "../src/config/types.js";
@@ -13,6 +13,19 @@ const workerTask: TaskConfig = {
   timeout_minutes: 30,
   create_repo: false,
   repo_config: null,
+};
+
+const LEAK_PROBE = "gh-token-leak-check";
+
+const repoCreateTask: TaskConfig = {
+  id: "create-backend",
+  repo: "__new__",
+  prompt: "Create a new repo.",
+  model: null,
+  depends_on: [],
+  timeout_minutes: 30,
+  create_repo: true,
+  repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
 };
 
 const plannerConfig: OrchestratorConfig = {
@@ -44,7 +57,6 @@ describe("orchestration isolation", () => {
     const prompt = buildWorkerPrompt(
       workerTask,
       "run-123",
-      "gh-token",
       {},
       "bootstrap-owner",
       "bootstrap-repo",
@@ -55,7 +67,7 @@ describe("orchestration isolation", () => {
   });
 
   it("injects git run-line section when opts.runBranch is set", () => {
-    const prompt = buildWorkerPrompt(workerTask, "run-123", "gh-token", {}, "o", "b", {
+    const prompt = buildWorkerPrompt(workerTask, "run-123", {}, "o", "b", {
       runBranch: "cursor-orch/run-123/main/run",
       launchRef: "main",
       perTaskBranch: "cursor-orch/run-123/sync-backend",
@@ -69,12 +81,24 @@ describe("orchestration isolation", () => {
     const prompt = buildPlannerPrompt(
       plannerConfig,
       "run-123",
-      "gh-token",
       "bootstrap-owner",
       "bootstrap-repo",
     );
 
     expect(prompt).toContain("/tmp/cursor-orch-run-123-task-plan.json");
     expect(prompt).toContain('branch="run/run-123"');
+  });
+
+  it("does not embed probe secrets or token-in-prompt patterns in agent prompts", () => {
+    const worker = buildWorkerPrompt(workerTask, "run-123", {}, "o", "b");
+    const planner = buildPlannerPrompt(plannerConfig, "run-123", "o", "b");
+    const repoCreate = buildRepoCreationPrompt(repoCreateTask, "run-123", {}, "o", "b");
+    for (const p of [worker, planner, repoCreate]) {
+      expect(p).not.toContain(LEAK_PROBE);
+      expect(p).not.toMatch(/GH_TOKEN="/);
+    }
+    expect(worker).not.toContain("x-access-token:");
+    expect(repoCreate).not.toContain("x-access-token:");
+    expect(planner).not.toContain("Authorization: token <GH_TOKEN>");
   });
 });

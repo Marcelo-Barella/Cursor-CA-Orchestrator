@@ -21,7 +21,9 @@ export const PLANNER_SYSTEM_PROMPT =
   "Keep tasks focused and self-contained so that each worker agent can execute independently " +
   "without needing context from other tasks. When you emit delegation_map, use phases and parallel_groups " +
   "as sequential waves (phase order, then group order within each phase), assign every task ID exactly once, " +
-  "align depends_on with that ordering, and do not treat same-repo conflicting work as parallel-safe.\n\n" +
+  "align depends_on with that ordering, and do not treat same-repo conflicting work as parallel-safe. " +
+  "Under consolidated PR mode, tasks that share a canonical repository must sit in different parallel groups, not the same group. " +
+  "When several tasks in one group are ready together, do not assume a fixed launch order; encode order with depends_on if needed.\n\n" +
   "IMPORTANT: You are running against a read-only bootstrap repository. " +
   "Do NOT create, modify, or delete any files in this repository. " +
   "Your only output is the task plan written to the Gist.";

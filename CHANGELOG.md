@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.6 - 2026-04-09
+
+- **Planner prompts:** Clarify that dependency ordering against later phases or parallel groups is rejected by config validation before the orchestration loop; system prompt states consolidated same-repo tasks belong in different parallel groups; within-group launch order is not guaranteed (use `depends_on` for sequencing). Worker and planner prompts no longer pass or embed GitHub tokens; planner instructions use `gh` and preconfigured credentials.
+
 ## 0.5.5 - 2026-04-09
 
 - **Delegation extraction:** Scheduling uses task ids from `config.tasks` when building delegation phases so runtime extraction matches validated config. When `delegation_map.phases` is non-empty but produces no groups after filtering task ids, extraction returns null instead of falling through to the legacy path that merged parallel groups into one group per phase.

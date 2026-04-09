@@ -58,11 +58,11 @@ a file named \`task-plan.json\`.
 
 ### Delegation map
 
-If you include \`delegation_map\`, the orchestrator runs **ordered waves**: \`phases\` run in array order; within each phase, \`parallel_groups\` run in array order. The next group does not start until every task in the current group has a terminal status (finished, failed, or stopped). Tasks in the same group may run together when \`depends_on\` allows.
+If you include \`delegation_map\`, the orchestrator runs **ordered waves**: \`phases\` run in array order; within each phase, \`parallel_groups\` run in array order. The next group does not start until every task in the current group has a terminal status (finished, failed, or stopped). Tasks in the same group may run together when \`depends_on\` allows. When several tasks in the same group are ready at once, launch order among them is not guaranteed; use \`depends_on\` if you need a strict sequence.
 
 **Coverage:** list every task \`id\` from \`tasks\` **exactly once** in the map. A task ID left out of the map is not launched while any mapped wave is active; it only becomes eligible after **all** mapped phase/group waves complete, which is usually wrong for the plan.
 
-**Dependencies vs waves:** a task may depend only on tasks in the **same** parallel group or an **earlier** group in map order (an earlier group in the same phase, or any group in an earlier phase). The runtime rejects a dependency on a task in a later phase or a later parallel group in the same phase.
+**Dependencies vs waves:** a task may depend only on tasks in the **same** parallel group or an **earlier** group in map order (an earlier group in the same phase, or any group in an earlier phase). Config validation rejects before scheduling starts if a dependency points to a task in a later phase or a later parallel group in the same phase.
 
 **Conflicts:** do not put the same task ID in more than one group. For the same repository, if work would conflict, serialize with \`depends_on\` and separate phases or parallel groups (later groups wait for earlier groups). With consolidated PR mode, the runtime requires tasks that touch the same repo to sit in **different** parallel groups so agents push sequentially to one shared run branch per repo.
 
@@ -75,9 +75,8 @@ following conventions:
 "https://github.com/{owner}/{repo_name}", "ref": "main"}\` in the task JSON.
 
 2. Repo-creation tasks must use \`"repo": "__new__"\` (sentinel value). The prompt \
-should instruct the agent to: (1) create the GitHub repo via the GitHub REST API \
-(POST https://api.github.com/user/repos with \`Authorization: token <GH_TOKEN>\`), \
-(2) clone it using token-based HTTPS auth and initialize it with the requested stack, \
+should instruct the agent to: (1) create the GitHub repo with \`gh repo create\` or \`gh api\` (credentials are preconfigured; do not put tokens in prompts or URLs), \
+(2) clone it with \`gh repo clone <owner>/<repo>\` or \`git clone https://github.com/<owner>/<repo>.git\` and initialize it with the requested stack, \
 and (3) report the repo URL in outputs as \`{"repo_url": "https://github.com/..."}\`. \
 Cursor Agents have access to the \`gh\` CLI for GitHub operations.
 
@@ -102,10 +101,10 @@ Use an empty list if there are no dependencies.
 
 Write the JSON output as a file named \`task-plan.json\` to the run branch of the bootstrap repo.
 
-Use the \`gh\` CLI with the GitHub Contents API:
+Use the \`gh\` CLI with the GitHub Contents API (credentials are preconfigured; do not export \`GH_TOKEN\` in the shell):
 \`\`\`bash
 CONTENT=$(cat {plan_tmp_path} | base64 -w 0)
-GH_TOKEN="{gh_token}" gh api --method PUT /repos/{bootstrap_owner}/{bootstrap_repo}/contents/task-plan.json \\
+gh api --method PUT /repos/{bootstrap_owner}/{bootstrap_repo}/contents/task-plan.json \\
   --field message="write task-plan.json" \\
   --field content="$CONTENT" \\
   --field branch="run/{run_id}"
@@ -115,7 +114,6 @@ GH_TOKEN="{gh_token}" gh api --method PUT /repos/{bootstrap_owner}/{bootstrap_re
 export function buildPlannerPrompt(
   config: OrchestratorConfig,
   runId: string,
-  ghToken: string,
   bootstrapOwner: string,
   bootstrapRepo: string,
 ): string {
@@ -129,7 +127,6 @@ export function buildPlannerPrompt(
   const body = PLANNER_PROMPT_TEMPLATE.replace("{prompt}", config.prompt)
     .replace("{repo_list}", repoList)
     .replace("{run_id}", runId)
-    .replace("{gh_token}", ghToken)
     .replace("{plan_tmp_path}", planTmpPath)
     .replace("{bootstrap_owner}", bootstrapOwner)
     .replace("{bootstrap_repo}", bootstrapRepo);

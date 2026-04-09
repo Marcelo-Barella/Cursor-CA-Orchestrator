@@ -16,7 +16,6 @@ function buildWorkerPayloadPath(runId: string, taskId: string): string {
 export function buildWorkerPrompt(
   task: TaskConfig,
   runId: string,
-  ghToken: string,
   dependencyOutputs: Record<string, Record<string, unknown>>,
   bootstrapOwner = "",
   bootstrapRepo = "",
@@ -27,7 +26,7 @@ export function buildWorkerPrompt(
     sectionTask(task),
     sectionDependencies(task, dependencyOutputs),
     opts?.runBranch ? sectionGitRunLine(opts.runBranch, opts.launchRef, opts.perTaskBranch) : "",
-    sectionOutputProtocol(task, runId, ghToken, bootstrapOwner, bootstrapRepo),
+    sectionOutputProtocol(task, runId, bootstrapOwner, bootstrapRepo),
     sectionRules(opts?.runBranch),
   ];
   return sections.filter(Boolean).join("\n\n");
@@ -36,7 +35,6 @@ export function buildWorkerPrompt(
 export function buildRepoCreationPrompt(
   task: TaskConfig,
   runId: string,
-  ghToken: string,
   dependencyOutputs: Record<string, Record<string, unknown>>,
   bootstrapOwner = "",
   bootstrapRepo = "",
@@ -46,7 +44,7 @@ export function buildRepoCreationPrompt(
     sectionTask(task),
     sectionRepoCreation(task),
     sectionDependencies(task, dependencyOutputs),
-    sectionOutputProtocol(task, runId, ghToken, bootstrapOwner, bootstrapRepo),
+    sectionOutputProtocol(task, runId, bootstrapOwner, bootstrapRepo),
     sectionRules(),
   ];
   return sections.filter(Boolean).join("\n\n");
@@ -66,7 +64,7 @@ function sectionRepoCreation(task: TaskConfig): string {
     "CRITICAL: You are running in a read-only bootstrap repository. Do NOT write any code ",
     "or files into this repository. To create the new repo and populate it with code:\n",
     "  1. Create the repo: `gh repo create <owner>/<repo> --private` (or use --public/--description as needed)\n",
-    "  2. Clone it: `git clone https://x-access-token:<GH_TOKEN>@github.com/<owner>/<repo>.git /tmp/<repo>`\n",
+    "  2. Clone it: `gh repo clone <owner>/<repo> /tmp/<repo>` (or `git clone https://github.com/<owner>/<repo>.git /tmp/<repo>`; GitHub auth is preconfigured in this environment)\n",
     "  3. Write code in the cloned directory, commit, and push.\n",
     "All code MUST go to the new repo, not to the current working directory.",
   );
@@ -124,7 +122,6 @@ function sectionDependencies(task: TaskConfig, dependencyOutputs: Record<string,
 function sectionOutputProtocol(
   task: TaskConfig,
   runId: string,
-  ghToken: string,
   bootstrapOwner: string,
   bootstrapRepo: string,
 ): string {
@@ -132,6 +129,7 @@ function sectionOutputProtocol(
   return `WHEN YOU ARE DONE:
 Run the following commands in the shell to report your results.
 Replace the placeholder values with your actual output.
+The \`gh\` CLI uses GitHub credentials already configured for this agent; do not paste or export tokens in the shell.
 
 \`\`\`bash
 node <<'NJS'
@@ -150,7 +148,7 @@ fs.writeFileSync(
 );
 NJS
 
-GH_TOKEN="${ghToken}" gh api --method PUT \\
+gh api --method PUT \\
   /repos/${bootstrapOwner}/${bootstrapRepo}/contents/agent-${task.id}.json \\
   --input ${payloadPath}
 \`\`\`
