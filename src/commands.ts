@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { copyToClipboard } from "./lib/clipboard.js";
+import { countOrchestrationPromptTokens } from "./lib/prompt-token-count.js";
 import type { Session } from "./session.js";
 import { tui } from "./tui/style.js";
 
@@ -136,13 +137,18 @@ export function cmdRepos(session: Session): string {
   return lines.join("\n");
 }
 
+function formatPromptSetAck(text: string): string {
+  const tokens = countOrchestrationPromptTokens(text);
+  return `${tui.green("Prompt set")} ${tui.dim(`(${text.length} characters, ${tokens} tokens)`)}`;
+}
+
 export function cmdPromptSet(session: Session, text: string): string {
   const error = validatePromptValue(text);
   if (error) {
     return tui.red(error);
   }
   session.setPrompt(text);
-  return `${tui.green("Prompt set")} ${tui.dim(`(${text.length} characters)`)}`;
+  return formatPromptSetAck(text);
 }
 
 export function cmdPrompt(session: Session): string {
@@ -153,6 +159,15 @@ export function cmdPrompt(session: Session): string {
     copied ? tui.green("Copied to clipboard.") : tui.yellow("Could not copy to clipboard."),
   );
   return lines.join("\n");
+}
+
+export function cmdTokens(session: Session): string {
+  const text = session.config.prompt;
+  if (!text.trim()) {
+    return `${tui.dim("Prompt not set.")} ${tui.dim("(0 tokens)")}`;
+  }
+  const tokens = countOrchestrationPromptTokens(text);
+  return `${tui.bold("Tokens (GPT-4o estimate):")} ${tokens} ${tui.dim(`(${text.length} characters)`)}`;
 }
 
 export function cmdBranchPrefix(session: Session, prefix: string): string {
@@ -291,6 +306,12 @@ export const COMMANDS: Record<string, CommandInfo> = {
     handler: cmdPrompt as (...args: unknown[]) => unknown,
     usage: "/prompt",
     description: "Print the full configured prompt and copy it to the clipboard.",
+  },
+  tokens: {
+    name: "tokens",
+    handler: cmdTokens as (...args: unknown[]) => unknown,
+    usage: "/tokens",
+    description: "Show token count for the orchestration prompt (GPT-4o tokenizer estimate).",
   },
   "branch-prefix": {
     name: "branch-prefix",

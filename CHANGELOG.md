@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.7 - 2026-04-09
+
+- **REPL:** `/tokens` prints a GPT-4o tokenizer estimate for the configured orchestration prompt; `/prompt set` acknowledgment includes token count.
+
 ## 0.5.6 - 2026-04-09
 
 - **Planner prompts:** Clarify that dependency ordering against later phases or parallel groups is rejected by config validation before the orchestration loop; system prompt states consolidated same-repo tasks belong in different parallel groups; within-group launch order is not guaranteed (use `depends_on` for sequencing). Worker and planner prompts no longer pass or embed GitHub tokens; planner instructions use `gh` and preconfigured credentials.
