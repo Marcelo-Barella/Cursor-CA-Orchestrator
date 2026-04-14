@@ -164,4 +164,48 @@ describe("planner", () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.repo).toBe("https://github.com/o/bergamota.git");
   });
+
+  it("wires __new__ downstream task to create-frontend-repo when id hints UI and two create_repo tasks exist", () => {
+    const config: OrchestratorConfig = {
+      name: "n",
+      model: "m",
+      prompt: "",
+      repositories: {},
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
+      bootstrap_repo_name: "b",
+    };
+    const json = JSON.stringify({
+      tasks: [
+        {
+          id: "create-backend-repo",
+          repo: "__new__",
+          prompt: "create backend",
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: true,
+          repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+        },
+        {
+          id: "create-frontend-repo",
+          repo: "__new__",
+          prompt: "create frontend",
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: true,
+          repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+        },
+        {
+          id: "ui-financial-core-and-dashboards",
+          repo: "__new__",
+          prompt: "build dashboards",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const tasks = parseTaskPlan(json, config);
+    const ui = tasks.find((t) => t.id === "ui-financial-core-and-dashboards");
+    expect(ui?.depends_on).toContain("create-frontend-repo");
+  });
 });
