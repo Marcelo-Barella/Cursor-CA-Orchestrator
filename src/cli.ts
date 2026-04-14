@@ -3,6 +3,7 @@ import { execute } from "@oclif/core";
 import { canonicalizeOrchestratorConfig, toYaml } from "./config/index.js";
 import { loadEnvFile } from "./env.js";
 import { requireEnv, runOrchestrationCli } from "./lib/commands/run-impl.js";
+import { ensureEnvVarsFilled, getRequiredEnvKeysForCliArgs } from "./lib/env-wizard.js";
 import { runRepl } from "./repl.js";
 
 export async function runInteractive(): Promise<void> {
@@ -31,8 +32,18 @@ async function main(): Promise<void> {
   loadEnvFile();
   const args = process.argv.slice(2);
   if (args.length === 0) {
+    await ensureEnvVarsFilled([
+      "CURSOR_API_KEY",
+      "GH_TOKEN",
+      "BOOTSTRAP_OWNER",
+      "BOOTSTRAP_REPO",
+    ]);
     await runInteractive();
     return;
+  }
+  const required = getRequiredEnvKeysForCliArgs(args);
+  if (required) {
+    await ensureEnvVarsFilled(required);
   }
   await execute({ args, dir: import.meta.url });
 }
