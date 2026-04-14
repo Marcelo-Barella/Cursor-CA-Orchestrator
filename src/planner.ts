@@ -64,7 +64,9 @@ If you include \`delegation_map\`, the orchestrator runs **ordered waves**: \`ph
 
 **Dependencies vs waves:** a task may depend only on tasks in the **same** parallel group or an **earlier** group in map order (an earlier group in the same phase, or any group in an earlier phase). Config validation rejects before scheduling starts if a dependency points to a task in a later phase or a later parallel group in the same phase.
 
-**Conflicts:** do not put the same task ID in more than one group. For the same repository, if work would conflict, serialize with \`depends_on\` and separate phases or parallel groups (later groups wait for earlier groups). With consolidated PR mode, the runtime requires tasks that touch the same repo to sit in **different** parallel groups so agents push sequentially to one shared run branch per repo.
+**Parallelism defaults:** maximize concurrent workers. Tasks on **different** repositories that are independent (no shared-artifact need, no required step order) should default to the **same** \`parallel_group\` in the **earliest** wave where their existing \`depends_on\` allow — one wave should often hold all cross-repo work for that layer. Add extra \`parallel_groups\` or \`phases\` only when you need later waves for **same-repo serialization** under consolidated PR (multiple tasks on one canonical repo must sit in **different** groups so pushes use one run branch in order), for **real ordering** correctness requires, or for **shared artifacts** (a task must consume another task output, URL, schema, or contract — use \`depends_on\` and keep map order consistent). Do not add \`depends_on\` or extra groups solely to serialize unrelated cross-repo work.
+
+**Conflicts:** do not put the same task ID in more than one group. For the same canonical repository under consolidated PR mode, the runtime requires each task touching that repo to sit in a **different** \`parallel_group\` so agents push sequentially to one shared run branch; use \`depends_on\` when semantic order matters within or across those waves. For other same-repo conflicts, also separate groups and use \`depends_on\` as needed; keep unrelated different-repo tasks together in one group when \`depends_on\` allows.
 
 ## Dynamic Repository Creation
 
@@ -95,7 +97,7 @@ Use an empty list if there are no dependencies.
 - \`timeout_minutes\` is the estimated maximum time for the task (default 30).
 - Do NOT create circular dependencies.
 - Maximum 20 tasks.
-- Use \`delegation_map.phases[].parallel_groups[].tasks\` for launch waves; only co-locate task IDs in one group when they are safe to run in parallel under \`depends_on\`.
+- Use \`delegation_map.phases[].parallel_groups[].tasks\` for launch waves; default independent different-repo tasks into the **same** group when \`depends_on\` allows; reserve extra groups or dependencies for same-repo serialization, ordering, or shared outputs.
 
 ### Output Write Instructions
 
