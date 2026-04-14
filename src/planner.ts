@@ -189,28 +189,46 @@ function matchCreateRepoByName(taskId: string, createRepoTaskIds: Set<string>): 
   return null;
 }
 
+function isWebRepoCreatorId(id: string): boolean {
+  const lower = id.toLowerCase();
+  if (lower.includes("frontend")) return true;
+  if (/-web$/.test(lower)) return true;
+  return /(^|-)(web|www|client|spa|nextjs|nuxt)(-|$)/.test(lower);
+}
+
+function isApiRepoCreatorId(id: string): boolean {
+  const lower = id.toLowerCase();
+  if (lower.includes("backend")) return true;
+  if (/-api$/.test(lower)) return true;
+  if (lower.includes("metrics-api")) return true;
+  return /(^|-)(api|server|bff|graphql|grpc|svc)(-|$)/.test(lower);
+}
+
 function matchCreateRepoByRoleHint(taskId: string, createRepoTaskIds: Set<string>): string | null {
   const t = taskId.toLowerCase();
   const ids = [...createRepoTaskIds];
-  const frontendCreates = ids.filter((id) => id.toLowerCase().includes("frontend"));
-  const backendCreates = ids.filter((id) => id.toLowerCase().includes("backend"));
-  if (frontendCreates.length !== 1 && backendCreates.length !== 1) {
-    return null;
-  }
-  const frontendish =
-    t.startsWith("ui-") || t.includes("dashboard") || t.includes("frontend") || t.includes("nextjs") || t.includes("react-");
+  const webCreators = ids.filter(isWebRepoCreatorId);
+  const apiCreators = ids.filter(isApiRepoCreatorId);
+  const webish =
+    t.startsWith("web-") ||
+    t.startsWith("ui-") ||
+    t.includes("dashboard") ||
+    t.includes("frontend") ||
+    t.includes("nextjs") ||
+    t.includes("react-");
   const backendish =
     t.includes("backend") ||
     t.startsWith("api-") ||
+    /(^|-)api(-|$)/.test(t) ||
     t.includes("database") ||
     t.includes("graphql") ||
     t.startsWith("db-") ||
     t.includes("-service-");
-  if (frontendish && !backendish && frontendCreates.length === 1) {
-    return frontendCreates[0]!;
+  if (webish && !backendish && webCreators.length === 1) {
+    return webCreators[0]!;
   }
-  if (backendish && !frontendish && backendCreates.length === 1) {
-    return backendCreates[0]!;
+  if (backendish && !webish && apiCreators.length === 1) {
+    return apiCreators[0]!;
   }
   return null;
 }
