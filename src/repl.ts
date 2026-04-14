@@ -392,7 +392,11 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
   }
   console.log(tui.dim("Plain text at > sets the orchestration prompt; lines starting with / are commands. Type /help for the list."));
   console.log(tui.dim("Next: complete guided setup (or set the prompt at > or via /prompt-set), then run /run."));
-  console.log(tui.dim("Before /run, ensure CURSOR_API_KEY and GH_TOKEN are set (copy .env.example to .env)."));
+  console.log(
+    tui.dim(
+      "If any required env vars are still missing, the CLI prompts and saves them to .env (TTY only) before this REPL starts.",
+    ),
+  );
 
   const resumed = session.loadSession();
   if (resumed) {
