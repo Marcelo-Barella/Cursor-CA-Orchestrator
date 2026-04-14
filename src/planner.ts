@@ -189,6 +189,32 @@ function matchCreateRepoByName(taskId: string, createRepoTaskIds: Set<string>): 
   return null;
 }
 
+function matchCreateRepoByRoleHint(taskId: string, createRepoTaskIds: Set<string>): string | null {
+  const t = taskId.toLowerCase();
+  const ids = [...createRepoTaskIds];
+  const frontendCreates = ids.filter((id) => id.toLowerCase().includes("frontend"));
+  const backendCreates = ids.filter((id) => id.toLowerCase().includes("backend"));
+  if (frontendCreates.length !== 1 && backendCreates.length !== 1) {
+    return null;
+  }
+  const frontendish =
+    t.startsWith("ui-") || t.includes("dashboard") || t.includes("frontend") || t.includes("nextjs") || t.includes("react-");
+  const backendish =
+    t.includes("backend") ||
+    t.startsWith("api-") ||
+    t.includes("database") ||
+    t.includes("graphql") ||
+    t.startsWith("db-") ||
+    t.includes("-service-");
+  if (frontendish && !backendish && frontendCreates.length === 1) {
+    return frontendCreates[0]!;
+  }
+  if (backendish && !frontendish && backendCreates.length === 1) {
+    return backendCreates[0]!;
+  }
+  return null;
+}
+
 function collectUpstreamCreateRepoIds(
   task: TaskConfig,
   taskById: Record<string, TaskConfig>,
@@ -423,6 +449,11 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
       const matched = matchCreateRepoByName(task.id, createRepoTaskIds);
       if (matched) {
         task.depends_on.push(matched);
+        continue;
+      }
+      const roleMatched = matchCreateRepoByRoleHint(task.id, createRepoTaskIds);
+      if (roleMatched) {
+        task.depends_on.push(roleMatched);
         continue;
       }
       throw new Error(
