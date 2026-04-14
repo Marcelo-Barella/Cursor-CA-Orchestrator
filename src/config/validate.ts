@@ -127,7 +127,7 @@ function validateRepositoryResolvableUrls(repositories: Record<string, { url: st
 export function validateRepoRefs(tasks: TaskConfig[], repositories: Record<string, { url: string; ref: string }>): void {
   const repoTokenIndex = buildRepoTokenIndex(repositories);
   for (const task of tasks) {
-    if (task.create_repo) continue;
+    if (task.create_repo || task.repo === "__new__") continue;
     if (task.repo in repositories) continue;
     const matches = repoTokenIndex.get(normalizeRepoToken(task.repo));
     if (!matches || matches.size !== 1) {

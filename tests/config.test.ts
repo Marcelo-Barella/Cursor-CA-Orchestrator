@@ -67,6 +67,33 @@ describe("config", () => {
     validateRepoRefs(tasks, repos);
   });
 
+  it("validate repo refs skips __new__ without create_repo (downstream new-repo tasks)", () => {
+    const repos = { backend: { url: "https://github.com/o/backend", ref: "main" } };
+    const tasks: TaskConfig[] = [
+      {
+        id: "create-db",
+        repo: "__new__",
+        prompt: "create repo",
+        model: null,
+        depends_on: [],
+        timeout_minutes: 30,
+        create_repo: true,
+        repo_config: null,
+      },
+      {
+        id: "database-schema-multitenancy",
+        repo: "__new__",
+        prompt: "schema",
+        model: null,
+        depends_on: ["create-db"],
+        timeout_minutes: 30,
+        create_repo: false,
+        repo_config: null,
+      },
+    ];
+    validateRepoRefs(tasks, repos);
+  });
+
   it("validate repo refs accepts repo name that matches URL-keyed repository", () => {
     const repos = { "https://github.com/o/bergamota.git": { url: "https://github.com/o/bergamota.git", ref: "main" } };
     const tasks: TaskConfig[] = [
