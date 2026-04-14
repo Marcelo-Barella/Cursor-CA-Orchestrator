@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-04-14
+
+- **CLI:** On a TTY, missing required environment variables are prompted once, written to `.env` in the working directory, and exported for the process; non-TTY runs exit with a clear list. Interactive mode and `run`, `status`, `stop`, `logs`, and `cleanup` declare which keys are required before oclif runs.
+- **Planner:** Downstream `__new__` tasks without `depends_on` can be linked to the correct `create_repo` task when task ids suggest frontend vs backend and names disambiguate the two creators.
+- **Validation:** `validateRepoRefs` skips non-`create_repo` tasks whose `repo` is `__new__` (already tied to a creator via dependencies).
+- **Constraints:** Constraint lines are matched with the regex capture span; task prompts are checked against the normalized constraint key derived from that phrase (not a truncated line prefix).
+
 ## 0.5.8 - 2026-04-09
 
 - **Tests:** Expanded coverage for parallel-group concurrency, failed upstream as terminal for wave advance, post-map defensive eligibility, corrupted delegation cursors, `parseTaskPlan` + `validateConfig` on incomplete delegation map, and `validateConfig` early return when `prompt` is set and `tasks` is empty.
