@@ -208,4 +208,48 @@ describe("planner", () => {
     const ui = tasks.find((t) => t.id === "ui-financial-core-and-dashboards");
     expect(ui?.depends_on).toContain("create-frontend-repo");
   });
+
+  it("wires __new__ web dashboard task to create repo whose id ends with -web when paired with -api repo", () => {
+    const config: OrchestratorConfig = {
+      name: "n",
+      model: "m",
+      prompt: "",
+      repositories: {},
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
+      bootstrap_repo_name: "b",
+    };
+    const json = JSON.stringify({
+      tasks: [
+        {
+          id: "create-repo-tideglass-metrics-api",
+          repo: "__new__",
+          prompt: "create api",
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: true,
+          repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+        },
+        {
+          id: "create-repo-tideglass-web",
+          repo: "__new__",
+          prompt: "create web",
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: true,
+          repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+        },
+        {
+          id: "web-dashboard-tidal-lenses-and-ops-surface",
+          repo: "__new__",
+          prompt: "build",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const tasks = parseTaskPlan(json, config);
+    const dash = tasks.find((t) => t.id === "web-dashboard-tidal-lenses-and-ops-surface");
+    expect(dash?.depends_on).toContain("create-repo-tideglass-web");
+  });
 });
