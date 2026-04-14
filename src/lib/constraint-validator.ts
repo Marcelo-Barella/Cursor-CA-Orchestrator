@@ -23,8 +23,9 @@ export function extractConstraintsFromPrompt(prompt: string): ExtractedConstrain
     const trimmed = line.trim();
     if (!trimmed) continue;
     for (const pattern of CONSTRAINT_PATTERNS) {
-      if (pattern.test(trimmed)) {
-        constraints.push({ phrase: pattern.source, line: trimmed });
+      const match = trimmed.match(pattern);
+      if (match) {
+        constraints.push({ phrase: match[0], line: trimmed });
         break;
       }
     }
@@ -63,12 +64,11 @@ export function validateTaskPromptsAgainstConstraints(
   for (const task of tasks) {
     const normalized = normalizePrompt(task.prompt);
     for (const constraint of constraints) {
-      const key = constraintKeyFromPhrase(constraint.phrase);
-      const keyNormalized = normalizePrompt(key);
-      if (!normalized.includes(keyNormalized) && !normalized.includes(constraint.line.toLowerCase().slice(0, 80))) {
+      const keyNormalized = normalizePrompt(constraintKeyFromPhrase(constraint.phrase));
+      if (!normalized.includes(keyNormalized)) {
         violations.push({
           taskId: task.id,
-          missingConstraint: constraint.line.slice(0, 200),
+          missingConstraint: constraint.phrase,
           taskPrompt: task.prompt.slice(0, 100),
         });
       }

@@ -52,6 +52,21 @@ describe("constraint-validator", () => {
       expect(result.violations.some((v) => v.taskId === "about-route")).toBe(true);
     });
 
+    it("validates against the matched constraint span, not the first 80 chars of a long line", () => {
+      const objective =
+        "Task: Build a two-repo product (backend and frontend). All tasks must share the OpenAPI contract.";
+      const constraints = extractConstraintsFromPrompt(objective);
+      expect(constraints.some((c) => c.phrase.toLowerCase().startsWith("all"))).toBe(true);
+      const tasks = [
+        { id: "a", prompt: "Create backend. All tasks must share the OpenAPI contract." },
+        { id: "b", prompt: "Create frontend only." },
+      ];
+      const result = validateTaskPromptsAgainstConstraints(tasks, constraints);
+      expect(result.valid).toBe(false);
+      expect(result.violations.some((v) => v.taskId === "b")).toBe(true);
+      expect(result.violations.some((v) => v.taskId === "a")).toBe(false);
+    });
+
     it("passes when there are no constraints", () => {
       const tasks = [{ id: "task-1", prompt: "Just do something." }];
       const result = validateTaskPromptsAgainstConstraints(tasks, []);
