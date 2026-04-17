@@ -165,7 +165,7 @@ describe("planner", () => {
     expect(tasks[0]!.repo).toBe("https://github.com/o/bergamota.git");
   });
 
-  it("wires __new__ downstream task to create-frontend-repo when id hints UI and two create_repo tasks exist", () => {
+  it("resolves repo to create_repo task id and injects depends_on when two create_repo tasks exist", () => {
     const config: OrchestratorConfig = {
       name: "n",
       model: "m",
@@ -197,7 +197,7 @@ describe("planner", () => {
         },
         {
           id: "ui-financial-core-and-dashboards",
-          repo: "__new__",
+          repo: "create-frontend-repo",
           prompt: "build dashboards",
           depends_on: [],
           timeout_minutes: 30,
@@ -206,10 +206,11 @@ describe("planner", () => {
     });
     const tasks = parseTaskPlan(json, config);
     const ui = tasks.find((t) => t.id === "ui-financial-core-and-dashboards");
+    expect(ui?.repo).toBe("__new__");
     expect(ui?.depends_on).toContain("create-frontend-repo");
   });
 
-  it("wires __new__ web dashboard task to create repo whose id ends with -web when paired with -api repo", () => {
+  it("resolves tideglass-style plan when repo is the create_repo task id", () => {
     const config: OrchestratorConfig = {
       name: "n",
       model: "m",
@@ -240,8 +241,8 @@ describe("planner", () => {
           repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
         },
         {
-          id: "web-dashboard-tidal-lenses-and-ops-surface",
-          repo: "__new__",
+          id: "tideglass-web-generated-client-only-integration",
+          repo: "create-repo-tideglass-web",
           prompt: "build",
           depends_on: [],
           timeout_minutes: 30,
@@ -249,7 +250,50 @@ describe("planner", () => {
       ],
     });
     const tasks = parseTaskPlan(json, config);
-    const dash = tasks.find((t) => t.id === "web-dashboard-tidal-lenses-and-ops-surface");
+    const dash = tasks.find((t) => t.id === "tideglass-web-generated-client-only-integration");
+    expect(dash?.repo).toBe("__new__");
     expect(dash?.depends_on).toContain("create-repo-tideglass-web");
+  });
+
+  it("rejects __new__ downstream task when multiple create_repo tasks exist and repo is not disambiguated", () => {
+    const config: OrchestratorConfig = {
+      name: "n",
+      model: "m",
+      prompt: "",
+      repositories: {},
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
+      bootstrap_repo_name: "b",
+    };
+    const json = JSON.stringify({
+      tasks: [
+        {
+          id: "create-a",
+          repo: "__new__",
+          prompt: "a",
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: true,
+          repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+        },
+        {
+          id: "create-b",
+          repo: "__new__",
+          prompt: "b",
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: true,
+          repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+        },
+        {
+          id: "orphan-impl",
+          repo: "__new__",
+          prompt: "work",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    expect(() => parseTaskPlan(json, config)).toThrow(/Set "repo" to the id of the create_repo task/);
   });
 });
