@@ -45,7 +45,7 @@ a file named \`task-plan.json\`.
   "tasks": [
     {
       "id": "<unique-kebab-case-id>",
-      "repo": "<repository-alias-from-list-above-or-__new__>",
+      "repo": "<repository-alias-from-list-above-or-__new__-or-create_repo-task-id>",
       "prompt": "<detailed-instructions-for-the-agent-working-on-this-task>",
       "depends_on": ["<task-id>", ...],
       "timeout_minutes": <integer>,
@@ -82,9 +82,11 @@ should instruct the agent to: (1) create the GitHub repo with \`gh repo create\`
 and (3) report the repo URL in outputs as \`{"repo_url": "https://github.com/..."}\`. \
 Cursor Agents have access to the \`gh\` CLI for GitHub operations.
 
-3. Implementation tasks that depend on a newly created repo should declare \
-\`depends_on\` referencing the creation task and use \`"repo": "__new__"\`. The \
-orchestrator will resolve the actual repo URL from upstream task outputs.
+3. Implementation tasks for a newly created repo must identify **which** new repo: set \
+\`"repo"\` to the **task id** of the corresponding \`create_repo\` task (same string as that task's \`id\`), \
+or use \`"repo": "__new__"\` together with \`depends_on\` listing that creation task. \
+Do not rely on naming patterns; the creation task \`id\` is the stable handle. The \
+orchestrator resolves the actual repo URL from upstream task outputs.
 
 ### Rules
 
@@ -149,90 +151,6 @@ function extractJson(raw: string): string {
     return raw.slice(start, end + 1);
   }
   return raw;
-}
-
-const CREATE_PREFIXES = ["create-", "setup-", "init-", "new-", "bootstrap-"];
-const CREATE_SUFFIXES = ["-scaffold", "-repo", "-setup", "-init", "-bootstrap", "-create", "-new"];
-
-function stripCreatePrefix(name: string): string {
-  for (const p of CREATE_PREFIXES) {
-    if (name.startsWith(p)) {
-      return name.slice(p.length);
-    }
-  }
-  return name;
-}
-
-function stripCreateSuffix(name: string): string {
-  for (const s of CREATE_SUFFIXES) {
-    if (name.endsWith(s)) {
-      return name.slice(0, -s.length);
-    }
-  }
-  return name;
-}
-
-function matchCreateRepoByName(taskId: string, createRepoTaskIds: Set<string>): string | null {
-  const taskBase = stripCreatePrefix(taskId);
-  const candidates: string[] = [];
-  for (const cid of createRepoTaskIds) {
-    const createBase = stripCreateSuffix(stripCreatePrefix(cid));
-    if (createBase === taskBase) {
-      candidates.push(cid);
-      continue;
-    }
-    if (taskBase.startsWith(`${createBase}-`) || createBase.startsWith(`${taskBase}-`)) {
-      candidates.push(cid);
-    }
-  }
-  if (candidates.length === 1) {
-    return candidates[0]!;
-  }
-  return null;
-}
-
-function isWebRepoCreatorId(id: string): boolean {
-  const lower = id.toLowerCase();
-  if (lower.includes("frontend")) return true;
-  if (/-web$/.test(lower)) return true;
-  return /(^|-)(web|www|client|spa|nextjs|nuxt)(-|$)/.test(lower);
-}
-
-function isApiRepoCreatorId(id: string): boolean {
-  const lower = id.toLowerCase();
-  if (lower.includes("backend")) return true;
-  if (/-api$/.test(lower)) return true;
-  if (lower.includes("metrics-api")) return true;
-  return /(^|-)(api|server|bff|graphql|grpc|svc)(-|$)/.test(lower);
-}
-
-function matchCreateRepoByRoleHint(taskId: string, createRepoTaskIds: Set<string>): string | null {
-  const t = taskId.toLowerCase();
-  const ids = [...createRepoTaskIds];
-  const webCreators = ids.filter(isWebRepoCreatorId);
-  const apiCreators = ids.filter(isApiRepoCreatorId);
-  const webish =
-    t.startsWith("web-") ||
-    t.startsWith("ui-") ||
-    t.includes("dashboard") ||
-    t.includes("frontend") ||
-    t.includes("nextjs") ||
-    t.includes("react-");
-  const backendish =
-    t.includes("backend") ||
-    t.startsWith("api-") ||
-    /(^|-)api(-|$)/.test(t) ||
-    t.includes("database") ||
-    t.includes("graphql") ||
-    t.startsWith("db-") ||
-    t.includes("-service-");
-  if (webish && !backendish && webCreators.length === 1) {
-    return webCreators[0]!;
-  }
-  if (backendish && !webish && apiCreators.length === 1) {
-    return apiCreators[0]!;
-  }
-  return null;
 }
 
 function collectUpstreamCreateRepoIds(
@@ -394,6 +312,14 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
   const taskIds = new Set<string>();
   const tasks: TaskConfig[] = [];
   const repoTokenIndex = buildRepoTokenIndex(config.repositories);
+  const createRepoTaskIdsFromPlan = new Set<string>();
+  for (const entry of rawTasks) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const o = entry as Record<string, unknown>;
+    if (Boolean(o.create_repo) && String(o.repo) === "__new__") {
+      createRepoTaskIdsFromPlan.add(String(o.id));
+    }
+  }
   for (const entry of rawTasks) {
     if (typeof entry !== "object" || entry === null) {
       throw new Error(`Each task must be a JSON object, got ${typeof entry}`);
@@ -411,19 +337,35 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
     taskIds.add(taskId);
     const requestedRepoAlias = String(o.repo);
     const isCreateRepo = Boolean(o.create_repo);
-    const resolvedRepoAlias =
-      requestedRepoAlias === "__new__" || isCreateRepo
-        ? requestedRepoAlias
-        : resolveRepoAlias(requestedRepoAlias, config.repositories, repoTokenIndex);
-    if (requestedRepoAlias !== "__new__" && !isCreateRepo && !resolvedRepoAlias) {
-      throw new Error(
-        `Task '${taskId}' references unknown repository '${requestedRepoAlias}'. Valid repository URLs: ${Object.keys(config.repositories)
-          .filter((k) => k !== "__bootstrap__")
-          .sort()
-          .join(", ")}`,
-      );
+    let resolvedRepoAlias: string | undefined;
+    let implicitCreateDep: string | null = null;
+    if (isCreateRepo) {
+      if (requestedRepoAlias !== "__new__") {
+        throw new Error(`Task '${taskId}' with create_repo must use "repo": "__new__"`);
+      }
+      resolvedRepoAlias = requestedRepoAlias;
+    } else if (requestedRepoAlias === "__new__") {
+      resolvedRepoAlias = "__new__";
+    } else {
+      const resolved = resolveRepoAlias(requestedRepoAlias, config.repositories, repoTokenIndex);
+      if (resolved) {
+        resolvedRepoAlias = resolved;
+      } else if (createRepoTaskIdsFromPlan.has(requestedRepoAlias)) {
+        resolvedRepoAlias = "__new__";
+        implicitCreateDep = requestedRepoAlias;
+      } else {
+        throw new Error(
+          `Task '${taskId}' references unknown repository '${requestedRepoAlias}'. Valid repository URLs: ${Object.keys(config.repositories)
+            .filter((k) => k !== "__bootstrap__")
+            .sort()
+            .join(", ")}`,
+        );
+      }
     }
-    const dependsOn = Array.isArray(o.depends_on) ? (o.depends_on as string[]) : [];
+    const dependsOn = Array.isArray(o.depends_on) ? [...(o.depends_on as string[])] : [];
+    if (implicitCreateDep && !dependsOn.includes(implicitCreateDep)) {
+      dependsOn.push(implicitCreateDep);
+    }
     const timeout = typeof o.timeout_minutes === "number" ? o.timeout_minutes : 30;
     if (!Number.isInteger(timeout) || timeout <= 0) {
       throw new Error(`Task '${taskId}': 'timeout_minutes' must be a positive integer`);
@@ -466,18 +408,8 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
           `Task '${task.id}' uses '__new__' but no create_repo task exists in the plan. The planner must include a task with 'create_repo: true' for new repositories.`,
         );
       }
-      const matched = matchCreateRepoByName(task.id, createRepoTaskIds);
-      if (matched) {
-        task.depends_on.push(matched);
-        continue;
-      }
-      const roleMatched = matchCreateRepoByRoleHint(task.id, createRepoTaskIds);
-      if (roleMatched) {
-        task.depends_on.push(roleMatched);
-        continue;
-      }
       throw new Error(
-        `Task '${task.id}' uses '__new__' but could not be matched to any of the ${createRepoTaskIds.size} create_repo tasks: ${[...createRepoTaskIds].sort().join(", ")}. Add an explicit 'depends_on' referencing the correct create_repo task.`,
+        `Task '${task.id}' uses '__new__' but could not be matched to any of the ${createRepoTaskIds.size} create_repo tasks: ${[...createRepoTaskIds].sort().join(", ")}. Set "repo" to the id of the create_repo task for that repository, or add an explicit 'depends_on' referencing the correct create_repo task.`,
       );
     }
   }
