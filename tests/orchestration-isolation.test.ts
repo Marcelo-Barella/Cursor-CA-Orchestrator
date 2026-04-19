@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRepoCreationPrompt, buildWorkerPrompt } from "../src/prompt-builder.js";
+import { WORKER_OUTPUT_ARTIFACT_PATH, buildRepoCreationPrompt, buildWorkerPrompt } from "../src/prompt-builder.js";
 import { buildPlannerPrompt } from "../src/planner.js";
 import { computeBranchName } from "../src/orchestrator.js";
 import type { OrchestratorConfig, TaskConfig } from "../src/config/types.js";
@@ -53,21 +53,15 @@ describe("orchestration isolation", () => {
     );
   });
 
-  it("writes worker payloads to a run-scoped temp path", () => {
-    const prompt = buildWorkerPrompt(
-      workerTask,
-      "run-123",
-      {},
-      "bootstrap-owner",
-      "bootstrap-repo",
-    );
-
-    expect(prompt).toContain("/tmp/cursor-orch-run-123-sync-backend-payload.json");
-    expect(prompt).toContain('branch: "run/run-123"');
+  it("instructs workers to write the artifact file at the workspace root", () => {
+    const prompt = buildWorkerPrompt(workerTask, "run-123", {});
+    expect(prompt).toContain(WORKER_OUTPUT_ARTIFACT_PATH);
+    expect(prompt).toContain("workspace root");
+    expect(prompt).toContain("fenced ```json");
   });
 
   it("injects git run-line section when opts.runBranch is set", () => {
-    const prompt = buildWorkerPrompt(workerTask, "run-123", {}, "o", "b", {
+    const prompt = buildWorkerPrompt(workerTask, "run-123", {}, {
       runBranch: "cursor-orch/run-123/main/run",
       launchRef: "main",
       perTaskBranch: "cursor-orch/run-123/sync-backend",
@@ -90,9 +84,9 @@ describe("orchestration isolation", () => {
   });
 
   it("does not embed probe secrets or token-in-prompt patterns in agent prompts", () => {
-    const worker = buildWorkerPrompt(workerTask, "run-123", {}, "o", "b");
+    const worker = buildWorkerPrompt(workerTask, "run-123", {});
     const planner = buildPlannerPrompt(plannerConfig, "run-123", "o", "b");
-    const repoCreate = buildRepoCreationPrompt(repoCreateTask, "run-123", {}, "o", "b");
+    const repoCreate = buildRepoCreationPrompt(repoCreateTask, "run-123", {});
     for (const p of [worker, planner, repoCreate]) {
       expect(p).not.toContain(LEAK_PROBE);
       expect(p).not.toMatch(/GH_TOKEN="/);
