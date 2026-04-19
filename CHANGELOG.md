@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 - 2026-04-17
+
+- **Breaking — Cursor SDK migration:** Dropped the bespoke REST client at `https://api.cursor.com/v0/agents`. Both the local CLI and the cloud orchestrator runtime now drive agents through the official Cursor TypeScript SDK (`@cursor/february`) via a new `src/sdk/agent-client.ts` seam (`AgentClient`, `buildCloudAgentOptions`, `streamToCallbacks`, `parseAssistantJsonFromText`, `tryDownloadJsonArtifact`). `src/api/cursor-client.ts` is removed.
+- **Stream-driven workers:** Each worker launch is `Agent.create({ cloud: { repos, branchName, autoCreatePR } })` + `agent.send(prompt)` + `run.stream()` + `run.wait()`. The orchestrator no longer polls the Cursor API on a 30-second cadence; completion is detected by awaiting `run.wait()` per worker. SDK events stream into a new `transcripts/<task_id>.jsonl` on the run branch (one record per `SDKMessage`), and key events mirror into `events.jsonl` as `worker_status` / `worker_tool_call`.
+- **Worker output protocol:** Workers no longer shell out `gh api PUT` to write `agent-<task_id>.json`. They write `cursor-orch-output.json` into the workspace root (primary, read via `agent.listArtifacts()` + `agent.downloadArtifact()`) and include the same JSON as a fenced ```json block in their final assistant message (fallback, parsed from the SDK stream). The orchestrator normalizes, truncates, and writes the canonical `agent-<task_id>.json` itself.
+- **Follow-ups (retry-blocked):** Use `sdkAgent.send(followUpPrompt)` on the retained `SDKAgent`, preserving conversation. Replaces the old `CursorClient.sendFollowup` REST call.
+- **Stop semantics:** `cursor-orch stop` writes `stop-requested.json`; the orchestrator disposes SDK agents on its next iteration and marks state `stopped`. The SDK's `Run.cancel()` is unsupported for cloud runs and is documented as a known limitation.
+- **Bootstrap runtime install:** `BOOTSTRAP_INSTALL_COMMAND` is now `npm install --no-save --no-audit --no-fund --prefix . @cursor/february@<version>`; the SDK version is pulled from `package.json` at build time and exported as `REQUIRED_SDK_SPEC` / `REQUIRED_SDK_VERSION` in `src/packager.ts`. esbuild bundles the orchestrator runtime with `@cursor/february`, `sqlite3`, and the `@connectrpc/connect{,-node}` packages marked as externals. Manifest schema bumps to `version: "3"` and gains `sdk_package`, `sdk_version`, `sdk_spec`.
+- **CLI:** `cursor-orch run` launches the orchestrator through the SDK (`Agent.create({ cloud: ... }).send(launchPrompt)`) and exits after the cloud agent is live, preserving the offline-safe workflow. Launch prompt exports `CURSOR_ORCH_SDK_SPEC` / `CURSOR_ORCH_SDK_VERSION`.
+- **Logs:** `cursor-orch logs --run <id> --task <task_id>` reads from `transcripts/<task_id>.jsonl` (SDK event stream with role-colored rendering). Without `--task` it reads the orchestrator's `events.jsonl`. `CURSOR_API_KEY` is no longer required for `logs`.
+- **Prompts / system prompt:** Worker + repo-creation prompts point at the new artifact protocol; system prompts drop Gist-era wording.
+- **Planner:** Unchanged text-write path (`task-plan.json` on the run branch) with an SDK-based fallback (`Agent.listRuns` + `RunResult.result`) when the file is missing.
+- **Tests:** New `tests/sdk-agent-client.test.ts`, `tests/transcript.test.ts`, `tests/orchestrator-e2e.test.ts`, plus `tests/support/fake-agent-client.ts`. Existing tests updated to the SDK-based shape; `CursorClient` references removed.
 
 ## 0.6.0 - 2026-04-14
 
