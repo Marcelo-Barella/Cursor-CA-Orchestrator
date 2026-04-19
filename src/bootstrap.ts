@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { buildRuntimeRef, packageRuntimeSnapshot, validatePayloadSize } from "./packager.js";
+import { REQUIRED_SDK_SPEC, buildRuntimeRef, packageRuntimeSnapshot, validatePayloadSize } from "./packager.js";
 
 export const GITHUB_API = "https://api.github.com";
 
@@ -11,7 +11,7 @@ const MAX_RETRIES_TRANSIENT = 3;
 const JITTER_FACTOR = 0.2;
 const TRANSIENT_CODES = new Set([502, 503, 504]);
 
-export const BOOTSTRAP_INSTALL_COMMAND = ":";
+export const BOOTSTRAP_INSTALL_COMMAND = `npm install --no-save --no-audit --no-fund --prefix . ${REQUIRED_SDK_SPEC}`;
 export const BOOTSTRAP_ENTRYPOINT = "node dist/orchestrator-runtime.cjs";
 export const RULE_PATH = ".cursor/rules/orchestrator.mdc";
 export const READONLY_RULE_PATH = ".cursor/rules/readonly-guard.mdc";
@@ -32,6 +32,7 @@ STRICT RULES:
 - Do NOT create any new files other than what the executed commands create.
 - Do NOT read or interpret the orchestration runtime source code.
 - Do NOT retry failed commands unless the output explicitly requests it.
+- Run the install command exactly as written; do not skip it.
 - Report complete stdout and stderr output.
 - ALL agents must push changes directly to the assigned branch.
 `;
