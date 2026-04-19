@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
-import type { CursorClient } from "../src/api/cursor-client.js";
+import type { AgentClient } from "../src/sdk/agent-client.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import { toYaml } from "../src/config/parse.js";
 import { extractDelegationPhases, filterEligibleReadyTasks, runOrchestration } from "../src/orchestrator.js";
@@ -322,8 +322,8 @@ describe("runOrchestration validation gate", () => {
       rateLimitRemaining: null,
       rateLimitLimit: null,
     } as unknown as RepoStoreClient;
-    const cursorClient = {} as unknown as CursorClient;
-    await expect(runOrchestration("run-gate-1", cursorClient, repoStore)).rejects.toThrow(/unknown task/);
+    const agentClient = {} as unknown as AgentClient;
+    await expect(runOrchestration("run-gate-1", agentClient, repoStore)).rejects.toThrow(/unknown task/);
     expect(writeCount).toBe(0);
   });
 });
