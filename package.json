@@ -1,6 +1,6 @@
 {
   "name": "cursor-orch",
-  "version": "0.6.0",
+  "version": "2.0.0",
   "description": "CLI to orchestrate multiple Cursor Cloud Agents across GitHub repositories",
   "type": "module",
   "main": "./dist/index.js",
@@ -26,7 +26,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && npm run bundle:runtime",
-    "bundle:runtime": "esbuild src/orchestrator-entry.ts --bundle --platform=node --format=cjs --outfile=dist/orchestrator-runtime.cjs --legal-comments=none",
+    "bundle:runtime": "esbuild src/orchestrator-entry.ts --bundle --platform=node --format=cjs --outfile=dist/orchestrator-runtime.cjs --legal-comments=none --external:@cursor/february --external:sqlite3 --external:@connectrpc/connect-node --external:@connectrpc/connect",
     "prepack": "npm run build && oclif manifest",
     "test": "vitest run",
     "smoke": "node ./dist/cli.js --help",
@@ -36,6 +36,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@cursor/february": "^1.0.1",
     "@oclif/core": "^4.10.2",
     "@oclif/plugin-autocomplete": "^3.2.42",
     "blessed": "^0.1.81",
