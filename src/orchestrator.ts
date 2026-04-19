@@ -1,13 +1,12 @@
 import { execSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { CursorClient, type AgentInfo } from "./api/cursor-client.js";
 import { RepoStoreClient } from "./api/repo-store.js";
 import type { OrchestratorConfig, TaskConfig } from "./config/types.js";
 import { canonicalizeOrchestratorConfig } from "./config/canonicalize.js";
 import { parseConfig, toYaml } from "./config/parse.js";
 import { canonicalRepoAliasForTask, validateConfig } from "./config/validate.js";
 import { buildPlannerPrompt, parseTaskPlan, waitForPlan } from "./planner.js";
-import { buildRepoCreationPrompt, buildWorkerPrompt } from "./prompt-builder.js";
+import { WORKER_OUTPUT_ARTIFACT_PATH, buildRepoCreationPrompt, buildWorkerPrompt } from "./prompt-builder.js";
 import { extractConstraintsFromPrompt, validateTaskPromptsAgainstConstraints } from "./lib/constraint-validator.js";
 import {
   type AgentState,
@@ -32,14 +31,26 @@ import {
   topoSortTaskGroup,
 } from "./lib/github-consolidated-pr.js";
 import { parseGithubOwnerRepo, resolveRepoTarget } from "./lib/repo-target.js";
+import {
+  type AgentClient,
+  type SDKAssistantMessage,
+  type SDKStatusMessage,
+  type SdkAgent,
+  type SdkRun,
+  createDefaultAgentClient,
+  parseAssistantJsonFromMessages,
+  streamToCallbacks,
+  tryDownloadJsonArtifact,
+} from "./sdk/agent-client.js";
+import { createTranscriptWriter, type TranscriptWriter } from "./sdk/transcript.js";
 
-const POLL_INTERVAL = 30;
+const STOP_POLL_INTERVAL_MS = 5_000;
+const MAX_WAKEUP_INTERVAL_MS = 10_000;
 const BLOCKED_TIMEOUT_SECONDS = 300;
 const MAX_RETRY_COUNT = 1;
 const MAX_WORKER_OUTPUT_BYTES = 512 * 1024;
 const MAX_SUMMARY_BYTES = 4096;
 const MAX_OUTPUTS_BYTES = 256 * 1024;
-const RAW_TAIL_BYTES = 8192;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -270,21 +281,6 @@ function makeEvent(
   };
 }
 
-async function readWorkerOutput(repoStore: RepoStoreClient, runId: string, taskId: string): Promise<Record<string, unknown> | null> {
-  const content = await repoStore.readFile(runId, `agent-${taskId}.json`);
-  if (!content) return null;
-  if (Buffer.byteLength(content, "utf8") > MAX_WORKER_OUTPUT_BYTES) {
-    console.warn(`Worker output for ${taskId} exceeds 512KB, truncating`);
-  }
-  try {
-    const data = JSON.parse(content) as Record<string, unknown>;
-    return truncateOutput(data, taskId);
-  } catch {
-    const tail = content.length > RAW_TAIL_BYTES ? content.slice(-RAW_TAIL_BYTES) : content;
-    return { task_id: taskId, status: "completed", truncated: true, raw_tail: tail };
-  }
-}
-
 function truncateOutput(data: Record<string, unknown>, taskId: string): Record<string, unknown> {
   truncateSummary(data, taskId);
   truncateOutputs(data, taskId);
@@ -303,7 +299,7 @@ function truncateOutputs(data: Record<string, unknown>, taskId: string): void {
   const outputs = data.outputs;
   if (typeof outputs !== "object" || outputs === null) return;
   const o = outputs as Record<string, unknown>;
-  let serializedLen = Buffer.byteLength(JSON.stringify(o), "utf8");
+  const serializedLen = Buffer.byteLength(JSON.stringify(o), "utf8");
   if (serializedLen <= MAX_OUTPUTS_BYTES) return;
   console.warn(`Worker outputs for ${taskId} exceed 256KB (${serializedLen} bytes), truncating`);
   shrinkOutputs(o);
@@ -319,6 +315,40 @@ function shrinkOutputs(outputs: Record<string, unknown>): void {
     const tail = val.length > 32768 ? val.slice(-32768) : val;
     outputs[largestKey] = `[TRUNCATED]\n${tail}`;
     if (Buffer.byteLength(JSON.stringify(outputs), "utf8") <= MAX_OUTPUTS_BYTES) break;
+  }
+}
+
+function normalizeWorkerPayload(raw: unknown, taskId: string): Record<string, unknown> | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.task_id !== "string") {
+    obj.task_id = taskId;
+  }
+  if (typeof obj.status !== "string") {
+    obj.status = "completed";
+  }
+  if (typeof obj.summary !== "string" && obj.summary !== null) {
+    obj.summary = null;
+  }
+  if (!("outputs" in obj) || typeof obj.outputs !== "object" || obj.outputs === null) {
+    obj.outputs = {};
+  }
+  if (Buffer.byteLength(JSON.stringify(obj), "utf8") > MAX_WORKER_OUTPUT_BYTES) {
+    console.warn(`Worker output for ${taskId} exceeds 512KB, truncating`);
+  }
+  return truncateOutput(obj, taskId);
+}
+
+async function readWorkerOutputFromRepo(repoStore: RepoStoreClient, runId: string, taskId: string): Promise<Record<string, unknown> | null> {
+  const content = await repoStore.readFile(runId, `agent-${taskId}.json`);
+  if (!content) return null;
+  try {
+    const data = JSON.parse(content) as Record<string, unknown>;
+    return truncateOutput(data, taskId);
+  } catch {
+    return null;
   }
 }
 
@@ -375,217 +405,6 @@ async function cascadeFailures(
   return cascaded;
 }
 
-async function pollSingleAgent(
-  taskId: string,
-  agent: AgentState,
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-  runId: string,
-  state: OrchestrationState,
-  config: OrchestratorConfig,
-): Promise<void> {
-  if ((agent.status !== "running" && agent.status !== "launching") || !agent.agent_id) {
-    return;
-  }
-  let info: AgentInfo;
-  try {
-    info = await cursorClient.getAgent(agent.agent_id);
-  } catch {
-    console.error(`Failed to poll agent ${agent.agent_id} for task ${taskId}`);
-    return;
-  }
-  await updateAgentFromPoll(taskId, agent, info, repoStore, runId, state, config);
-}
-
-async function updateAgentFromPoll(
-  taskId: string,
-  agent: AgentState,
-  info: AgentInfo,
-  repoStore: RepoStoreClient,
-  runId: string,
-  state: OrchestrationState,
-  config: OrchestratorConfig,
-): Promise<void> {
-  const st = info.status.toUpperCase();
-  if (st === "FINISHED") {
-    await markAgentFinished(taskId, agent, info, repoStore, runId, state, config);
-    return;
-  }
-  if (st === "ERROR") {
-    await markAgentError(taskId, agent, info, repoStore, runId);
-    return;
-  }
-  if (st === "RUNNING" || st === "CREATING") {
-    await checkRunningAgent(taskId, agent, repoStore, runId);
-  }
-}
-
-async function markAgentFinished(
-  taskId: string,
-  agent: AgentState,
-  info: AgentInfo,
-  repoStore: RepoStoreClient,
-  runId: string,
-  state: OrchestrationState,
-  config: OrchestratorConfig,
-): Promise<void> {
-  agent.status = "finished";
-  agent.finished_at = nowIso();
-  const taskMap = Object.fromEntries(config.tasks.map((t) => [t.id, t]));
-  const task = taskMap[taskId]!;
-  let branchRecorded = info.branch_name?.trim() || computeBranchName(config.target.branch_prefix, runId, taskId, agent.retry_count);
-  const runLine =
-    !task.create_repo && config.target.branch_layout === "consolidated" && config.target.consolidate_prs;
-  if (runLine) {
-    const planRef = resolvePlanRefForTask(task, config);
-    if (planRef) {
-      const ghToken = process.env.GH_TOKEN;
-      if (ghToken) {
-        try {
-          const depOutputs = await gatherDepOutputs(task, repoStore, runId);
-          const [repoUrl] = await resolveRepoForTask(task, config, depOutputs, ghToken);
-          const gk = groupKeyForRepo(repoUrl, planRef);
-          const rb = runBranchName(config.target.branch_prefix, runId, planRef);
-          state.repo_run_head = state.repo_run_head ?? {};
-          state.repo_run_head[gk] = rb;
-          branchRecorded = rb;
-        } catch {
-          branchRecorded = runBranchName(config.target.branch_prefix, runId, planRef);
-        }
-      } else {
-        branchRecorded = runBranchName(config.target.branch_prefix, runId, planRef);
-      }
-    }
-  }
-  agent.branch_name = branchRecorded;
-  agent.pr_url = info.pr_url;
-  agent.summary = info.summary;
-  await readWorkerOutput(repoStore, runId, taskId);
-  if (runLine && state.repo_run_head && Object.keys(state.repo_run_head).length > 0) {
-    await syncToRepo(repoStore, runId, state);
-  }
-  const phaseId = state.task_phase_map[taskId];
-  await appendEvent(
-    repoStore,
-    runId,
-    makeEvent("task_finished", `Task ${taskId} finished`, taskId, {
-      phase_id: phaseId ?? null,
-      agent_node_id: taskId,
-      agent_kind: "task",
-      payload: { status: agent.status },
-    }),
-  );
-}
-
-async function markAgentError(taskId: string, agent: AgentState, info: AgentInfo, repoStore: RepoStoreClient, runId: string): Promise<void> {
-  agent.status = "failed";
-  agent.finished_at = nowIso();
-  agent.summary = info.summary ?? "Agent error";
-  await appendEvent(repoStore, runId, makeEvent("task_failed", `Task ${taskId} failed: agent error`, taskId));
-}
-
-async function checkRunningAgent(taskId: string, agent: AgentState, repoStore: RepoStoreClient, runId: string): Promise<void> {
-  if (agent.status === "launching") {
-    agent.status = "running";
-  }
-  const output = await readWorkerOutput(repoStore, runId, taskId);
-  if (!output || output.status !== "blocked") {
-    return;
-  }
-  agent.status = "blocked";
-  agent.blocked_reason = String(output.blocked_reason ?? "Unknown");
-  if (!agent.blocked_since) {
-    agent.blocked_since = nowIso();
-  }
-  await appendEvent(repoStore, runId, makeEvent("task_blocked", `Task ${taskId} blocked: ${agent.blocked_reason}`, taskId));
-}
-
-async function pollAgents(
-  state: OrchestrationState,
-  config: OrchestratorConfig,
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-  runId: string,
-): Promise<void> {
-  for (const [taskId, agent] of Object.entries(state.agents)) {
-    await pollSingleAgent(taskId, agent, cursorClient, repoStore, runId, state, config);
-  }
-}
-
-async function handleSingleBlocked(
-  agent: AgentState,
-  now: Date,
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-  runId: string,
-  graph: Record<string, Set<string>>,
-  state: OrchestrationState,
-): Promise<void> {
-  if (!agent.blocked_since) return;
-  const blockedAt = new Date(agent.blocked_since);
-  const elapsed = (now.getTime() - blockedAt.getTime()) / 1000;
-  if (elapsed <= BLOCKED_TIMEOUT_SECONDS) return;
-  if (agent.retry_count < MAX_RETRY_COUNT && agent.agent_id) {
-    await retryBlockedAgent(agent, cursorClient, repoStore, runId);
-    return;
-  }
-  await failBlockedAgent(agent, cursorClient, repoStore, runId, graph, state);
-}
-
-async function retryBlockedAgent(agent: AgentState, cursorClient: CursorClient, repoStore: RepoStoreClient, runId: string): Promise<void> {
-  const prompt = `Your previous attempt was blocked. Reason: ${agent.blocked_reason}. Please try a different approach or report blocked again with a specific reason.`;
-  try {
-    await cursorClient.sendFollowup(agent.agent_id!, prompt);
-  } catch {
-    console.error(`Failed to send followup for blocked task ${agent.task_id}`);
-  }
-  agent.retry_count += 1;
-  agent.status = "running";
-  agent.blocked_reason = null;
-  agent.blocked_since = null;
-  try {
-    await repoStore.deleteFile(runId, `agent-${agent.task_id}.json`);
-  } catch {
-    console.warn(`Failed to delete agent-${agent.task_id}.json for retry`);
-  }
-  await appendEvent(repoStore, runId, makeEvent("task_retried", `Task ${agent.task_id} retried`, agent.task_id));
-}
-
-async function failBlockedAgent(
-  agent: AgentState,
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-  runId: string,
-  graph: Record<string, Set<string>>,
-  state: OrchestrationState,
-): Promise<void> {
-  agent.status = "failed";
-  agent.finished_at = nowIso();
-  agent.summary = agent.blocked_reason ?? "Blocked and retries exhausted";
-  if (agent.agent_id) {
-    try {
-      await cursorClient.stopAgent(agent.agent_id);
-    } catch {
-      console.warn(`Failed to stop blocked agent ${agent.agent_id}`);
-    }
-  }
-  await appendEvent(repoStore, runId, makeEvent("task_failed", `Task ${agent.task_id} failed: blocked`, agent.task_id));
-  await cascadeFailures(state, agent.task_id, graph, repoStore, runId);
-}
-
-async function handleBlocked(
-  state: OrchestrationState,
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-  runId: string,
-  graph: Record<string, Set<string>>,
-): Promise<void> {
-  const now = new Date();
-  for (const agent of getBlockedTasks(state.agents)) {
-    await handleSingleBlocked(agent, now, cursorClient, repoStore, runId, graph, state);
-  }
-}
-
 async function resolveGithubUsername(ghToken: string): Promise<string> {
   const resp = await fetch("https://api.github.com/user", {
     headers: { Authorization: `Bearer ${ghToken}` },
@@ -639,142 +458,10 @@ async function resolveRepoForTask(
 async function gatherDepOutputs(task: TaskConfig, repoStore: RepoStoreClient, runId: string): Promise<Record<string, Record<string, unknown>>> {
   const depOutputs: Record<string, Record<string, unknown>> = {};
   for (const depId of task.depends_on) {
-    const output = await readWorkerOutput(repoStore, runId, depId);
+    const output = await readWorkerOutputFromRepo(repoStore, runId, depId);
     depOutputs[depId] = (output?.outputs as Record<string, unknown>) ?? {};
   }
   return depOutputs;
-}
-
-async function tryLaunchAgent(
-  cursorClient: CursorClient,
-  prompt: string,
-  repoUrl: string,
-  ref: string,
-  model: string,
-  branch: string,
-  autoPr: boolean,
-): Promise<{ info: AgentInfo | null; error: string | null }> {
-  try {
-    return { info: await cursorClient.launchAgent(prompt, repoUrl, ref, model, branch, autoPr), error: null };
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { info: null, error: detail };
-  }
-}
-
-async function launchSingleTask(
-  taskId: string,
-  state: OrchestrationState,
-  config: OrchestratorConfig,
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-  runId: string,
-): Promise<void> {
-  assignTaskPhase(state, taskId, "execution");
-  setPhaseStatus(state, "execution", "running", { timestamp: nowIso() });
-  const taskMap = Object.fromEntries(config.tasks.map((t) => [t.id, t]));
-  const task = taskMap[taskId]!;
-  const ghToken = process.env.GH_TOKEN!;
-  const depOutputs = await gatherDepOutputs(task, repoStore, runId);
-  const [repoUrl, ref] = await resolveRepoForTask(task, config, depOutputs, ghToken);
-  const planRef = resolvePlanRefForTask(task, config);
-  const runLine =
-    !task.create_repo && config.target.branch_layout === "consolidated" && config.target.consolidate_prs && planRef;
-  let launchRef = ref;
-  let workerBranch = computeBranchName(config.target.branch_prefix, runId, taskId, state.agents[taskId]!.retry_count);
-  let runBranchForPrompt: string | undefined;
-  if (runLine && planRef) {
-    const ownerRepo = parseGithubOwnerRepo(repoUrl);
-    const rb = runBranchName(config.target.branch_prefix, runId, planRef);
-    if (ownerRepo) {
-      const ensured = await ensureRunBranchFromBase(ghToken, ownerRepo.owner, ownerRepo.repo, planRef, rb);
-      if (ensured.error) {
-        const summary = `Failed to prepare run branch for task ${taskId}: ${ensured.error}`;
-        console.error(summary);
-        state.agents[taskId]!.status = "failed";
-        state.agents[taskId]!.summary = summary;
-        await appendEvent(
-          repoStore,
-          runId,
-          makeEvent("task_failed", `Task ${taskId} failed: ${ensured.error}`, taskId, {
-            payload: { repository: repoUrl, ref: planRef },
-          }),
-        );
-        return;
-      }
-    }
-    const gk = groupKeyForRepo(repoUrl, planRef);
-    launchRef = state.repo_run_head?.[gk] ?? planRef;
-    workerBranch = rb;
-    runBranchForPrompt = rb;
-  }
-  const prompt = task.create_repo
-    ? buildRepoCreationPrompt(task, runId, depOutputs)
-    : buildWorkerPrompt(task, runId, depOutputs, "", "", {
-        runBranch: runBranchForPrompt,
-        launchRef,
-        perTaskBranch: computeBranchName(config.target.branch_prefix, runId, taskId, state.agents[taskId]!.retry_count),
-      });
-  const branch = workerBranch;
-  const model = task.model ?? config.model;
-  const autoPr = config.target.auto_create_pr && !config.target.consolidate_prs;
-  const launch = await tryLaunchAgent(cursorClient, prompt, repoUrl, launchRef, model, branch, autoPr);
-  if (!launch.info) {
-    const detail = launch.error ?? "unknown launch error";
-    const summary = `Failed to launch agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${ref})`;
-    console.error(summary);
-    state.agents[taskId]!.status = "failed";
-    state.agents[taskId]!.summary = summary;
-    await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
-        payload: { repository: repoUrl, ref },
-      }),
-    );
-    return;
-  }
-  const info = launch.info;
-  const agent = state.agents[taskId]!;
-  agent.agent_id = info.id;
-  agent.status = "launching";
-  agent.started_at = nowIso();
-  await appendEvent(
-    repoStore,
-    runId,
-    makeEvent("task_launched", `Launched ${taskId} (${info.id})`, taskId, {
-      phase_id: "execution",
-      agent_node_id: taskId,
-      agent_kind: "task",
-    }),
-  );
-}
-
-async function launchReadyTasks(
-  state: OrchestrationState,
-  config: OrchestratorConfig,
-  taskIds: string[],
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-  runId: string,
-): Promise<void> {
-  for (const taskId of taskIds) {
-    await launchSingleTask(taskId, state, config, cursorClient, repoStore, runId);
-  }
-}
-
-async function stopAllRunning(state: OrchestrationState, cursorClient: CursorClient): Promise<void> {
-  for (const agent of Object.values(state.agents)) {
-    if ((agent.status === "running" || agent.status === "launching") && agent.agent_id) {
-      try {
-        await cursorClient.stopAgent(agent.agent_id);
-        agent.status = "stopped";
-        agent.finished_at = nowIso();
-      } catch {
-        console.warn(`Failed to stop agent ${agent.agent_id}`);
-      }
-    }
-  }
 }
 
 function reconcileAgentsFromConfig(state: OrchestrationState, config: OrchestratorConfig): void {
@@ -803,7 +490,7 @@ function checkAllFinished(state: OrchestrationState): boolean {
   return agents.every((a) => a.status === "finished");
 }
 
-function checkTerminalFailure(state: OrchestrationState, _graph: Record<string, Set<string>>): boolean {
+function checkTerminalFailure(state: OrchestrationState): boolean {
   const failedIds = new Set(Object.entries(state.agents).filter(([, a]) => a.status === "failed").map(([id]) => id));
   if (!failedIds.size) return false;
   const pendingViable = Object.values(state.agents).filter((a) =>
@@ -812,240 +499,521 @@ function checkTerminalFailure(state: OrchestrationState, _graph: Record<string, 
   return pendingViable.length === 0;
 }
 
-function computeSleepTime(repoStore: RepoStoreClient): number {
-  const remaining = repoStore.rateLimitRemaining;
-  const limit = repoStore.rateLimitLimit;
-  if (remaining === null || limit === null) {
-    return POLL_INTERVAL;
-  }
-  const usedPct = 1 - remaining / limit;
-  if (usedPct > 0.8) {
-    console.warn(`Rate limit >80% consumed (${remaining} remaining), doubling poll interval`);
-    return POLL_INTERVAL * 2;
-  }
-  return POLL_INTERVAL;
+type WorkerHandle = {
+  taskId: string;
+  sdkAgent: SdkAgent;
+  run: SdkRun;
+  assistantMessages: SDKAssistantMessage[];
+  transcript: TranscriptWriter;
+  done: Promise<void>;
+};
+
+type LoopContext = {
+  state: OrchestrationState;
+  config: OrchestratorConfig;
+  graph: Record<string, Set<string>>;
+  agentClient: AgentClient;
+  repoStore: RepoStoreClient;
+  runId: string;
+  apiKey: string;
+  ghToken: string;
+  activeWorkers: Map<string, WorkerHandle>;
+  dirty: { value: boolean };
+  wakeup: { resolve: () => void; promise: Promise<void> };
+  stopRequested: { value: boolean };
+};
+
+function markStateDirty(ctx: LoopContext): void {
+  ctx.dirty.value = true;
+  triggerWakeup(ctx);
 }
 
-async function runPlanningPhase(
-  config: OrchestratorConfig,
-  runId: string,
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-): Promise<boolean> {
-  await appendEvent(repoStore, runId, makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }));
-  try {
-    const ghToken = process.env.GH_TOKEN!;
-    const ghUser = await resolveGithubUsername(ghToken);
-    const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
-    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-    await cursorClient.launchAgent(
-      plannerPrompt,
-      bootstrapUrl,
-      resolveBootstrapRef(),
-      config.model,
-      `cursor-orch-planner-${runId.slice(0, 8)}`,
-      false,
-    );
-    const planContent = await waitForPlan(repoStore, runId);
-    if (!planContent) {
-      throw new Error("Timed out waiting for task plan from planner agent");
-    }
-    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-    const parsedTasks = parseTaskPlan(planContent, config);
-    const constraints = extractConstraintsFromPrompt(config.prompt);
-    if (constraints.length > 0) {
-      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!result.valid) {
-        const detail = result.violations
-          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-          .join("; ");
-        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-      }
-    }
-    config.tasks = parsedTasks;
-    const canonPlan = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonPlan.repositories;
-    config.tasks = canonPlan.tasks;
-    config.delegation_map = canonPlan.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-    await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("planning_completed", `Planning completed: ${parsedTasks.length} tasks`, null, { phase_id: "planning", agent_kind: "phase" }),
-    );
-    return true;
-  } catch (exc) {
-    await appendEvent(repoStore, runId, makeEvent("planning_failed", String(exc), null, { phase_id: "planning", agent_kind: "phase" }));
-    throw exc;
-  }
+function triggerWakeup(ctx: LoopContext): void {
+  const resolve = ctx.wakeup.resolve;
+  ctx.wakeup = createWakeup();
+  resolve();
 }
 
-async function persistUnexpectedFailure(state: OrchestrationState, repoStore: RepoStoreClient, runId: string, exc: unknown): Promise<void> {
-  const timestamp = nowIso();
-  ensureLifecycleAgents(state);
-  state.status = "failed";
-  state.error = String(exc);
-  if (state.main_agent) {
-    state.main_agent.status = "failed";
-    state.main_agent.finished_at = timestamp;
-  }
-  for (const phaseId of ["planning", "scheduling", "execution", "finalization"]) {
-    const phase = state.phase_agents[phaseId];
-    if (!phase || !["running", "launching"].includes(phase.status)) continue;
-    setPhaseStatus(state, phaseId, "failed", { timestamp });
-  }
+function createWakeup(): { resolve: () => void; promise: Promise<void> } {
+  let resolveFn: () => void = () => {};
+  const promise = new Promise<void>((resolve) => {
+    resolveFn = resolve;
+  });
+  return { resolve: resolveFn, promise };
+}
+
+async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   try {
-    await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("orchestration_failed", `Orchestration loop failed: ${exc}`, null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
-    );
+    await agent[Symbol.asyncDispose]();
   } catch {
-    console.error("Failed to append orchestration failure event");
-  }
-  try {
-    await syncToRepo(repoStore, runId, state);
-  } catch {
-    console.error("Failed to sync orchestration failure state");
+    /* advisory close */
   }
 }
 
-export async function runOrchestration(runId: string, cursorClient: CursorClient, repoStore: RepoStoreClient): Promise<void> {
-  const configStr = await repoStore.readFile(runId, "config.yaml");
-  let config = parseConfig(configStr);
-  config = canonicalizeOrchestratorConfig(config);
-
-  let planningRan = false;
-  let planningOk = false;
-  if (config.prompt && !config.tasks.length) {
-    planningRan = true;
-    const planContent = await repoStore.readFile(runId, "task-plan.json");
-    if (planContent) {
-      try {
-        const ghToken = process.env.GH_TOKEN!;
-        const ghUser = await resolveGithubUsername(ghToken);
-        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-        config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-        const parsedTasks = parseTaskPlan(planContent, config);
-        config.tasks = parsedTasks;
-        const canonReuse = canonicalizeOrchestratorConfig(config);
-        config.repositories = canonReuse.repositories;
-        config.tasks = canonReuse.tasks;
-        config.delegation_map = canonReuse.delegation_map;
-        await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+async function launchWorkerAgent(
+  ctx: LoopContext,
+  taskId: string,
+  task: TaskConfig,
+  depOutputs: Record<string, Record<string, unknown>>,
+): Promise<void> {
+  const agent = ctx.state.agents[taskId]!;
+  const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
+  const planRef = resolvePlanRefForTask(task, ctx.config);
+  const runLine =
+    !task.create_repo && ctx.config.target.branch_layout === "consolidated" && ctx.config.target.consolidate_prs && planRef;
+  let launchRef = ref;
+  let workerBranch = computeBranchName(ctx.config.target.branch_prefix, ctx.runId, taskId, agent.retry_count);
+  let runBranchForPrompt: string | undefined;
+  if (runLine && planRef) {
+    const ownerRepo = parseGithubOwnerRepo(repoUrl);
+    const rb = runBranchName(ctx.config.target.branch_prefix, ctx.runId, planRef);
+    if (ownerRepo) {
+      const ensured = await ensureRunBranchFromBase(ctx.ghToken, ownerRepo.owner, ownerRepo.repo, planRef, rb);
+      if (ensured.error) {
+        const summary = `Failed to prepare run branch for task ${taskId}: ${ensured.error}`;
+        console.error(summary);
+        agent.status = "failed";
+        agent.summary = summary;
         await appendEvent(
-          repoStore,
-          runId,
-          makeEvent("planning_completed", `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`, null, {
-            phase_id: "planning",
-            agent_kind: "phase",
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed: ${ensured.error}`, taskId, {
+            payload: { repository: repoUrl, ref: planRef },
           }),
         );
-        planningOk = true;
-      } catch {
-        /* try full planning */
+        markStateDirty(ctx);
+        return;
       }
     }
-    if (!planningOk) {
-      planningOk = await runPlanningPhase(config, runId, cursorClient, repoStore);
-    }
+    const gk = groupKeyForRepo(repoUrl, planRef);
+    launchRef = ctx.state.repo_run_head?.[gk] ?? planRef;
+    workerBranch = rb;
+    runBranchForPrompt = rb;
   }
-
-  validateConfig(config);
-
-  let state: OrchestrationState;
+  const prompt = task.create_repo
+    ? buildRepoCreationPrompt(task, ctx.runId, depOutputs)
+    : buildWorkerPrompt(task, ctx.runId, depOutputs, {
+        runBranch: runBranchForPrompt,
+        launchRef,
+        perTaskBranch: computeBranchName(ctx.config.target.branch_prefix, ctx.runId, taskId, agent.retry_count),
+      });
+  const model = task.model ?? ctx.config.model;
+  const autoPr = ctx.config.target.auto_create_pr && !ctx.config.target.consolidate_prs;
+  let sdkAgent: SdkAgent;
   try {
-    state = await syncFromRepo(repoStore, runId);
-  } catch {
-    state = createInitialState(config, runId);
-  }
-
-  reconcileAgentsFromConfig(state, config);
-
-  if (state.status === "pending") {
-    state.status = "running";
-    state.started_at = nowIso();
-    seedMainAgent(state, { agent_id: state.orchestrator_agent_id, status: "running", started_at: state.started_at });
-    await syncToRepo(repoStore, runId, state);
+    sdkAgent = ctx.agentClient.createCloudAgent({
+      apiKey: ctx.apiKey,
+      model,
+      repoUrl,
+      startingRef: launchRef,
+      branchName: workerBranch,
+      autoCreatePR: autoPr,
+      skipReviewerRequest: true,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${launchRef})`;
+    console.error(summary);
+    agent.status = "failed";
+    agent.summary = summary;
     await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("orchestration_started", "Orchestration started", null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
+        payload: { repository: repoUrl, ref: launchRef },
+      }),
     );
+    markStateDirty(ctx);
+    return;
   }
-  if (planningRan) {
-    setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
-    await syncToRepo(repoStore, runId, state);
-  }
-
-  const graph = buildDependencyGraph(config.tasks);
-
+  let run: SdkRun;
   try {
-    await orchestrationLoop(state, config, graph, cursorClient, repoStore, runId);
-  } catch (exc) {
-    console.error("Orchestration loop failed", exc);
-    await persistUnexpectedFailure(state, repoStore, runId, exc);
-    throw exc;
+    run = await sdkAgent.send(prompt);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const summary = `Failed to dispatch prompt for task ${taskId}: ${detail}`;
+    console.error(summary);
+    agent.status = "failed";
+    agent.summary = summary;
+    await safeDisposeAgent(sdkAgent);
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("task_failed", `Task ${taskId} failed: send error (${detail})`, taskId, {
+        payload: { repository: repoUrl, ref: launchRef },
+      }),
+    );
+    markStateDirty(ctx);
+    return;
   }
-  if (state.status === "failed") {
-    throw new Error(state.error ? `Orchestration failed: ${state.error}` : "Orchestration failed");
-  }
-}
-
-async function orchestrationLoop(
-  state: OrchestrationState,
-  config: OrchestratorConfig,
-  graph: Record<string, Set<string>>,
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-  runId: string,
-): Promise<void> {
-  while (true) {
-    if (await checkStopRequested(state, cursorClient, repoStore, runId, config)) {
-      break;
-    }
-    await pollAgents(state, config, cursorClient, repoStore, runId);
-    await handleBlocked(state, cursorClient, repoStore, runId, graph);
-    const readyTasks = getReadyTasks(graph, state.agents);
-    const eligibleReadyTasks = filterEligibleReadyTasks(state, config, readyTasks);
-    await launchReadyTasks(state, config, eligibleReadyTasks, cursorClient, repoStore, runId);
-    await writeProgress(state, config, repoStore, runId);
-    if (await checkCompletion(state, config, graph, repoStore, runId)) {
-      break;
-    }
-    if (await checkFailure(state, graph, repoStore, runId)) {
-      break;
-    }
-    await delay(computeSleepTime(repoStore) * 1000);
-  }
-}
-
-async function checkStopRequested(
-  state: OrchestrationState,
-  cursorClient: CursorClient,
-  repoStore: RepoStoreClient,
-  runId: string,
-  config: OrchestratorConfig,
-): Promise<boolean> {
-  const stopContent = await repoStore.readFile(runId, "stop-requested.json");
-  if (!stopContent) return false;
-  console.info("Stop requested, halting orchestration");
-  await stopAllRunning(state, cursorClient);
-  state.status = "stopped";
-  await repoStore.writeFile(runId, "summary.md", buildSummaryMd(config, state));
-  await syncToRepo(repoStore, runId, state);
+  agent.agent_id = sdkAgent.agentId;
+  agent.status = "launching";
+  agent.started_at = nowIso();
+  agent.branch_name = workerBranch;
   await appendEvent(
-    repoStore,
-    runId,
+    ctx.repoStore,
+    ctx.runId,
+    makeEvent("task_launched", `Launched ${taskId} (${sdkAgent.agentId})`, taskId, {
+      phase_id: "execution",
+      agent_node_id: taskId,
+      agent_kind: "task",
+      payload: { run_id: run.id, repository: repoUrl, ref: launchRef, branch: workerBranch },
+    }),
+  );
+  const transcript = createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId });
+  const handle: WorkerHandle = {
+    taskId,
+    sdkAgent,
+    run,
+    assistantMessages: [],
+    transcript,
+    done: Promise.resolve(),
+  };
+  handle.done = runWorkerStream(ctx, handle, { repoUrl, ref: launchRef, runLine: Boolean(runLine) && Boolean(planRef), planRef });
+  ctx.activeWorkers.set(taskId, handle);
+  markStateDirty(ctx);
+}
+
+async function runWorkerStream(
+  ctx: LoopContext,
+  handle: WorkerHandle,
+  info: { repoUrl: string; ref: string; runLine: boolean; planRef: string | null },
+): Promise<void> {
+  const taskId = handle.taskId;
+  const agent = ctx.state.agents[taskId]!;
+  let lastStatus: SDKStatusMessage["status"] | null = null;
+  let streamError: unknown = null;
+  try {
+    await streamToCallbacks(handle.run, {
+      onEvent: (event) => {
+        handle.transcript.enqueue(event);
+      },
+      onAssistant: (event) => {
+        handle.assistantMessages.push(event);
+      },
+      onStatus: async (event) => {
+        lastStatus = event.status;
+        if (event.status === "RUNNING" && agent.status === "launching") {
+          agent.status = "running";
+          markStateDirty(ctx);
+        }
+        try {
+          await appendEvent(
+            ctx.repoStore,
+            ctx.runId,
+            makeEvent("worker_status", `Task ${taskId} status=${event.status}`, taskId, {
+              agent_node_id: taskId,
+              agent_kind: "task",
+              payload: { status: event.status, ...(event.message ? { message: event.message } : {}) },
+            }),
+          );
+        } catch {
+          /* ignore event append failures */
+        }
+      },
+      onToolCall: async (event) => {
+        if (event.status === "running") return;
+        try {
+          await appendEvent(
+            ctx.repoStore,
+            ctx.runId,
+            makeEvent(
+              "worker_tool_call",
+              `Task ${taskId} tool ${event.name} ${event.status}`,
+              taskId,
+              {
+                agent_node_id: taskId,
+                agent_kind: "task",
+                payload: { tool: event.name, status: event.status },
+              },
+            ),
+          );
+        } catch {
+          /* ignore */
+        }
+      },
+      onError: (err) => {
+        streamError = err;
+      },
+    });
+  } catch (err) {
+    streamError = err;
+  }
+  try {
+    await handle.transcript.flush();
+  } catch {
+    /* flush failures are non-fatal */
+  }
+
+  let result: { status: "finished" | "error" | "cancelled" | "unknown"; durationMs?: number; git?: { branch?: string; prUrl?: string }; model?: string; resultText?: string } = { status: "unknown" };
+  try {
+    const awaited = await handle.run.wait();
+    result = {
+      status: awaited.status,
+      durationMs: awaited.durationMs,
+      git: awaited.git,
+      model: awaited.model,
+      resultText: awaited.result,
+    };
+  } catch (err) {
+    if (streamError === null) streamError = err;
+  }
+
+  const sdkAgent = handle.sdkAgent;
+  let payloadRaw: unknown = null;
+  let payloadSource: "artifact" | "assistant" | "none" = "none";
+  try {
+    const artifact = await tryDownloadJsonArtifact(sdkAgent, WORKER_OUTPUT_ARTIFACT_PATH);
+    if (artifact.value !== null) {
+      payloadRaw = artifact.value;
+      payloadSource = "artifact";
+    }
+  } catch {
+    /* handled as null below */
+  }
+  if (payloadRaw === null) {
+    const fallback = parseAssistantJsonFromMessages(handle.assistantMessages);
+    if (fallback !== null) {
+      payloadRaw = fallback;
+      payloadSource = "assistant";
+    }
+  }
+  const payload = normalizeWorkerPayload(payloadRaw, taskId);
+
+  if (payload) {
+    try {
+      await ctx.repoStore.writeFile(ctx.runId, `agent-${taskId}.json`, JSON.stringify(payload, null, 2));
+    } catch (err) {
+      console.warn(`Failed to write agent-${taskId}.json: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const payloadStatus = typeof payload?.status === "string" ? (payload.status as string) : null;
+  const payloadSummary = typeof payload?.summary === "string" ? (payload.summary as string) : null;
+  const payloadBlockedReason = typeof payload?.blocked_reason === "string" ? (payload.blocked_reason as string) : null;
+
+  if (info.runLine && info.planRef) {
+    const ownerRepo = parseGithubOwnerRepo(info.repoUrl);
+    if (ownerRepo) {
+      const gk = groupKeyForRepo(info.repoUrl, info.planRef);
+      ctx.state.repo_run_head = ctx.state.repo_run_head ?? {};
+      ctx.state.repo_run_head[gk] = runBranchName(ctx.config.target.branch_prefix, ctx.runId, info.planRef);
+      agent.branch_name = ctx.state.repo_run_head[gk]!;
+    }
+  } else if (result.git?.branch) {
+    agent.branch_name = result.git.branch;
+  }
+  if (result.git?.prUrl) {
+    agent.pr_url = result.git.prUrl;
+  }
+
+  const finalizedAt = nowIso();
+  const succeeded = result.status === "finished" && (!payloadStatus || payloadStatus === "completed");
+
+  if (result.status === "finished" && payloadStatus === "blocked") {
+    agent.status = "blocked";
+    agent.blocked_reason = payloadBlockedReason ?? "Worker reported blocked without reason";
+    if (!agent.blocked_since) agent.blocked_since = finalizedAt;
+    agent.summary = payloadSummary ?? agent.blocked_reason;
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("task_blocked", `Task ${taskId} blocked: ${agent.blocked_reason}`, taskId),
+    );
+  } else if (result.status === "cancelled") {
+    agent.status = "stopped";
+    agent.finished_at = finalizedAt;
+    agent.summary = payloadSummary ?? "Task cancelled";
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("task_stopped", `Task ${taskId} stopped`, taskId),
+    );
+  } else if (result.status === "error" || payloadStatus === "failed" || streamError) {
+    agent.status = "failed";
+    agent.finished_at = finalizedAt;
+    const errText = streamError instanceof Error ? streamError.message : streamError !== null ? String(streamError) : null;
+    agent.summary = payloadSummary ?? errText ?? "Worker agent errored";
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("task_failed", `Task ${taskId} failed${errText ? `: ${errText}` : ""}`, taskId, {
+        payload: errText ? { error: errText, payload_source: payloadSource, last_status: String(lastStatus ?? "") } : { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
+      }),
+    );
+    await cascadeFailures(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
+  } else if (succeeded) {
+    agent.status = "finished";
+    agent.finished_at = finalizedAt;
+    agent.summary = payloadSummary ?? "Task completed";
+    const phaseId = ctx.state.task_phase_map[taskId];
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("task_finished", `Task ${taskId} finished`, taskId, {
+        phase_id: phaseId ?? null,
+        agent_node_id: taskId,
+        agent_kind: "task",
+        payload: { status: agent.status, payload_source: payloadSource },
+      }),
+    );
+  } else {
+    agent.status = "failed";
+    agent.finished_at = finalizedAt;
+    agent.summary = payloadSummary ?? `Worker run status=${result.status}`;
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("task_failed", `Task ${taskId} failed (run status=${result.status})`, taskId, {
+        payload: { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
+      }),
+    );
+    await cascadeFailures(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
+  }
+
+  ctx.activeWorkers.delete(taskId);
+  await safeDisposeAgent(sdkAgent);
+  markStateDirty(ctx);
+}
+
+async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<void> {
+  const handle = ctx.activeWorkers.get(agent.task_id);
+  if (!handle) {
+    agent.retry_count += 1;
+    agent.status = "pending";
+    agent.blocked_reason = null;
+    agent.blocked_since = null;
+    await appendEvent(ctx.repoStore, ctx.runId, makeEvent("task_retried", `Task ${agent.task_id} retried (re-launched)`, agent.task_id));
+    markStateDirty(ctx);
+    return;
+  }
+  const prompt = `Your previous attempt was blocked. Reason: ${agent.blocked_reason}. Please try a different approach or report blocked again with a specific reason. Remember to write the final JSON to cursor-orch-output.json and include it as a fenced \`\`\`json block in your last assistant message.`;
+  let run: SdkRun;
+  try {
+    run = await handle.sdkAgent.send(prompt);
+  } catch (error) {
+    console.error(`Failed to send follow-up for blocked task ${agent.task_id}: ${error instanceof Error ? error.message : String(error)}`);
+    agent.status = "failed";
+    agent.finished_at = nowIso();
+    agent.summary = agent.blocked_reason ?? "Blocked; follow-up dispatch failed";
+    ctx.activeWorkers.delete(agent.task_id);
+    await safeDisposeAgent(handle.sdkAgent);
+    await cascadeFailures(ctx.state, agent.task_id, ctx.graph, ctx.repoStore, ctx.runId);
+    markStateDirty(ctx);
+    return;
+  }
+  agent.retry_count += 1;
+  agent.status = "running";
+  agent.blocked_reason = null;
+  agent.blocked_since = null;
+  try {
+    await ctx.repoStore.deleteFile(ctx.runId, `agent-${agent.task_id}.json`);
+  } catch {
+    /* advisory */
+  }
+  const nextHandle: WorkerHandle = {
+    taskId: agent.task_id,
+    sdkAgent: handle.sdkAgent,
+    run,
+    assistantMessages: [],
+    transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId: agent.task_id }),
+    done: Promise.resolve(),
+  };
+  const info = {
+    repoUrl: "",
+    ref: "",
+    runLine: false,
+    planRef: null as string | null,
+  };
+  const task = ctx.config.tasks.find((t) => t.id === agent.task_id);
+  if (task) {
+    try {
+      const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+      const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
+      info.repoUrl = repoUrl;
+      info.ref = ref;
+      info.planRef = resolvePlanRefForTask(task, ctx.config);
+      info.runLine = Boolean(info.planRef) && !task.create_repo && ctx.config.target.branch_layout === "consolidated" && ctx.config.target.consolidate_prs;
+    } catch {
+      /* fall through with empty info; branch_name will not update via run-line logic */
+    }
+  }
+  nextHandle.done = runWorkerStream(ctx, nextHandle, info);
+  ctx.activeWorkers.set(agent.task_id, nextHandle);
+  await appendEvent(ctx.repoStore, ctx.runId, makeEvent("task_retried", `Task ${agent.task_id} retried`, agent.task_id));
+  markStateDirty(ctx);
+}
+
+async function handleBlockedTasks(ctx: LoopContext): Promise<void> {
+  const now = new Date();
+  for (const agent of getBlockedTasks(ctx.state.agents)) {
+    if (!agent.blocked_since) continue;
+    const blockedAt = new Date(agent.blocked_since);
+    const elapsed = (now.getTime() - blockedAt.getTime()) / 1000;
+    if (elapsed <= BLOCKED_TIMEOUT_SECONDS) continue;
+    if (agent.retry_count < MAX_RETRY_COUNT && agent.agent_id) {
+      await retryBlockedAgent(ctx, agent);
+      continue;
+    }
+    agent.status = "failed";
+    agent.finished_at = nowIso();
+    agent.summary = agent.blocked_reason ?? "Blocked and retries exhausted";
+    const handle = ctx.activeWorkers.get(agent.task_id);
+    if (handle) {
+      await safeDisposeAgent(handle.sdkAgent);
+      ctx.activeWorkers.delete(agent.task_id);
+    }
+    await appendEvent(ctx.repoStore, ctx.runId, makeEvent("task_failed", `Task ${agent.task_id} failed: blocked`, agent.task_id));
+    await cascadeFailures(ctx.state, agent.task_id, ctx.graph, ctx.repoStore, ctx.runId);
+    markStateDirty(ctx);
+  }
+}
+
+async function launchReadyTasks(ctx: LoopContext): Promise<void> {
+  const readyTasks = getReadyTasks(ctx.graph, ctx.state.agents);
+  const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks);
+  if (eligible.length === 0) return;
+  const taskMap = Object.fromEntries(ctx.config.tasks.map((t) => [t.id, t]));
+  for (const taskId of eligible) {
+    const task = taskMap[taskId];
+    if (!task) continue;
+    assignTaskPhase(ctx.state, taskId, "execution");
+    setPhaseStatus(ctx.state, "execution", "running", { timestamp: nowIso() });
+    const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+    await launchWorkerAgent(ctx, taskId, task, depOutputs);
+  }
+}
+
+async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
+  const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+  if (!stopContent) return false;
+  ctx.stopRequested.value = true;
+  console.info("Stop requested, halting orchestration");
+  for (const [taskId, handle] of ctx.activeWorkers.entries()) {
+    const agent = ctx.state.agents[taskId];
+    if (agent && (agent.status === "running" || agent.status === "launching")) {
+      agent.status = "stopped";
+      agent.finished_at = nowIso();
+    }
+    await safeDisposeAgent(handle.sdkAgent);
+  }
+  ctx.activeWorkers.clear();
+  ctx.state.status = "stopped";
+  await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
+  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+  await appendEvent(
+    ctx.repoStore,
+    ctx.runId,
     makeEvent("orchestration_stopped", "Orchestration stopped by user", null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
   );
   return true;
 }
 
-async function writeProgress(state: OrchestrationState, config: OrchestratorConfig, repoStore: RepoStoreClient, runId: string): Promise<void> {
-  const summaryMd = buildSummaryMd(config, state);
-  await repoStore.writeFile(runId, "summary.md", summaryMd);
-  await syncToRepo(repoStore, runId, state);
+async function writeProgress(ctx: LoopContext): Promise<void> {
+  if (!ctx.dirty.value) return;
+  ctx.dirty.value = false;
+  await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
+  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
 }
 
 async function maybeConsolidatePullRequests(
@@ -1067,7 +1035,7 @@ async function maybeConsolidatePullRequests(
     const depOutputs = await gatherDepOutputs(task, repoStore, runId);
     let resolved: [string, string] | null = null;
     if (task.create_repo) {
-      const workerOut = await readWorkerOutput(repoStore, runId, task.id);
+      const workerOut = await readWorkerOutputFromRepo(repoStore, runId, task.id);
       const outputs = (workerOut?.outputs as Record<string, unknown>) ?? {};
       const url = typeof outputs.repo_url === "string" ? outputs.repo_url : null;
       if (url && parseGithubOwnerRepo(url)) {
@@ -1165,44 +1133,354 @@ async function maybeConsolidatePullRequests(
   state.consolidated_pr_errors = Object.keys(errors).length ? errors : null;
 }
 
-async function checkCompletion(
-  state: OrchestrationState,
-  config: OrchestratorConfig,
-  graph: Record<string, Set<string>>,
-  repoStore: RepoStoreClient,
-  runId: string,
-): Promise<boolean> {
-  if (!checkAllFinished(state)) return false;
-  if (config.target.auto_create_pr && config.target.consolidate_prs) {
-    await maybeConsolidatePullRequests(state, config, graph, runId, repoStore);
+async function checkCompletion(ctx: LoopContext): Promise<boolean> {
+  if (ctx.activeWorkers.size > 0) return false;
+  if (!checkAllFinished(ctx.state)) return false;
+  if (ctx.config.target.auto_create_pr && ctx.config.target.consolidate_prs) {
+    await maybeConsolidatePullRequests(ctx.state, ctx.config, ctx.graph, ctx.runId, ctx.repoStore);
   }
-  state.status = "completed";
-  await syncToRepo(repoStore, runId, state);
+  ctx.state.status = "completed";
+  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+  await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await appendEvent(
-    repoStore,
-    runId,
+    ctx.repoStore,
+    ctx.runId,
     makeEvent("orchestration_completed", "All tasks completed", null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
   );
   console.info("Orchestration completed successfully");
   return true;
 }
 
-async function checkFailure(state: OrchestrationState, graph: Record<string, Set<string>>, repoStore: RepoStoreClient, runId: string): Promise<boolean> {
-  const failedIds = new Set(Object.entries(state.agents).filter(([, a]) => a.status === "failed").map(([id]) => id));
+async function checkFailure(ctx: LoopContext): Promise<boolean> {
+  const failedIds = new Set(Object.entries(ctx.state.agents).filter(([, a]) => a.status === "failed").map(([id]) => id));
   if (!failedIds.size) return false;
   for (const fid of failedIds) {
-    await cascadeFailures(state, fid, graph, repoStore, runId);
+    await cascadeFailures(ctx.state, fid, ctx.graph, ctx.repoStore, ctx.runId);
   }
-  if (!checkTerminalFailure(state, graph)) return false;
-  state.status = "failed";
-  state.error = `Failed tasks: ${[...failedIds].sort().join(", ")}`;
-  await syncToRepo(repoStore, runId, state);
+  if (!checkTerminalFailure(ctx.state)) return false;
+  if (ctx.activeWorkers.size > 0) return false;
+  ctx.state.status = "failed";
+  ctx.state.error = `Failed tasks: ${[...failedIds].sort().join(", ")}`;
+  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+  await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await appendEvent(
-    repoStore,
-    runId,
-    makeEvent("orchestration_failed", `Orchestration failed: ${state.error}`, null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
+    ctx.repoStore,
+    ctx.runId,
+    makeEvent("orchestration_failed", `Orchestration failed: ${ctx.state.error}`, null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
   );
   return true;
+}
+
+async function runPlanningPhase(
+  config: OrchestratorConfig,
+  runId: string,
+  agentClient: AgentClient,
+  repoStore: RepoStoreClient,
+  apiKey: string,
+): Promise<boolean> {
+  await appendEvent(repoStore, runId, makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }));
+  try {
+    const ghToken = process.env.GH_TOKEN!;
+    const ghUser = await resolveGithubUsername(ghToken);
+    const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
+    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+    const plannerAgent = agentClient.createCloudAgent({
+      apiKey,
+      model: config.model,
+      repoUrl: bootstrapUrl,
+      startingRef: resolveBootstrapRef(),
+      branchName: `cursor-orch-planner-${runId.slice(0, 8)}`,
+      autoCreatePR: false,
+      skipReviewerRequest: true,
+    });
+    try {
+      await plannerAgent.send(plannerPrompt);
+    } catch (error) {
+      await safeDisposeAgent(plannerAgent);
+      throw error;
+    }
+    let planContent = await waitForPlan(repoStore, runId);
+    if (!planContent) {
+      try {
+        const runs = await (await import("@cursor/february")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
+        for (const r of runs.items) {
+          if (typeof r.result === "string" && r.result.trim()) {
+            planContent = r.result;
+            break;
+          }
+        }
+      } catch {
+        /* no fallback available */
+      }
+    }
+    await safeDisposeAgent(plannerAgent);
+    if (!planContent) {
+      throw new Error("Timed out waiting for task plan from planner agent");
+    }
+    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+    const parsedTasks = parseTaskPlan(planContent, config);
+    const constraints = extractConstraintsFromPrompt(config.prompt);
+    if (constraints.length > 0) {
+      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+      if (!result.valid) {
+        const detail = result.violations
+          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+          .join("; ");
+        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+      }
+    }
+    config.tasks = parsedTasks;
+    const canonPlan = canonicalizeOrchestratorConfig(config);
+    config.repositories = canonPlan.repositories;
+    config.tasks = canonPlan.tasks;
+    config.delegation_map = canonPlan.delegation_map;
+    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+    await appendEvent(
+      repoStore,
+      runId,
+      makeEvent("planning_completed", `Planning completed: ${parsedTasks.length} tasks`, null, { phase_id: "planning", agent_kind: "phase" }),
+    );
+    return true;
+  } catch (exc) {
+    await appendEvent(repoStore, runId, makeEvent("planning_failed", String(exc), null, { phase_id: "planning", agent_kind: "phase" }));
+    throw exc;
+  }
+}
+
+async function persistUnexpectedFailure(state: OrchestrationState, repoStore: RepoStoreClient, runId: string, exc: unknown): Promise<void> {
+  const timestamp = nowIso();
+  ensureLifecycleAgents(state);
+  state.status = "failed";
+  state.error = String(exc);
+  if (state.main_agent) {
+    state.main_agent.status = "failed";
+    state.main_agent.finished_at = timestamp;
+  }
+  for (const phaseId of ["planning", "scheduling", "execution", "finalization"]) {
+    const phase = state.phase_agents[phaseId];
+    if (!phase || !["running", "launching"].includes(phase.status)) continue;
+    setPhaseStatus(state, phaseId, "failed", { timestamp });
+  }
+  try {
+    await appendEvent(
+      repoStore,
+      runId,
+      makeEvent("orchestration_failed", `Orchestration loop failed: ${exc}`, null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
+    );
+  } catch {
+    console.error("Failed to append orchestration failure event");
+  }
+  try {
+    await syncToRepo(repoStore, runId, state);
+  } catch {
+    console.error("Failed to sync orchestration failure state");
+  }
+}
+
+async function reattachWorkers(ctx: LoopContext): Promise<void> {
+  const { Agent } = await import("@cursor/february");
+  for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
+    if (!agent.agent_id) continue;
+    if (agent.status !== "launching" && agent.status !== "running" && agent.status !== "blocked") continue;
+    if (ctx.activeWorkers.has(taskId)) continue;
+    try {
+      const sdkAgent = ctx.agentClient.resumeCloudAgent(agent.agent_id, { apiKey: ctx.apiKey, model: { id: ctx.config.model } });
+      const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
+      const latest = runs.items[0];
+      if (!latest) {
+        await safeDisposeAgent(sdkAgent);
+        agent.status = "failed";
+        agent.summary = "Resume: no runs found for agent";
+        continue;
+      }
+      const handle: WorkerHandle = {
+        taskId,
+        sdkAgent,
+        run: latest,
+        assistantMessages: [],
+        transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId }),
+        done: Promise.resolve(),
+      };
+      const task = ctx.config.tasks.find((t) => t.id === taskId);
+      const info = { repoUrl: "", ref: "", runLine: false, planRef: null as string | null };
+      if (task) {
+        try {
+          const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+          const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
+          info.repoUrl = repoUrl;
+          info.ref = ref;
+          info.planRef = resolvePlanRefForTask(task, ctx.config);
+          info.runLine = Boolean(info.planRef) && !task.create_repo && ctx.config.target.branch_layout === "consolidated" && ctx.config.target.consolidate_prs;
+        } catch {
+          /* ignore */
+        }
+      }
+      handle.done = runWorkerStream(ctx, handle, info);
+      ctx.activeWorkers.set(taskId, handle);
+    } catch (err) {
+      agent.status = "failed";
+      agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
+      markStateDirty(ctx);
+    }
+  }
+}
+
+async function orchestrationLoop(ctx: LoopContext): Promise<void> {
+  ctx.wakeup = createWakeup();
+  try {
+    const existing = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+    if (existing) {
+      ctx.stopRequested.value = true;
+    }
+  } catch {
+    /* ignore; the poller will retry */
+  }
+  const pollController = new AbortController();
+  const stopPoller = (async () => {
+    while (!ctx.stopRequested.value) {
+      try {
+        await delay(STOP_POLL_INTERVAL_MS, undefined, { signal: pollController.signal });
+      } catch {
+        return;
+      }
+      if (ctx.stopRequested.value) return;
+      try {
+        const content = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+        if (content) {
+          ctx.stopRequested.value = true;
+          triggerWakeup(ctx);
+          return;
+        }
+      } catch {
+        /* retry next tick */
+      }
+    }
+  })();
+
+  try {
+    while (true) {
+      if (ctx.stopRequested.value) {
+        await checkStopRequested(ctx);
+        return;
+      }
+      await handleBlockedTasks(ctx);
+      await launchReadyTasks(ctx);
+      await writeProgress(ctx);
+      if (await checkCompletion(ctx)) return;
+      if (await checkFailure(ctx)) return;
+      const wakeController = new AbortController();
+      const timer = delay(MAX_WAKEUP_INTERVAL_MS, undefined, { signal: wakeController.signal }).catch(() => {});
+      await Promise.race([ctx.wakeup.promise, timer]);
+      wakeController.abort();
+    }
+  } finally {
+    ctx.stopRequested.value = true;
+    triggerWakeup(ctx);
+    pollController.abort();
+    await stopPoller.catch(() => {});
+    for (const handle of ctx.activeWorkers.values()) {
+      await safeDisposeAgent(handle.sdkAgent);
+    }
+  }
+}
+
+export async function runOrchestration(runId: string, agentClient: AgentClient, repoStore: RepoStoreClient): Promise<void> {
+  const configStr = await repoStore.readFile(runId, "config.yaml");
+  let config = parseConfig(configStr);
+  config = canonicalizeOrchestratorConfig(config);
+
+  const apiKey = process.env.CURSOR_API_KEY ?? "";
+  const ghToken = process.env.GH_TOKEN ?? "";
+
+  let planningRan = false;
+  let planningOk = false;
+  if (config.prompt && !config.tasks.length) {
+    planningRan = true;
+    const planContent = await repoStore.readFile(runId, "task-plan.json");
+    if (planContent) {
+      try {
+        const ghUser = await resolveGithubUsername(ghToken);
+        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+        config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+        const parsedTasks = parseTaskPlan(planContent, config);
+        config.tasks = parsedTasks;
+        const canonReuse = canonicalizeOrchestratorConfig(config);
+        config.repositories = canonReuse.repositories;
+        config.tasks = canonReuse.tasks;
+        config.delegation_map = canonReuse.delegation_map;
+        await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_completed", `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`, null, {
+            phase_id: "planning",
+            agent_kind: "phase",
+          }),
+        );
+        planningOk = true;
+      } catch {
+        /* try full planning */
+      }
+    }
+    if (!planningOk) {
+      planningOk = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
+    }
+  }
+
+  validateConfig(config);
+
+  let state: OrchestrationState;
+  try {
+    state = await syncFromRepo(repoStore, runId);
+  } catch {
+    state = createInitialState(config, runId);
+  }
+
+  reconcileAgentsFromConfig(state, config);
+
+  if (state.status === "pending") {
+    state.status = "running";
+    state.started_at = nowIso();
+    seedMainAgent(state, { agent_id: state.orchestrator_agent_id, status: "running", started_at: state.started_at });
+    await syncToRepo(repoStore, runId, state);
+    await appendEvent(
+      repoStore,
+      runId,
+      makeEvent("orchestration_started", "Orchestration started", null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
+    );
+  }
+  if (planningRan) {
+    setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
+    await syncToRepo(repoStore, runId, state);
+  }
+
+  const graph = buildDependencyGraph(config.tasks);
+  const ctx: LoopContext = {
+    state,
+    config,
+    graph,
+    agentClient,
+    repoStore,
+    runId,
+    apiKey,
+    ghToken,
+    activeWorkers: new Map(),
+    dirty: { value: true },
+    wakeup: createWakeup(),
+    stopRequested: { value: false },
+  };
+
+  try {
+    await reattachWorkers(ctx);
+    await orchestrationLoop(ctx);
+  } catch (exc) {
+    console.error("Orchestration loop failed", exc);
+    await persistUnexpectedFailure(state, repoStore, runId, exc);
+    throw exc;
+  }
+  if (state.status === "failed") {
+    throw new Error(state.error ? `Orchestration failed: ${state.error}` : "Orchestration failed");
+  }
 }
 
 export function loadSecretsFromRepo(runId: string): { GH_TOKEN: string; CURSOR_API_KEY: string } {
@@ -1259,7 +1537,7 @@ export async function runOrchestrationMain(): Promise<void> {
   }
   process.env.GH_TOKEN = secrets.GH_TOKEN;
   process.env.CURSOR_API_KEY = secrets.CURSOR_API_KEY;
-  const cursorClient = new CursorClient(secrets.CURSOR_API_KEY);
+  const agentClient = createDefaultAgentClient(secrets.CURSOR_API_KEY);
   const repoStore = new RepoStoreClient(secrets.GH_TOKEN, bootstrapOwner, bootstrapRepo);
-  await runOrchestration(runId, cursorClient, repoStore);
+  await runOrchestration(runId, agentClient, repoStore);
 }
