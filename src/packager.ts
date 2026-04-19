@@ -17,6 +17,20 @@ function readText(p: string): string {
   return readFileSync(p, "utf8");
 }
 
+function parseSdkVersion(): string {
+  const raw = readText(join(PROJECT_ROOT, "package.json"));
+  const pkg = JSON.parse(raw) as { dependencies?: Record<string, string> };
+  const declared = pkg.dependencies?.["@cursor/february"];
+  if (!declared || typeof declared !== "string") {
+    throw new Error("package.json must declare @cursor/february in dependencies");
+  }
+  return declared;
+}
+
+export const REQUIRED_SDK_PACKAGE = "@cursor/february";
+export const REQUIRED_SDK_VERSION: string = parseSdkVersion();
+export const REQUIRED_SDK_SPEC: string = `${REQUIRED_SDK_PACKAGE}@${REQUIRED_SDK_VERSION}`;
+
 export function packageRuntimeSnapshot(): Record<string, string> {
   const files: Record<string, string> = {};
   for (const rel of RUNTIME_METADATA_PATHS) {
@@ -66,10 +80,13 @@ export function createRuntimeMetadata(files: Record<string, string> | null): Rec
       sha256: createHash("sha256").update(content, "utf8").digest("hex"),
     }));
   return {
-    version: "2",
+    version: "3",
     digest: buildRuntimeDigest(runtimeFiles),
     ref: buildRuntimeRef(runtimeFiles),
     entrypoint: "node dist/orchestrator-runtime.cjs",
+    sdk_package: REQUIRED_SDK_PACKAGE,
+    sdk_version: REQUIRED_SDK_VERSION,
+    sdk_spec: REQUIRED_SDK_SPEC,
     files: fileList,
   };
 }

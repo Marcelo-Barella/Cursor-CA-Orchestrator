@@ -1,6 +1,7 @@
-import { CursorClient } from "../../api/cursor-client.js";
+import { createDefaultAgentClient } from "../../sdk/agent-client.js";
 import { RepoStoreClient } from "../../api/repo-store.js";
 import { ensureBootstrapRepo, resolveGithubUser, BOOTSTRAP_ENTRYPOINT, BOOTSTRAP_INSTALL_COMMAND } from "../../bootstrap.js";
+import { REQUIRED_SDK_SPEC, REQUIRED_SDK_VERSION } from "../../packager.js";
 import {
   canonicalizeOrchestratorConfig,
   resolveConfigPrecedence,
@@ -217,6 +218,8 @@ export function buildOrchestrationLaunchPrompt(opts: {
     `export CURSOR_ORCH_RUNTIME_REF='${opts.runtimeRef}'`,
     `export BOOTSTRAP_OWNER='${opts.bootstrapOwner}'`,
     `export BOOTSTRAP_REPO='${opts.bootstrapRepoName}'`,
+    `export CURSOR_ORCH_SDK_SPEC='${REQUIRED_SDK_SPEC}'`,
+    `export CURSOR_ORCH_SDK_VERSION='${REQUIRED_SDK_VERSION}'`,
     BOOTSTRAP_INSTALL_COMMAND,
     BOOTSTRAP_ENTRYPOINT,
     "If the install command fails, stop and report the exact error output.",
@@ -278,7 +281,7 @@ export async function runOrchestrationCli(
     `Request stop when needed: cursor-orch stop --run ${orchestrationId}`,
   );
 
-  const cursorClient = new CursorClient(cursorApiKey);
+  const agentClient = createDefaultAgentClient(cursorApiKey);
   const repoUrl = `https://github.com/${owner}/${repoInfo.name}`;
   const launchPrompt = buildOrchestrationLaunchPrompt({
     runId: orchestrationId,
@@ -286,25 +289,29 @@ export async function runOrchestrationCli(
     bootstrapOwner: owner,
     bootstrapRepoName: repoInfo.name,
   });
-  const agent = await withOrchestratorLaunchProgress(
+  const { agentId, runId: agentRunId } = await withOrchestratorLaunchProgress(
     `Launching orchestrator agent (${owner}/${repoInfo.name})`,
     async (updateMessage) => {
-      updateMessage("Calling Cursor API…");
-      return cursorClient.launchAgent(
-        launchPrompt,
+      updateMessage("Creating SDK agent…");
+      const sdkAgent = agentClient.createCloudAgent({
+        apiKey: cursorApiKey,
+        model: config.model,
         repoUrl,
-        runtimeRef,
-        config.model,
-        `cursor-orch-run-${orchestrationId}`,
-        false,
-      );
+        startingRef: runtimeRef,
+        branchName: `cursor-orch-run-${orchestrationId}`,
+        autoCreatePR: false,
+        skipReviewerRequest: true,
+      });
+      updateMessage("Sending launch prompt…");
+      const run = await sdkAgent.send(launchPrompt);
+      return { agentId: sdkAgent.agentId, runId: run.id };
     },
   );
-  console.log(`Orchestrator ${agent.id} ${agent.status}.`);
+  console.log(`Orchestrator ${agentId} launching (run=${agentRunId}).`);
 
-  initialState.orchestrator_agent_id = agent.id;
+  initialState.orchestrator_agent_id = agentId;
   seedMainAgent(initialState, {
-    agent_id: agent.id,
+    agent_id: agentId,
     status: "launching",
     started_at: initialState.started_at,
   });
