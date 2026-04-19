@@ -1,12 +1,24 @@
-import { CursorClient, type Message } from "../../api/cursor-client.js";
 import { RepoStoreClient } from "../../api/repo-store.js";
-import { deserialize } from "../../state.js";
+import { deserialize, readEvents } from "../../state.js";
 import { tui } from "../../tui/style.js";
+import type { SDKMessage } from "../../sdk/agent-client.js";
 
 export interface LogsOptions {
   run: string;
   task?: string;
 }
+
+type FeedbackOptions = {
+  code: string;
+  severity: string;
+  title: string;
+  what_happened: string;
+  next_step: string;
+  alternative: string;
+  example: string;
+};
+
+type FailOptions = FeedbackOptions & { exitCode: number };
 
 function printNextActions(...actions: string[]): void {
   if (!actions.length) return;
@@ -16,15 +28,7 @@ function printNextActions(...actions: string[]): void {
   }
 }
 
-function renderFeedback(opts: {
-  code: string;
-  severity: string;
-  title: string;
-  what_happened: string;
-  next_step: string;
-  alternative: string;
-  example: string;
-}): void {
+function renderFeedback(opts: FeedbackOptions): void {
   console.log(
     [
       `[${opts.severity}] ${opts.code} ${opts.title}`,
@@ -36,21 +40,12 @@ function renderFeedback(opts: {
   );
 }
 
-function fail(opts: {
-  code: string;
-  severity: string;
-  title: string;
-  what_happened: string;
-  next_step: string;
-  alternative: string;
-  example: string;
-  exitCode: number;
-}): never {
+function fail(opts: FailOptions): never {
   renderFeedback(opts);
   process.exit(opts.exitCode);
 }
 
-function requireEnv(names: string[], opts: Parameters<typeof fail>[0]): Record<string, string> {
+function requireEnv(names: string[], opts: FailOptions): Record<string, string> {
   const values: Record<string, string> = {};
   const missing: string[] = [];
   for (const name of names) {
@@ -70,19 +65,7 @@ function requireEnv(names: string[], opts: Parameters<typeof fail>[0]): Record<s
   return values;
 }
 
-function getEnv(
-  name: string,
-  failOpts: {
-    code: string;
-    severity: string;
-    title: string;
-    what_happened: string;
-    next_step: string;
-    alternative: string;
-    example: string;
-    exitCode: number;
-  },
-): string {
+function getEnv(name: string, failOpts: FailOptions): string {
   const value = process.env[name];
   if (value === undefined || !value.trim()) {
     const actual = value === undefined ? "missing" : "empty";
@@ -102,7 +85,7 @@ function makeRepoStore(ghToken: string): RepoStoreClient {
     what_happened: "Command requires BOOTSTRAP_OWNER.",
     next_step: "Set BOOTSTRAP_OWNER.",
     alternative: "Export inline.",
-    example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch status --run <id>",
+    example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch logs --run <id>",
     exitCode: 1,
   });
   const repo = getEnv("BOOTSTRAP_REPO", {
@@ -112,34 +95,83 @@ function makeRepoStore(ghToken: string): RepoStoreClient {
     what_happened: "Command requires BOOTSTRAP_REPO.",
     next_step: "Set BOOTSTRAP_REPO.",
     alternative: "Export inline.",
-    example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch status --run <id>",
+    example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch logs --run <id>",
     exitCode: 1,
   });
   return new RepoStoreClient(ghToken, owner, repo);
 }
 
-function renderMessage(message: Message): void {
-  const label =
-    message.role === "user"
-      ? tui.bold(tui.cyan(`[${message.role}]`))
-      : tui.bold(tui.green(`[${message.role}]`));
-  console.log(label, message.text);
-  console.log();
+function renderSdkMessage(event: SDKMessage, taskId: string): void {
+  switch (event.type) {
+    case "assistant": {
+      const blocks = event.message.content
+        .filter((b) => b.type === "text")
+        .map((b) => (b.type === "text" ? b.text : ""))
+        .join("");
+      console.log(tui.bold(tui.green(`[assistant ${taskId}]`)));
+      if (blocks.trim()) console.log(blocks);
+      console.log();
+      break;
+    }
+    case "user": {
+      const text = event.message.content.map((b) => b.text).join("");
+      console.log(tui.bold(tui.cyan(`[user ${taskId}]`)));
+      if (text.trim()) console.log(text);
+      console.log();
+      break;
+    }
+    case "thinking": {
+      console.log(tui.dim(`[thinking ${taskId}] ${event.text.slice(0, 2000)}`));
+      break;
+    }
+    case "tool_call": {
+      const args = event.args !== undefined ? JSON.stringify(event.args).slice(0, 400) : "";
+      console.log(tui.magenta(`[tool_call ${taskId}] ${event.name} ${event.status}${args ? ` args=${args}` : ""}`));
+      break;
+    }
+    case "status": {
+      console.log(tui.yellow(`[status ${taskId}] ${event.status}${event.message ? ` — ${event.message}` : ""}`));
+      break;
+    }
+    case "task": {
+      console.log(tui.yellow(`[task ${taskId}] ${event.status ?? ""} ${event.text ?? ""}`.trim()));
+      break;
+    }
+    case "system": {
+      console.log(tui.dim(`[system ${taskId}] subtype=${event.subtype ?? ""} model=${event.model ?? ""}`));
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function parseTranscriptLine(line: string): SDKMessage | null {
+  const stripped = line.trim();
+  if (!stripped) return null;
+  try {
+    const parsed = JSON.parse(stripped) as { event?: SDKMessage };
+    if (parsed && typeof parsed === "object" && parsed.event) {
+      return parsed.event;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export async function runLogsCommand(opts: LogsOptions): Promise<void> {
-  const env = requireEnv(["CURSOR_API_KEY", "GH_TOKEN"], {
+  const env = requireEnv(["GH_TOKEN"], {
     code: "LOGS-001",
     severity: "FATAL",
     title: "Missing credentials for logs retrieval",
-    what_happened: "logs needs GH_TOKEN for state and CURSOR_API_KEY for conversation fetch.",
-    next_step: "Set required variables and retry logs.",
+    what_happened: "logs needs GH_TOKEN to read run artifacts.",
+    next_step: "Set GH_TOKEN and retry logs.",
     alternative: "Pass env vars inline in scripts.",
-    example: "CURSOR_API_KEY=... GH_TOKEN=... cursor-orch logs --run <run_id>",
+    example: "GH_TOKEN=... cursor-orch logs --run <run_id>",
     exitCode: 1,
   });
   const repoStore = makeRepoStore(env.GH_TOKEN);
-  const cursorClient = new CursorClient(env.CURSOR_API_KEY);
   const content = await repoStore.readFile(opts.run, "state.json");
   if (!content) {
     fail({
@@ -155,7 +187,6 @@ export async function runLogsCommand(opts: LogsOptions): Promise<void> {
   }
 
   const state = deserialize(content);
-  let targetAgentId: string | null = null;
 
   if (opts.task) {
     const agent = state.agents[opts.task];
@@ -171,70 +202,46 @@ export async function runLogsCommand(opts: LogsOptions): Promise<void> {
         exitCode: 1,
       });
     }
-
-    if (!agent.agent_id) {
+    const transcript = await repoStore.readFile(opts.run, `transcripts/${opts.task}.jsonl`);
+    if (!transcript.trim()) {
       renderFeedback({
-        code: "LOGS-004",
-        severity: "WARN",
-        title: "Task has no agent conversation yet",
-        what_happened: `The task exists but no agent id has been assigned (status: ${agent.status}).`,
-        next_step: "Wait for scheduling and check status again.",
-        alternative: "Poll status before requesting task logs.",
-        example: "cursor-orch status --run <run_id> --watch",
+        code: "LOGS-007",
+        severity: "INFO",
+        title: "No transcript available yet",
+        what_happened: `The worker for task '${opts.task}' has not streamed any events yet (status: ${agent.status}).`,
+        next_step: "Wait briefly and request logs again.",
+        alternative: "Poll logs with interval in automation.",
+        example: "while true; do cursor-orch logs --run <run_id> --task <task_id>; sleep 15; done",
       });
       return;
     }
-
-    targetAgentId = agent.agent_id;
-  } else {
-    if (!state.orchestrator_agent_id) {
-      renderFeedback({
-        code: "LOGS-005",
-        severity: "WARN",
-        title: "No orchestrator agent id recorded",
-        what_happened: "The run state does not contain an orchestrator conversation target.",
-        next_step: "Check if run initialization completed successfully.",
-        alternative: "Rerun orchestration with valid credentials and config.",
-        example: "cursor-orch run --config ./orchestrator.yaml",
-      });
-      return;
+    for (const line of transcript.split("\n")) {
+      const event = parseTranscriptLine(line);
+      if (!event) continue;
+      renderSdkMessage(event, opts.task);
     }
-
-    targetAgentId = state.orchestrator_agent_id;
+    printNextActions(`Refresh run state: cursor-orch status --run ${opts.run}`);
+    return;
   }
 
-  let messages: Message[];
-  try {
-    messages = await cursorClient.getConversation(targetAgentId);
-  } catch (error) {
-    fail({
-      code: "LOGS-006",
-      severity: "ERROR",
-      title: "Failed to fetch conversation logs",
-      what_happened: `The conversation API request failed for the target agent: ${String(error)}.`,
-      next_step: "Verify CURSOR_API_KEY and agent id validity, then retry.",
-      alternative: "Retry with backoff in scripts.",
-      example: "cursor-orch logs --run <run_id> --task <task_id>",
-      exitCode: 1,
-    });
-  }
-
-  if (!messages.length) {
+  const events = await readEvents(repoStore, opts.run);
+  if (!events.length) {
     renderFeedback({
       code: "LOGS-007",
       severity: "INFO",
-      title: "No messages available yet",
-      what_happened: "The target conversation exists but has no messages.",
+      title: "No orchestration events yet",
+      what_happened: "The run has not produced any events yet.",
       next_step: "Wait briefly and request logs again.",
       alternative: "Poll logs with interval in automation.",
       example: "while true; do cursor-orch logs --run <run_id>; sleep 15; done",
     });
     return;
   }
-
-  for (const message of messages) {
-    renderMessage(message);
+  for (const event of events) {
+    const ts = event.timestamp;
+    const taskLabel = event.task_id ? ` ${event.task_id}` : "";
+    const line = `${tui.dim(`[${ts}]`)} ${tui.bold(event.event_type)}${taskLabel} ${event.detail}`;
+    console.log(line);
   }
-
   printNextActions(`Refresh run state: cursor-orch status --run ${opts.run}`);
 }

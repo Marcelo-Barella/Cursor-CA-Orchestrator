@@ -1,4 +1,3 @@
-import { CursorClient } from "../../api/cursor-client.js";
 import { RepoStoreClient } from "../../api/repo-store.js";
 import { deserialize } from "../../state.js";
 
@@ -102,14 +101,14 @@ function makeRepoStore(ghToken: string): RepoStoreClient {
 }
 
 export async function runStopCommand(opts: StopOptions): Promise<void> {
-  const env = requireEnv(["CURSOR_API_KEY", "GH_TOKEN"], {
+  const env = requireEnv(["GH_TOKEN"], {
     code: "STOP-001",
     severity: "FATAL",
     title: "Missing credentials for stop operation",
-    what_happened: "stop requires GH_TOKEN and CURSOR_API_KEY.",
-    next_step: "Set required variables and retry stop.",
+    what_happened: "stop requires GH_TOKEN to write the stop sentinel to the bootstrap repo.",
+    next_step: "Set GH_TOKEN and retry stop.",
     alternative: "Provide env vars inline for one-shot stop.",
-    example: "CURSOR_API_KEY=... GH_TOKEN=... cursor-orch stop --run <run_id>",
+    example: "GH_TOKEN=... cursor-orch stop --run <run_id>",
     exitCode: 1,
   });
   const repoStore = makeRepoStore(env.GH_TOKEN);
@@ -127,7 +126,7 @@ export async function runStopCommand(opts: StopOptions): Promise<void> {
     });
   }
 
-  const state = deserialize(content);
+  deserialize(content);
   const stopPayload = JSON.stringify({
     requested_at: new Date().toISOString(),
     requested_by: "cli",
@@ -136,24 +135,15 @@ export async function runStopCommand(opts: StopOptions): Promise<void> {
   console.log("Writing stop request to run branch...");
   await repoStore.writeFile(opts.run, "stop-requested.json", stopPayload);
 
-  if (state.orchestrator_agent_id) {
-    console.log(`Stopping orchestrator agent ${state.orchestrator_agent_id}...`);
-    const cursorClient = new CursorClient(env.CURSOR_API_KEY);
-    try {
-      await cursorClient.stopAgent(state.orchestrator_agent_id);
-    } catch {
-      console.warn("Failed to stop orchestrator agent via API");
-      renderFeedback({
-        code: "STOP-003",
-        severity: "WARN",
-        title: "Stop request saved, API stop was not confirmed",
-        what_happened: "stop-requested.json was written but direct agent stop call failed.",
-        next_step: "Monitor run status to confirm halt on next loop.",
-        alternative: "Poll status in a script until state changes.",
-        example: "cursor-orch status --run <run_id> --watch",
-      });
-    }
-  }
+  renderFeedback({
+    code: "STOP-003",
+    severity: "INFO",
+    title: "Stop sentinel written",
+    what_happened: "stop-requested.json was written to the run branch; the Cursor SDK does not support cloud agent cancellation, so the orchestrator will dispose workers and halt on its next loop iteration.",
+    next_step: "Monitor run status until it reports 'stopped'.",
+    alternative: "Poll status in a script until state changes.",
+    example: "cursor-orch status --run <run_id> --watch",
+  });
 
   console.log("Stop requested. The orchestrator will halt on its next loop iteration.");
   printNextActions(
