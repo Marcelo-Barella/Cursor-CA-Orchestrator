@@ -3,30 +3,27 @@ import { WORKER_SYSTEM_PROMPT } from "./system-prompt.js";
 
 const MAX_DEP_OUTPUT_BYTES = 50 * 1024;
 
+export const WORKER_OUTPUT_ARTIFACT_PATH = "cursor-orch-output.json";
+
 export type WorkerPromptOpts = {
   runBranch?: string;
   launchRef?: string;
   perTaskBranch?: string;
 };
 
-function buildWorkerPayloadPath(runId: string, taskId: string): string {
-  return `/tmp/cursor-orch-${runId}-${taskId}-payload.json`;
-}
-
 export function buildWorkerPrompt(
   task: TaskConfig,
   runId: string,
   dependencyOutputs: Record<string, Record<string, unknown>>,
-  bootstrapOwner = "",
-  bootstrapRepo = "",
   opts?: WorkerPromptOpts,
 ): string {
   const sections = [
     WORKER_SYSTEM_PROMPT,
+    sectionRunContext(runId),
     sectionTask(task),
     sectionDependencies(task, dependencyOutputs),
     opts?.runBranch ? sectionGitRunLine(opts.runBranch, opts.launchRef, opts.perTaskBranch) : "",
-    sectionOutputProtocol(task, runId, bootstrapOwner, bootstrapRepo),
+    sectionOutputProtocol(task),
     sectionRules(opts?.runBranch),
   ];
   return sections.filter(Boolean).join("\n\n");
@@ -36,18 +33,21 @@ export function buildRepoCreationPrompt(
   task: TaskConfig,
   runId: string,
   dependencyOutputs: Record<string, Record<string, unknown>>,
-  bootstrapOwner = "",
-  bootstrapRepo = "",
 ): string {
   const sections = [
     WORKER_SYSTEM_PROMPT,
+    sectionRunContext(runId),
     sectionTask(task),
     sectionRepoCreation(task),
     sectionDependencies(task, dependencyOutputs),
-    sectionOutputProtocol(task, runId, bootstrapOwner, bootstrapRepo),
+    sectionOutputProtocol(task),
     sectionRules(),
   ];
   return sections.filter(Boolean).join("\n\n");
+}
+
+function sectionRunContext(runId: string): string {
+  return `ORCHESTRATION RUN: ${runId}`;
 }
 
 function sectionRepoCreation(task: TaskConfig): string {
@@ -62,10 +62,10 @@ function sectionRepoCreation(task: TaskConfig): string {
     "Downstream tasks depend on this value to locate the repository.",
     "",
     "CRITICAL: You are running in a read-only bootstrap repository. Do NOT write any code ",
-    "or files into this repository. To create the new repo and populate it with code:\n",
-    "  1. Create the repo: `gh repo create <owner>/<repo> --private` (or use --public/--description as needed)\n",
-    "  2. Clone it: `gh repo clone <owner>/<repo> /tmp/<repo>` (or `git clone https://github.com/<owner>/<repo>.git /tmp/<repo>`; GitHub auth is preconfigured in this environment)\n",
-    "  3. Write code in the cloned directory, commit, and push.\n",
+    "or files into this repository. To create the new repo and populate it with code:",
+    "  1. Create the repo: `gh repo create <owner>/<repo> --private` (or use --public/--description as needed)",
+    "  2. Clone it: `gh repo clone <owner>/<repo> /tmp/<repo>` (or `git clone https://github.com/<owner>/<repo>.git /tmp/<repo>`; GitHub auth is preconfigured in this environment)",
+    "  3. Write code in the cloned directory, commit, and push.",
     "All code MUST go to the new repo, not to the current working directory.",
   );
   return lines.join("\n");
@@ -119,41 +119,30 @@ function sectionDependencies(task: TaskConfig, dependencyOutputs: Record<string,
   return lines.join("\n");
 }
 
-function sectionOutputProtocol(
-  task: TaskConfig,
-  runId: string,
-  bootstrapOwner: string,
-  bootstrapRepo: string,
-): string {
-  const payloadPath = buildWorkerPayloadPath(runId, task.id);
-  return `WHEN YOU ARE DONE:
-Run the following commands in the shell to report your results.
-Replace the placeholder values with your actual output.
-The \`gh\` CLI uses GitHub credentials already configured for this agent; do not paste or export tokens in the shell.
+function sectionOutputProtocol(task: TaskConfig): string {
+  return `WHEN YOU ARE DONE (REPORTING PROTOCOL):
+The orchestrator collects your results through two channels. Produce BOTH.
 
-\`\`\`bash
-node <<'NJS'
-const fs = require("fs");
-const output = {
-  task_id: "${task.id}",
-  status: "completed",
-  summary: "DESCRIBE WHAT YOU DID HERE",
-  blocked_reason: null,
-  outputs: { key: "PUT ARTIFACTS OTHER TASKS MAY NEED HERE" },
-};
-const content = Buffer.from(JSON.stringify(output, null, 2)).toString("base64");
-fs.writeFileSync(
-  "${payloadPath}",
-  JSON.stringify({ message: "agent output", content, branch: "run/${runId}" }),
-);
-NJS
+CHANNEL 1 (primary) — workspace artifact:
+Write the following JSON to a file named \`${WORKER_OUTPUT_ARTIFACT_PATH}\` at the repository workspace root.
+Do NOT stage, commit, or push this file. Leave it uncommitted so the orchestrator can read it as a workspace artifact.
 
-gh api --method PUT \\
-  /repos/${bootstrapOwner}/${bootstrapRepo}/contents/agent-${task.id}.json \\
-  --input ${payloadPath}
+CHANNEL 2 (backup) — final assistant message:
+Include the same JSON as a fenced \`\`\`json\`\`\` block at the end of your last assistant message. If the artifact is unavailable, the orchestrator will parse this block instead.
+
+JSON schema (identical on both channels):
+
+\`\`\`json
+{
+  "task_id": "${task.id}",
+  "status": "completed" | "blocked" | "failed",
+  "summary": "DESCRIBE WHAT YOU DID HERE",
+  "blocked_reason": null,
+  "outputs": { "key": "PUT ARTIFACTS OTHER TASKS MAY NEED HERE" }
+}
 \`\`\`
 
-Edit the \`output\` dict before running:
+Edit the JSON before reporting:
 - Set "summary" to a concise description of what you did.
 - Set "outputs" to a dict of artifacts downstream tasks may need (interfaces, schemas, file paths). If none needed, use an empty dict.
 - If you are blocked, set "status" to "blocked" and "blocked_reason" to a specific explanation.`;
@@ -163,16 +152,15 @@ function sectionRules(runLineBranch?: string): string {
   if (runLineBranch) {
     return `RULES:
 - Focus only on your assigned task. Do not modify unrelated code.
-- If you are blocked, report it using the output script with status "blocked" and a specific blocked_reason.
-- Do not attempt to communicate with other agents. Only write to your designated output file on the bootstrap repo (per the protocol above).
+- If you are blocked, report it using the output JSON (both channels) with status "blocked" and a specific blocked_reason.
+- Do not attempt to communicate with other agents. Report only via the artifact + final assistant JSON block described above.
 - Do not create a pull request yourself.
-# MANDATORY: Commit and push your changes to branch "${runLineBranch}" on the task repository before reporting completion`;
+# MANDATORY: Commit and push your code changes to branch "${runLineBranch}" on the task repository before reporting completion. Do NOT push \`${WORKER_OUTPUT_ARTIFACT_PATH}\`.`;
   }
   return `RULES:
 - Focus only on your assigned task. Do not modify unrelated code.
-- If you are blocked, report it using the output script with status "blocked" and a specific blocked_reason.
-- Do not attempt to communicate with other agents. Only write to your designated run branch file.
+- If you are blocked, report it using the output JSON (both channels) with status "blocked" and a specific blocked_reason.
+- Do not attempt to communicate with other agents. Report only via the artifact + final assistant JSON block described above.
 - Create a clean, focused PR with a descriptive title and body.
-- Do not read or write any run branch files other than your designated output file.
-# MANDATORY: At the end of your task, commit and push your changes directly to the repository`;
+# MANDATORY: At the end of your task, commit and push your code changes directly to the repository. Do NOT push \`${WORKER_OUTPUT_ARTIFACT_PATH}\`.`;
 }
