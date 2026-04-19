@@ -1,6 +1,6 @@
 # cursor-orch
 
-A TypeScript CLI for Node.js 20+ that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, uses per-run branches on that repo as a coordination bulletin board, and launches an orchestrator Cloud Agent that manages worker agents targeting your repositories.
+A TypeScript CLI for Node.js 20+ that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, uses per-run branches on that repo as a coordination bulletin board, and launches an orchestrator Cloud Agent that drives worker agents through the official Cursor TypeScript SDK (`@cursor/february`).
 
 ## Prerequisites
 
@@ -8,6 +8,8 @@ A TypeScript CLI for Node.js 20+ that orchestrates multiple Cursor Cloud Agents 
 - GitHub personal access token for `GH_TOKEN` with `repo` scope for bootstrap repository creation and updates
 - Cursor API key for `CURSOR_API_KEY`
 - For `status`, `logs`, and `stop` against an existing run, set `BOOTSTRAP_OWNER` and `BOOTSTRAP_REPO` to the GitHub owner and repository name of your bootstrap repo (same values used in the run output)
+
+The bootstrap orchestrator installs `@cursor/february` at launch time inside the cloud VM (the CLI bundle pins the version). That SDK ships native `sqlite3` and vendored `rg` binaries, so the install can take a couple of minutes on a cold start.
 
 ## Onboarding: Clone to First Run
 
@@ -292,19 +294,18 @@ User Terminal                     GitHub                          Cursor Cloud
 
 ### Three Components
 
-1. **Local CLI** -- Runs in your terminal. Provides the interactive REPL, creates config, provisions the bootstrap repo, creates a per-run branch with runtime files, launches the orchestrator agent, and provides a dashboard.
+1. **Local CLI** -- Runs in your terminal. Provides the interactive REPL, creates config, provisions the bootstrap repo, creates a per-run branch with runtime files, and launches the orchestrator agent via the Cursor TypeScript SDK. Exits once the orchestrator is running; the cloud agent continues independently.
 
-2. **Bootstrap Repo** -- A minimal private repo in your GitHub account (`cursor-orch-bootstrap`). Contains Cursor rules and pinned runtime files on dedicated refs. The orchestrator agent runs `node dist/orchestrator-runtime.cjs` with environment variables pointing at the run branch.
+2. **Bootstrap Repo** -- A minimal private repo in your GitHub account (`cursor-orch-bootstrap`). Contains Cursor rules and a pinned runtime snapshot (`dist/orchestrator-runtime.cjs` + `package.json`) on a `runtime/<sha>` ref. The orchestrator agent first runs `npm install --no-save @cursor/february@<pinned>` to pull the SDK into the cloud VM, then starts `node dist/orchestrator-runtime.cjs`.
 
-3. **Cloud Agents** -- The orchestrator agent runs against the bootstrap repo and manages the task graph. Worker agents run against your target repositories, each receiving a self-contained prompt with task instructions and shell steps to report results via the run branch.
+3. **Cloud Agents** -- The orchestrator agent drives the task graph using `@cursor/february` -- every worker launch is `Agent.create({ cloud: { repos, branchName, autoCreatePR } })` followed by `run.stream()` and `run.wait()`. Worker results arrive as workspace artifacts (`cursor-orch-output.json`, read via `agent.listArtifacts()` + `agent.downloadArtifact()`), with the same JSON also included as a fenced ```json block in the final assistant message as a fallback.
 
 ### Per-Run Branch
 
 Each orchestration run creates a branch `run/<run_id>` on the bootstrap repository that serves as a coordination bulletin board:
 
-- **CLI writes once:** config.yaml, runtime files, manifest
-- **Orchestrator writes:** state.json, summary.md, events.jsonl
-- **Workers write:** agent-{task_id}.json (their individual output files)
+- **CLI writes once:** config.yaml, runtime files, manifest, secrets.json
+- **Orchestrator writes:** state.json, summary.md, events.jsonl, transcripts/<task_id>.jsonl, agent-<task_id>.json (the orchestrator pulls the worker's artifact and writes the canonical file itself)
 - **CLI stop signal:** stop-requested.json
 
 Every file has exactly one writer. No concurrent writes to any file.
@@ -313,11 +314,11 @@ Every file has exactly one writer. No concurrent writes to any file.
 
 - Maximum 20 tasks per orchestration run
 - Workers are fully isolated and cannot communicate with each other
-- Orchestration logic is reactive polling (30-second intervals), not event-driven
+- The Cursor SDK does not yet support cloud-run cancellation; `cursor-orch stop` writes a sentinel file (`stop-requested.json`) and the orchestrator disposes each worker's SDK handle on its next iteration -- remote workloads may continue until they naturally complete or hit their timeout
 - GitHub repository and API limits apply (file size, rate limits)
-- Runtime payload (all orchestration code) must be under 1MB combined
+- Runtime payload (our own orchestration bundle) must be under 1MB combined; the SDK itself is fetched at agent startup and not counted here
 - Worker output per task capped at 512KB with automatic truncation
-- Rate limits: GitHub API (5,000 req/hour), Cursor API (conservative estimates)
+- Rate limits: GitHub API (5,000 req/hour), Cursor API (governed by the SDK)
 - The bootstrap repo Cursor rule contains literal credentials (repo must stay private)
 
 ## Publishing (maintainers)
