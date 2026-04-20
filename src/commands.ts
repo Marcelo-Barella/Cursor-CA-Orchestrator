@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
+import type { McpServerConfig } from "./config/types.js";
 import { copyToClipboard } from "./lib/clipboard.js";
 import { countOrchestrationPromptTokens } from "./lib/prompt-token-count.js";
 import type { Session } from "./session.js";
@@ -270,12 +271,192 @@ export function cmdHelp(): string {
   return lines.join("\n");
 }
 
+const MCP_SECRET_KEY_RE = /authorization|token|secret|password|api[_-]?key/i;
+
+function redactMcpValue(key: string, value: string): string {
+  if (!MCP_SECRET_KEY_RE.test(key)) {
+    return value;
+  }
+  return tui.dim("<redacted>");
+}
+
+function formatMcpServer(name: string, server: McpServerConfig): string[] {
+  const lines: string[] = [`  ${tui.bold(name)} ${tui.dim(`(${server.type})`)}`];
+  if (server.type === "stdio") {
+    lines.push(`    command: ${server.command}`);
+    if (server.args && server.args.length) {
+      lines.push(`    args: ${server.args.join(" ")}`);
+    }
+    if (server.env && Object.keys(server.env).length) {
+      const entries = Object.entries(server.env).map(([k, v]) => `${k}=${redactMcpValue(k, v)}`);
+      lines.push(`    env: ${entries.join(", ")}`);
+    }
+    if (server.cwd) {
+      lines.push(`    cwd: ${server.cwd}`);
+    }
+    return lines;
+  }
+  lines.push(`    url: ${server.url}`);
+  if (server.headers && Object.keys(server.headers).length) {
+    const entries = Object.entries(server.headers).map(([k, v]) => `${k}: ${redactMcpValue(k, v)}`);
+    lines.push(`    headers: ${entries.join(", ")}`);
+  }
+  if (server.auth) {
+    const parts: string[] = [`CLIENT_ID=${server.auth.CLIENT_ID}`];
+    if (server.auth.CLIENT_SECRET !== undefined) {
+      parts.push(`CLIENT_SECRET=${tui.dim("<redacted>")}`);
+    }
+    if (server.auth.scopes && server.auth.scopes.length) {
+      parts.push(`scopes=${server.auth.scopes.join(",")}`);
+    }
+    lines.push(`    auth: ${parts.join(", ")}`);
+  }
+  return lines;
+}
+
+function cmdMcpList(session: Session): string {
+  const servers = session.config.mcp_servers ?? {};
+  const names = Object.keys(servers);
+  if (!names.length) {
+    return tui.dim("No MCP servers configured.");
+  }
+  const lines = [tui.bold("MCP Servers:")];
+  for (const name of names) {
+    for (const entry of formatMcpServer(name, servers[name]!)) {
+      lines.push(entry);
+    }
+  }
+  return lines.join("\n");
+}
+
+function cmdMcpImport(session: Session, filePath: string): string {
+  if (!filePath) {
+    return tui.red("Usage: /mcp import <path>");
+  }
+  const target = path.resolve(filePath);
+  if (!existsSync(target)) {
+    return `${tui.red("File not found:")} ${filePath}`;
+  }
+  let result: { added: string[]; replaced: string[] };
+  try {
+    result = session.importMcpServersFromFile(target);
+  } catch (e) {
+    return `${tui.red("Error importing MCP servers:")} ${e instanceof Error ? e.message : String(e)}`;
+  }
+  const parts: string[] = [];
+  if (result.added.length) {
+    parts.push(`${tui.green("Added:")} ${result.added.join(", ")}`);
+  }
+  if (result.replaced.length) {
+    parts.push(`${tui.yellow("Replaced:")} ${result.replaced.join(", ")}`);
+  }
+  if (!parts.length) {
+    return tui.dim("No MCP servers found in file.");
+  }
+  return parts.join("\n");
+}
+
+function cmdMcpRemove(session: Session, name: string): string {
+  if (!name) {
+    return tui.red("Usage: /mcp remove <name>");
+  }
+  const removed = session.removeMcpServer(name);
+  if (removed) {
+    return `${tui.green("MCP server removed:")} ${tui.bold(name)}`;
+  }
+  return `${tui.red("MCP server not found:")} ${tui.bold(name)}`;
+}
+
+function cmdMcpClear(session: Session): string {
+  session.clearMcpServers();
+  return tui.green("All MCP servers removed.");
+}
+
+export function cmdMcp(session: Session, sub?: string, arg?: string): string {
+  const action = (sub ?? "list").toLowerCase();
+  switch (action) {
+    case "list":
+      return cmdMcpList(session);
+    case "import":
+      return cmdMcpImport(session, arg ?? "");
+    case "remove":
+      return cmdMcpRemove(session, arg ?? "");
+    case "clear":
+      return cmdMcpClear(session);
+    default:
+      return tui.red(`Unknown /mcp subcommand: ${sub}. Use list, import, remove, or clear.`);
+  }
+}
+
 export function cmdRun(session: Session): { errors: string[] } | { config: import("./config/types.js").OrchestratorConfig } {
   const errors = session.validate();
   if (errors.length) {
     return { errors };
   }
   return { config: session.buildConfig() };
+}
+
+export type RefreshResult =
+  | { ok: true; count: number; fetchedAt: Date }
+  | { ok: false; error: Error };
+
+export type RefreshDeps = {
+  refreshModels: () => Promise<RefreshResult>;
+  refreshRepos: () => Promise<RefreshResult>;
+  ageModels: () => Promise<Date | null>;
+  ageRepos: () => Promise<Date | null>;
+};
+
+function ageLabel(d: Date | null): string {
+  if (!d) return "none";
+  const ms = Date.now() - d.getTime();
+  const s = Math.max(1, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+export async function cmdRefresh(target: string | undefined, deps: RefreshDeps | null): Promise<string> {
+  if (!deps) {
+    return tui.red("CURSOR_API_KEY not set; cannot refresh cache.");
+  }
+  if (target === undefined) {
+    const [m, r] = await Promise.all([deps.ageModels(), deps.ageRepos()]);
+    return [
+      `${tui.bold("Cache ages:")}`,
+      `  models:       ${ageLabel(m)}`,
+      `  repositories: ${ageLabel(r)}`,
+    ].join("\n");
+  }
+  const t = target.toLowerCase();
+  if (t === "models") {
+    const r = await deps.refreshModels();
+    return r.ok
+      ? `${tui.green(`models refreshed:`)} ${r.count} items (age: ${ageLabel(r.fetchedAt)})`
+      : tui.red(`models refresh failed: ${r.error.message}`);
+  }
+  if (t === "repos") {
+    const r = await deps.refreshRepos();
+    return r.ok
+      ? `${tui.green(`repositories refreshed:`)} ${r.count} items (age: ${ageLabel(r.fetchedAt)})`
+      : tui.red(`repositories refresh failed: ${r.error.message}`);
+  }
+  if (t === "all") {
+    const m = await deps.refreshModels();
+    const r = await deps.refreshRepos();
+    const lines: string[] = [];
+    lines.push(m.ok
+      ? `${tui.green(`models refreshed:`)} ${m.count} items (age: ${ageLabel(m.fetchedAt)})`
+      : tui.red(`models refresh failed: ${m.error.message}`));
+    lines.push(r.ok
+      ? `${tui.green(`repositories refreshed:`)} ${r.count} items (age: ${ageLabel(r.fetchedAt)})`
+      : tui.red(`repositories refresh failed: ${r.error.message}`));
+    return lines.join("\n");
+  }
+  return tui.red("Usage: /refresh [models|repos|all]");
 }
 
 export const COMMANDS: Record<string, CommandInfo> = {
@@ -343,8 +524,20 @@ export const COMMANDS: Record<string, CommandInfo> = {
     usage: "/config [clear]",
     description: "Show current configuration summary, or reset all settings to defaults.",
   },
+  mcp: {
+    name: "mcp",
+    handler: cmdMcp as (...args: unknown[]) => unknown,
+    usage: "/mcp [list|import <path>|remove <name>|clear]",
+    description: "Configure MCP servers passed to orchestrator cloud agents.",
+  },
   save: { name: "save", handler: cmdSave as (...args: unknown[]) => unknown, usage: "/save [path]", description: "Save config to file or session." },
   load: { name: "load", handler: cmdLoad as (...args: unknown[]) => unknown, usage: "/load <path>", description: "Load config from a YAML file." },
   help: { name: "help", handler: cmdHelp as (...args: unknown[]) => unknown, usage: "/help", description: "Show this help message." },
   run: { name: "run", handler: cmdRun as (...args: unknown[]) => unknown, usage: "/run", description: "Validate and run the orchestrator." },
+  refresh: {
+    name: "refresh",
+    handler: (() => "") as (...args: unknown[]) => unknown,
+    usage: "/refresh [models|repos|all]",
+    description: "Bypass TTL and re-fetch Cursor API cache; no args prints cache ages.",
+  },
 };

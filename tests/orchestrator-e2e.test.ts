@@ -137,6 +137,54 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.status).toBe("failed");
   });
 
+  it("recovers a completed task from the conversation API when the stream ends before the final JSON", async () => {
+    const config = singleTaskConfig();
+    const workerJson = { task_id: "t1", status: "completed", summary: "recovered from conversation", outputs: { k: "v" } };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING")],
+          result: { id: "r1", status: "error" },
+        },
+      ],
+      conversationText: `\n\n\`\`\`json\n${JSON.stringify(workerJson)}\n\`\`\`\n`,
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-conv-ok", fake, store);
+    expect(fake.conversationCalls.length).toBe(1);
+    const payload = JSON.parse(files.get("agent-t1.json")!);
+    expect(payload).toMatchObject(workerJson);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.agents.t1.status).toBe("finished");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
+    expect(finishedEvent?.payload?.payload_source).toBe("conversation");
+  });
+
+  it("stays failed when the conversation API yields no JSON block", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING")],
+          result: { id: "r1", status: "error" },
+        },
+      ],
+      conversationText: "still retrying stitch screen generation; no final output produced.",
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-conv-none", fake, store)).rejects.toThrow();
+    expect(fake.conversationCalls.length).toBe(1);
+    expect(files.get("agent-t1.json")).toBeUndefined();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const failedEvent = events.find((e) => e.event_type === "task_failed" && e.task_id === "t1");
+    expect(failedEvent?.payload?.payload_source).toBe("none");
+  });
+
   it("writes a per-worker transcript from streamed SDK events", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
@@ -154,6 +202,46 @@ describe("runOrchestration with SDK (happy path)", () => {
     await runOrchestration("run-4", fake, store);
     const transcript = files.get("transcripts/t1.jsonl") ?? "";
     expect(transcript.trim().split("\n").length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("passes configured mcp_servers to worker launches", async () => {
+    const config = singleTaskConfig();
+    config.mcp_servers = {
+      linear: { type: "http", url: "https://mcp.linear.app/sse" },
+      gh: { type: "stdio", command: "npx", args: ["-y", "@modelcontextprotocol/server-github"] },
+    };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const { store } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-mcp", fake, store);
+    expect(fake.launches[0]!.opts.mcpServers).toEqual(config.mcp_servers);
+  });
+
+  it("omits mcp_servers when none configured", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const { store } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-no-mcp", fake, store);
+    expect(fake.launches[0]!.opts.mcpServers).toBeUndefined();
   });
 
   it("writes the stop sentinel leads to state.status=stopped", async () => {

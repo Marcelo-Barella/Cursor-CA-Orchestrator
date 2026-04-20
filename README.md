@@ -186,6 +186,7 @@ $ cursor-orch
 | `/config` | `/config` or `/config clear` | Show current configuration summary, or reset all settings to defaults |
 | `/save` | `/save [path]` | Save config to file or session |
 | `/load` | `/load <path>` | Load config from a YAML file |
+| `/mcp` | `/mcp [list\|import <path>\|remove <name>\|clear]` | Manage MCP servers passed to cloud agents (planner + workers) |
 | `/run` | `/run` | Validate and start the orchestration |
 | `/help` | `/help` | Show available commands |
 | `/clear` | `/clear` | Clear the terminal |
@@ -242,6 +243,19 @@ target:
   auto_create_pr: true
   consolidate_prs: true
   branch_prefix: "cursor-orch"
+
+mcp_servers:
+  linear:
+    type: http
+    url: https://mcp.linear.app/sse
+    headers:
+      Authorization: Bearer YOUR_LINEAR_TOKEN
+  github:
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_TOKEN: ghp_YOUR_TOKEN
 ```
 
 ### Fields
@@ -263,8 +277,20 @@ target:
 | `target.auto_create_pr` | bool | no | Auto-create PRs for worker branches (default: true) |
 | `target.consolidate_prs` | bool | no | When `auto_create_pr` is true, defer PRs and open one PR per GitHub repo at the end (default: true). With `branch_layout: consolidated`, workers push to a single run branch per repo (`{branch_prefix}/{run_id}/{ref}/run`); the orchestrator merges the base ref into that branch then opens the PR. Otherwise task branches are merged as before. Multi-repo runs yield one PR per repo. Same-repo multi-task runs need `delegation_map` with one task per parallel group for that repo. |
 | `target.branch_prefix` | string | yes | Prefix for worker branch names |
+| `mcp_servers` | map | no | MCP server definitions passed inline to every cloud agent the orchestrator launches (planner + workers). Supports the SDK's `stdio` and `http`/`sse` transports. |
 
 Environment variable `CURSOR_ORCH_CONSOLIDATE_PRS` overrides `target.consolidate_prs` when set to a boolean string (`true` / `false` / `1` / `0` / `yes` / `no` / `on` / `off`).
+
+### MCP Servers
+
+`mcp_servers` mirrors the `mcpServers` option on the `@cursor/february` SDK. Each entry is keyed by an MCP name and takes one of two shapes:
+
+- **HTTP / SSE**: `type: http` (or `sse`), `url`, optional `headers`, optional `auth { CLIENT_ID, CLIENT_SECRET?, scopes? }`.
+- **Stdio**: `type: stdio`, `command`, optional `args`, `env`, `cwd`. On cloud agents the server runs inside the cloud VM and `env` values are passed into that VM.
+
+The REPL accepts `/mcp import <path>` against either a bare top-level mapping of name to server config, or a file wrapped under `mcp_servers:` / `mcpServers:`. Imports merge into the existing set; use `/mcp clear` to reset. `/mcp list` redacts header/env values whose key matches `authorization|token|secret|password|api_key`.
+
+Because MCP configs may contain literal credentials, the run branch on your private bootstrap repo is the authoritative location for secrets alongside `secrets.json`. The SDK's inline `mcpServers` are not persisted across `Agent.resume()`; the orchestrator re-passes them on every worker reattach.
 
 ## Architecture
 

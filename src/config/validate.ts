@@ -1,4 +1,4 @@
-import type { BranchLayout, DelegationMapConfig, OrchestratorConfig, TaskConfig } from "./types.js";
+import type { BranchLayout, DelegationMapConfig, McpServerConfig, OrchestratorConfig, TaskConfig } from "./types.js";
 import { resolveRepoTarget } from "../lib/repo-target.js";
 
 const BRANCH_LAYOUT_VALUES = new Set<BranchLayout>(["consolidated", "per_task"]);
@@ -310,12 +310,41 @@ function validateDelegationMap(
   }
 }
 
+const MCP_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+
+export function validateMcpServers(servers: Record<string, McpServerConfig>): void {
+  for (const [name, server] of Object.entries(servers)) {
+    if (!MCP_NAME_RE.test(name)) {
+      throw new Error(`mcp_servers name '${name}' must match pattern ${MCP_NAME_RE.source}`);
+    }
+    validateMcpServer(name, server);
+  }
+}
+
+function validateMcpServer(name: string, server: McpServerConfig): void {
+  if (server.type === "stdio") {
+    if (!server.command.trim()) {
+      throw new Error(`mcp_servers['${name}'].command must be non-empty`);
+    }
+    return;
+  }
+  if (!server.url.trim()) {
+    throw new Error(`mcp_servers['${name}'].url must be non-empty`);
+  }
+  if (server.auth && !server.auth.CLIENT_ID.trim()) {
+    throw new Error(`mcp_servers['${name}'].auth.CLIENT_ID must be non-empty`);
+  }
+}
+
 export function validateConfig(config: OrchestratorConfig): void {
   if (!config.prompt && config.tasks.length === 0) {
     throw new Error("Config must specify either 'prompt' or 'tasks'");
   }
   validateBranchName(config.target.branch_prefix, "branch_prefix");
   validateBranchLayout(config.target.branch_layout);
+  if (config.mcp_servers) {
+    validateMcpServers(config.mcp_servers);
+  }
   if (Object.keys(config.repositories).length > 0) {
     validateRepositoryResolvableUrls(config.repositories);
   }

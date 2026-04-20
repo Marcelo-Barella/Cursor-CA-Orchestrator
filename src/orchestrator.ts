@@ -39,6 +39,7 @@ import {
   type SdkRun,
   createDefaultAgentClient,
   parseAssistantJsonFromMessages,
+  parseAssistantJsonFromText,
   streamToCallbacks,
   tryDownloadJsonArtifact,
 } from "./sdk/agent-client.js";
@@ -424,6 +425,15 @@ function resolveBootstrapRef(): string {
   return "main";
 }
 
+function nonEmptyMcpServers(
+  servers: OrchestratorConfig["mcp_servers"],
+): OrchestratorConfig["mcp_servers"] | undefined {
+  if (!servers || Object.keys(servers).length === 0) {
+    return undefined;
+  }
+  return servers;
+}
+
 async function resolveRepoForTask(
   task: TaskConfig,
   config: OrchestratorConfig,
@@ -609,6 +619,7 @@ async function launchWorkerAgent(
       branchName: workerBranch,
       autoCreatePR: autoPr,
       skipReviewerRequest: true,
+      mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -761,7 +772,7 @@ async function runWorkerStream(
 
   const sdkAgent = handle.sdkAgent;
   let payloadRaw: unknown = null;
-  let payloadSource: "artifact" | "assistant" | "none" = "none";
+  let payloadSource: "artifact" | "assistant" | "conversation" | "none" = "none";
   try {
     const artifact = await tryDownloadJsonArtifact(sdkAgent, WORKER_OUTPUT_ARTIFACT_PATH);
     if (artifact.value !== null) {
@@ -776,6 +787,20 @@ async function runWorkerStream(
     if (fallback !== null) {
       payloadRaw = fallback;
       payloadSource = "assistant";
+    }
+  }
+  if (payloadRaw === null && typeof ctx.agentClient.fetchAgentConversationText === "function") {
+    try {
+      const conversationText = await ctx.agentClient.fetchAgentConversationText(sdkAgent.agentId);
+      if (conversationText) {
+        const parsed = parseAssistantJsonFromText(conversationText);
+        if (parsed !== null) {
+          payloadRaw = parsed;
+          payloadSource = "conversation";
+        }
+      }
+    } catch {
+      /* conversation fallback is best-effort */
     }
   }
   const payload = normalizeWorkerPayload(payloadRaw, taskId);
@@ -808,9 +833,8 @@ async function runWorkerStream(
   }
 
   const finalizedAt = nowIso();
-  const succeeded = result.status === "finished" && (!payloadStatus || payloadStatus === "completed");
 
-  if (result.status === "finished" && payloadStatus === "blocked") {
+  if (payloadStatus === "blocked") {
     agent.status = "blocked";
     agent.blocked_reason = payloadBlockedReason ?? "Worker reported blocked without reason";
     if (!agent.blocked_since) agent.blocked_since = finalizedAt;
@@ -829,6 +853,21 @@ async function runWorkerStream(
       ctx.runId,
       makeEvent("task_stopped", `Task ${taskId} stopped`, taskId),
     );
+  } else if (payloadStatus === "completed") {
+    agent.status = "finished";
+    agent.finished_at = finalizedAt;
+    agent.summary = payloadSummary ?? "Task completed";
+    const phaseId = ctx.state.task_phase_map[taskId];
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("task_finished", `Task ${taskId} finished`, taskId, {
+        phase_id: phaseId ?? null,
+        agent_node_id: taskId,
+        agent_kind: "task",
+        payload: { status: agent.status, payload_source: payloadSource },
+      }),
+    );
   } else if (result.status === "error" || payloadStatus === "failed" || streamError) {
     agent.status = "failed";
     agent.finished_at = finalizedAt;
@@ -842,7 +881,7 @@ async function runWorkerStream(
       }),
     );
     await cascadeFailures(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
-  } else if (succeeded) {
+  } else if (result.status === "finished") {
     agent.status = "finished";
     agent.finished_at = finalizedAt;
     agent.summary = payloadSummary ?? "Task completed";
@@ -1192,6 +1231,7 @@ async function runPlanningPhase(
       branchName: `cursor-orch-planner-${runId.slice(0, 8)}`,
       autoCreatePR: false,
       skipReviewerRequest: true,
+      mcpServers: nonEmptyMcpServers(config.mcp_servers),
     });
     try {
       await plannerAgent.send(plannerPrompt);
@@ -1284,7 +1324,15 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
     if (agent.status !== "launching" && agent.status !== "running" && agent.status !== "blocked") continue;
     if (ctx.activeWorkers.has(taskId)) continue;
     try {
-      const sdkAgent = ctx.agentClient.resumeCloudAgent(agent.agent_id, { apiKey: ctx.apiKey, model: { id: ctx.config.model } });
+      const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
+        apiKey: ctx.apiKey,
+        model: { id: ctx.config.model },
+      };
+      const mcpServers = nonEmptyMcpServers(ctx.config.mcp_servers);
+      if (mcpServers) {
+        resumeOptions.mcpServers = mcpServers;
+      }
+      const sdkAgent = ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
       const latest = runs.items[0];
       if (!latest) {
