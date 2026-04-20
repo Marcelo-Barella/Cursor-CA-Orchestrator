@@ -1,7 +1,7 @@
 const CONSTRAINT_PATTERNS = [
-  /\bevery\s+\w+/i,
-  /\ball\s+\w+/i,
-  /\beach\s+\w+/i,
+  /\bevery\s+[\w-]+(?:\s+[\w-]+){0,4}?\s+(?:must|should|shall|will|has to|have to|needs to|need to)\b/i,
+  /\ball\s+[\w-]+(?:\s+[\w-]+){0,4}?\s+(?:must|should|shall|will|has to|have to|needs to|need to|are|is|be)\b/i,
+  /\beach\s+[\w-]+(?:\s+[\w-]+){0,4}?\s+(?:must|should|shall|will|has to|have to|needs to|need to)\b/i,
   /\bany\s+\w+\s+(?:must|should|has to|needs to)/i,
   /must\s+(?:use|apply|implement|follow|include|exclude)/i,
   /always\s+(?:use|apply|implement|follow)/i,
