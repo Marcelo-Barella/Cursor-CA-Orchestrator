@@ -1,4 +1,6 @@
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
+import * as osMod from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import tty from "node:tty";
@@ -8,7 +10,9 @@ import {
   cmdConfig,
   cmdConfigClear,
   cmdHelp,
+  cmdModel,
   cmdPromptSet,
+  cmdRefresh,
   cmdRepo,
   cmdRun,
   formatRepoEquivalentCommand,
@@ -16,6 +20,7 @@ import {
   setupSummaryLines,
   validateModelValue,
   validatePromptValue,
+  type RefreshDeps,
 } from "./commands.js";
 import { classifyRepoPositionalArgs, needsRepoInteractive } from "./lib/repo-interactive.js";
 import type { OrchestratorConfig } from "./config/types.js";
@@ -23,8 +28,22 @@ import { Session } from "./session.js";
 import { readReplLineTTY } from "./lib/repl/tty-line-editor.js";
 import { readVersion } from "./version.js";
 import { tui } from "./tui/style.js";
+import {
+  buildPickerContext,
+  MODELS_TTL_MS,
+  REPOS_TTL_MS,
+  MODELS_CACHE_KEY,
+  REPOS_CACHE_KEY,
+  type PickerContext,
+} from "./lib/repl/pickers/picker-context.js";
+import { runModelPicker } from "./lib/repl/pickers/model-picker.js";
+import { runRepoPicker } from "./lib/repl/pickers/repo-picker.js";
+import { runMcpAdd, type McpPickerDeps } from "./lib/repl/pickers/mcp-picker.js";
+import { discoverCursorMcpSources } from "./lib/repl/cursor-mcp-sources.js";
+import { pickFromList } from "./lib/repl/list-picker.js";
 
-const NON_MUTATION = new Set(["help", "config", "repos", "run", "prompt", "tokens"]);
+const NON_MUTATION = new Set(["help", "config", "repos", "run", "prompt", "tokens", "mcp"]);
+const MCP_MUTATING_SUBCOMMANDS = new Set(["import", "remove", "clear"]);
 
 function parseInput(raw: string): [string, string[]] {
   const parts = raw.slice(1).trim().split(/\s+/);
@@ -37,6 +56,12 @@ function parseInput(raw: string): [string, string[]] {
     return ["repo-remove", args.slice(1)];
   }
   return [cmd, args];
+}
+
+export function isMcpInteractiveInvocation(cmd: string, args: string[]): boolean {
+  if (cmd !== "mcp") return false;
+  if (args.length === 0) return true;
+  return (args[0] ?? "").toLowerCase() === "add";
 }
 
 function isControl(value: string, control: string): boolean {
@@ -149,10 +174,101 @@ async function readLineOrEof(rl: ReadlineInterface, prompt: string): Promise<str
   });
 }
 
+export function buildRefreshDeps(ctx: PickerContext): RefreshDeps {
+  return {
+    refreshModels: async () => {
+      try {
+        await ctx.cache.invalidate(MODELS_CACHE_KEY);
+        const data = await ctx.api.listModels();
+        const res = await ctx.cache.get(MODELS_CACHE_KEY, MODELS_TTL_MS, async () => data);
+        return { ok: true, count: data.length, fetchedAt: res.fetchedAt ?? new Date() };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e : new Error(String(e)) };
+      }
+    },
+    refreshRepos: async () => {
+      try {
+        await ctx.cache.invalidate(REPOS_CACHE_KEY);
+        const data = await ctx.api.listRepositories();
+        const res = await ctx.cache.get(REPOS_CACHE_KEY, REPOS_TTL_MS, async () => data);
+        return { ok: true, count: data.length, fetchedAt: res.fetchedAt ?? new Date() };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e : new Error(String(e)) };
+      }
+    },
+    ageModels: () => ctx.cache.age(MODELS_CACHE_KEY),
+    ageRepos: () => ctx.cache.age(REPOS_CACHE_KEY),
+  };
+}
+
+export async function runBareModel(
+  session: Session,
+  ctx: PickerContext | null,
+  useTtyEditor: boolean,
+  holder: RlHolder,
+  _historyPath: string,
+): Promise<string | null> {
+  if (!ctx) {
+    console.log(tui.dim("Model list unavailable; enter value manually."));
+    const raw = await readPromptLine(holder, useTtyEditor, "AI model [default: composer-2]: ");
+    if (raw === null) return null;
+    const t = raw.trim();
+    if (t === "" || isControl(t, "skip")) return "composer-2";
+    return t;
+  }
+  return runModelPicker({
+    listModels: () => ctx.cache.get(MODELS_CACHE_KEY, MODELS_TTL_MS, () => ctx.api.listModels()),
+    pick: (items, opts) => pickFromList(items, opts),
+    fallbackPrompt: async () => {
+      const raw = await readPromptLine(holder, useTtyEditor, "AI model [default: composer-2]: ");
+      if (raw === null) return null;
+      const t = raw.trim();
+      if (t === "" || isControl(t, "skip")) return "composer-2";
+      return t;
+    },
+    writeLine: (s) => console.log(s),
+    currentModel: session.config.model,
+    isTTY: isInteractiveTty(),
+  });
+}
+
+export async function runBareRepo(
+  session: Session,
+  ctx: PickerContext | null,
+  useTtyEditor: boolean,
+  holder: RlHolder,
+  historyPath: string,
+): Promise<void> {
+  const existingAliases = new Set(Object.keys(session.config.repositories));
+  if (!ctx) {
+    console.log(tui.dim("Repository list unavailable; enter value manually."));
+    const msg = await promptRepoFields(session, holder, useTtyEditor, historyPath, []);
+    if (msg) console.log(msg);
+    return;
+  }
+  await runRepoPicker({
+    listRepositories: () => ctx.cache.get(REPOS_CACHE_KEY, REPOS_TTL_MS, () => ctx.api.listRepositories()),
+    pick: (items, opts) => pickFromList(items, opts),
+    readLine: (p) => readPromptLine(holder, useTtyEditor, p),
+    writeLine: (s) => console.log(s),
+    existingAliases,
+    addRepo: (a, u, r) => {
+      const out = cmdRepo(session, a, u, r);
+      console.log(out);
+    },
+    fallbackInteractive: async () => {
+      const msg = await promptRepoFields(session, holder, useTtyEditor, historyPath, []);
+      if (msg) console.log(msg);
+    },
+    isTTY: isInteractiveTty(),
+  });
+}
+
 async function runGuidedSetup(
   session: Session,
   holder: RlHolder,
   historyPath: string,
+  ctx: PickerContext | null,
 ): Promise<OrchestratorConfig | null> {
   console.log("Welcome to cursor-orch interactive setup.");
   console.log("I will ask only what is required for your first run.");
@@ -172,36 +288,22 @@ async function runGuidedSetup(
   while (true) {
     if (step === "model") {
       console.log("Step 1/2 - Model");
-      const raw = await readLineOrEof(holder.rl, "AI model [default: composer-2]: ");
-      if (raw === null) {
-        return null;
-      }
-      const text = raw.trim();
-      if (isControl(text, "exit")) {
+      const picked = await runBareModel(session, ctx, isInteractiveTty(), holder, historyPath);
+      if (picked === null) {
         session.setSetupState({ active: true, step: "model" });
         session.saveSession();
         return null;
       }
-      if (isControl(text, "back")) {
-        console.log("Already at first step.");
+      const err = validateModelValue(picked);
+      if (err) {
+        console.log(tui.red(err));
         continue;
       }
-      let value: string;
-      if (text === "" || isControl(text, "skip")) {
-        value = "composer-2";
-      } else {
-        const err = validateModelValue(text);
-        if (err) {
-          console.log(tui.red(err));
-          continue;
-        }
-        value = text;
-      }
-      session.setModel(value);
+      session.setModel(picked);
       session.setSetupState({ active: true, step: "prompt" });
       session.saveSession();
-      console.log(`Model set to: ${value}`);
-      console.log(`Equivalent command: /model ${value}`);
+      console.log(`Model set to: ${picked}`);
+      console.log(`Equivalent command: /model ${picked}`);
       step = "prompt";
       continue;
     }
@@ -357,6 +459,8 @@ function dispatch(cmd: string, args: string[], session: Session): string | null 
           return cmdConfigClear(session);
         }
         return cmdConfig(session);
+      case "mcp":
+        return cmdInfo.handler(session, args[0], args[1]) as string;
       case "save":
         return cmdInfo.handler(session, args[0]) as string;
       case "load":
@@ -381,6 +485,12 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
       terminal: true,
     }),
   };
+
+  const ctx: PickerContext | null = buildPickerContext(process.env.CURSOR_API_KEY);
+  if (ctx) {
+    void ctx.cache.get(MODELS_CACHE_KEY, MODELS_TTL_MS, () => ctx.api.listModels()).catch(() => {});
+    void ctx.cache.get(REPOS_CACHE_KEY, REPOS_TTL_MS, () => ctx.api.listRepositories()).catch(() => {});
+  }
 
   console.log(tui.bold(`cursor-orch v${readVersion()}`));
   if (isInteractiveTty()) {
@@ -410,7 +520,7 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
   const shouldRunGuided =
     session.shouldResumeGuidedSetup() || (!session.hasRequiredGuidedValues() && !directCommandsEntered);
   if (shouldRunGuided) {
-    const cfg = await runGuidedSetup(session, holder, historyPath);
+    const cfg = await runGuidedSetup(session, holder, historyPath, ctx);
     if (cfg) {
       holder.rl.close();
       return cfg;
@@ -470,6 +580,47 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
         console.log(tui.red(`Unknown command: /${cmd}. Type /help for available commands.`));
         continue;
       }
+      if (cmd === "model" && args.length === 0) {
+        const picked = await runBareModel(session, ctx, useTtyEditor, holder, historyPath);
+        if (picked) {
+          console.log(cmdModel(session, picked));
+          session.saveSession();
+        }
+        continue;
+      }
+      if (cmd === "repo" && args.length === 0) {
+        await runBareRepo(session, ctx, useTtyEditor, holder, historyPath);
+        session.saveSession();
+        continue;
+      }
+      if (isMcpInteractiveInvocation(cmd, args)) {
+        const deps: McpPickerDeps = {
+          pick: (items, opts) => pickFromList(items, opts),
+          readLine: (p) =>
+            useTtyEditor
+              ? readReplLineTTY(historyPath)
+              : readLineOrEof(holder.rl, p),
+          writeLine: (s) => console.log(s),
+          listCursorSources: () =>
+            discoverCursorMcpSources({
+              homedir: () => osMod.homedir(),
+              cwd: () => process.cwd(),
+              readFile: (p) => fsp.readFile(p, "utf8"),
+            }),
+          importMap: (map) => session.importMcpServersFromMap(map),
+          existingNames: new Set(Object.keys(session.config.mcp_servers ?? {})),
+          isTTY: isInteractiveTty(),
+        };
+        await runMcpAdd(deps);
+        session.saveSession();
+        continue;
+      }
+      if (cmd === "refresh") {
+        const deps = ctx ? buildRefreshDeps(ctx) : null;
+        const out = await cmdRefresh(args[0], deps);
+        console.log(out);
+        continue;
+      }
       if (cmd === "repo" && needsRepoInteractive(args)) {
         const msg = await promptRepoFields(session, holder, useTtyEditor, historyPath, args);
         if (msg) {
@@ -494,8 +645,11 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
       if (output) {
         console.log(output);
       }
+      const mcpSub = (args[0] ?? "").toLowerCase();
       const persistSession =
-        !NON_MUTATION.has(cmd) || (cmd === "config" && args[0]?.toLowerCase() === "clear");
+        !NON_MUTATION.has(cmd)
+        || (cmd === "config" && args[0]?.toLowerCase() === "clear")
+        || (cmd === "mcp" && MCP_MUTATING_SUBCOMMANDS.has(mcpSub));
       if (persistSession) {
         session.saveSession();
       }
