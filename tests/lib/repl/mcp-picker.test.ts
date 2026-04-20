@@ -208,3 +208,110 @@ describe("runPasteJsonFlow", () => {
     expect(logs.join("\n")).toContain("Cancelled");
   });
 });
+
+describe("runCursorPickFlow", () => {
+  function pickCursor(): McpPickFn {
+    let call = 0;
+    return async (items, _opts) => {
+      call++;
+      if (call === 1) {
+        const idx = items.findIndex(
+          (it: unknown) => (it as { label?: string }).label === "Pick from Cursor config",
+        );
+        return { kind: "selected", value: items[idx]! };
+      }
+      return { kind: "selected", values: items };
+    };
+  }
+
+  const GLOBAL_ROW: CursorMcpRow = {
+    name: "linear",
+    source: "global",
+    config: { type: "http", url: "https://g" },
+  };
+  const WORKSPACE_ROW: CursorMcpRow = {
+    name: "gh",
+    source: "workspace",
+    config: { type: "stdio", command: "npx" },
+  };
+
+  it("prints dim empty message and skips picker when no rows", async () => {
+    const { deps, imports, logs } = makeDeps({
+      pick: pickCursor(),
+      listCursorSources: async () => ({ rows: [], warnings: [] }),
+    });
+    await runMcpAdd(deps);
+    expect(imports).toEqual([]);
+    expect(logs.join("\n")).toContain("No MCP servers found in ~/.cursor/mcp.json");
+  });
+
+  it("prints warnings from discovery", async () => {
+    const { deps, logs } = makeDeps({
+      pick: pickCursor(),
+      listCursorSources: async () => ({
+        rows: [GLOBAL_ROW],
+        warnings: ["Skipping /path: bad json"],
+      }),
+    });
+    await runMcpAdd(deps);
+    expect(logs.join("\n")).toContain("Skipping /path: bad json");
+  });
+
+  it("multi-select confirm calls importMap once with union of selected configs", async () => {
+    const { deps, imports } = makeDeps({
+      pick: pickCursor(),
+      listCursorSources: async () => ({
+        rows: [GLOBAL_ROW, WORKSPACE_ROW],
+        warnings: [],
+      }),
+    });
+    await runMcpAdd(deps);
+    expect(imports).toEqual([
+      { linear: GLOBAL_ROW.config, gh: WORKSPACE_ROW.config },
+    ]);
+  });
+
+  it("duplicate names across sources: later row (workspace) overrides", async () => {
+    const dupGlobal: CursorMcpRow = {
+      name: "x",
+      source: "global",
+      config: { type: "http", url: "https://g" },
+    };
+    const dupWorkspace: CursorMcpRow = {
+      name: "x",
+      source: "workspace",
+      config: { type: "http", url: "https://w" },
+    };
+    const { deps, imports } = makeDeps({
+      pick: pickCursor(),
+      listCursorSources: async () => ({
+        rows: [dupGlobal, dupWorkspace],
+        warnings: [],
+      }),
+    });
+    await runMcpAdd(deps);
+    expect(imports).toEqual([{ x: dupWorkspace.config }]);
+  });
+
+  it("zero selection cancels without mutation", async () => {
+    let call = 0;
+    const pick: McpPickFn = async (items, opts) => {
+      call++;
+      if (call === 1) {
+        const idx = items.findIndex(
+          (it: unknown) => (it as { label?: string }).label === "Pick from Cursor config",
+        );
+        return { kind: "selected", value: items[idx]! };
+      }
+      expect(opts.multiSelect).toBe(true);
+      return { kind: "cancelled" };
+    };
+    const { deps, imports, logs } = makeDeps({
+      pick,
+      listCursorSources: async () => ({ rows: [GLOBAL_ROW], warnings: [] }),
+    });
+    await runMcpAdd(deps);
+    expect(imports).toEqual([]);
+    expect(logs.join("\n")).toContain("Cancelled");
+  });
+});
