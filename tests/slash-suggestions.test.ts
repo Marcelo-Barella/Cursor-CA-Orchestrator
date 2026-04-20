@@ -56,8 +56,21 @@ describe("slash-suggestions", () => {
     expect(cl?.dispatchKey).toBe("config");
   });
 
+  it("includes /mcp and its subcommand aliases", () => {
+    const m = filterSlashSuggestions("mcp");
+    const labels = m.map((e) => e.label);
+    expect(labels).toContain("/mcp");
+    expect(labels).toContain("/mcp list");
+    expect(labels).toContain("/mcp import");
+    expect(labels).toContain("/mcp remove");
+    expect(labels).toContain("/mcp clear");
+    for (const entry of m) {
+      expect(entry.dispatchKey).toBe("mcp");
+    }
+  });
+
   it("longestCommonStemPrefix for shared prefix", () => {
-    const m = filterSlashSuggestions("re");
+    const m = filterSlashSuggestions("rep");
     const lcp = longestCommonStemPrefix(m);
     expect(lcp.toLowerCase()).toBe("repo");
   });
@@ -75,5 +88,20 @@ describe("slash-suggestions", () => {
     expect(rotateSlashHighlight(2, 3, "down")).toBe(0);
     expect(rotateSlashHighlight(0, 3, "up")).toBe(2);
     expect(rotateSlashHighlight(1, 3, "up")).toBe(0);
+  });
+
+  it("includes /mcp add suggestion row with correct dispatch key and usage", () => {
+    const m = filterSlashSuggestions("mcp");
+    const labels = m.map((e) => e.label);
+    expect(labels).toContain("/mcp add");
+    const add = m.find((e) => e.label === "/mcp add");
+    expect(add?.dispatchKey).toBe("mcp");
+    expect(add?.usage).toBe("/mcp add");
+    expect(add?.description).toMatch(/paste|Cursor/i);
+  });
+
+  it("/mcp add is the only match for the 'mcp a' prefix", () => {
+    const m = filterSlashSuggestions("mcp a");
+    expect(m.map((e) => e.label)).toEqual(["/mcp add"]);
   });
 });
