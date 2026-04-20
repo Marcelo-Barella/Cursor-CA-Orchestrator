@@ -27,6 +27,36 @@ const EXTRA_LABELS: SuggestionEntry[] = [
     description: "Reset session to defaults (same as /config clear).",
     dispatchKey: "config",
   },
+  {
+    label: "/mcp add",
+    usage: "/mcp add",
+    description: "Add an MCP server by pasting JSON or picking from your Cursor config.",
+    dispatchKey: "mcp",
+  },
+  {
+    label: "/mcp list",
+    usage: "/mcp list",
+    description: "List configured MCP servers (secrets redacted).",
+    dispatchKey: "mcp",
+  },
+  {
+    label: "/mcp import",
+    usage: "/mcp import <path>",
+    description: "Merge MCP server definitions from a YAML or JSON file.",
+    dispatchKey: "mcp",
+  },
+  {
+    label: "/mcp remove",
+    usage: "/mcp remove <name>",
+    description: "Remove an MCP server by name.",
+    dispatchKey: "mcp",
+  },
+  {
+    label: "/mcp clear",
+    usage: "/mcp clear",
+    description: "Remove all configured MCP servers.",
+    dispatchKey: "mcp",
+  },
 ];
 
 const ALL_SORTED: SuggestionEntry[] = (() => {
