@@ -158,4 +158,53 @@ describe("runPasteJsonFlow", () => {
     expect(imports).toEqual([]);
     expect(logs.join("\n")).toContain("Unrecognized MCP shape");
   });
+
+  function makeReader(answers: Array<string | null>): (prompt: string) => Promise<string | null> {
+    let i = 0;
+    return async () => {
+      const v = i < answers.length ? answers[i] : null;
+      i++;
+      return v ?? null;
+    };
+  }
+
+  it("single server body prompts for name and imports under that name", async () => {
+    const { deps, imports } = makeDeps({
+      pick: async (items, _opts) => ({ kind: "selected", value: items[0]! }),
+      readLine: makeReader([
+        JSON.stringify({ type: "http", url: "https://a" }),
+        "linear",
+      ]),
+    });
+    await runMcpAdd(deps);
+    expect(imports).toEqual([{ linear: { type: "http", url: "https://a" } }]);
+  });
+
+  it("single body with colliding name re-prompts until unique", async () => {
+    const { deps, imports, logs } = makeDeps({
+      pick: async (items, _opts) => ({ kind: "selected", value: items[0]! }),
+      existingNames: new Set(["linear"]),
+      readLine: makeReader([
+        JSON.stringify({ type: "http", url: "https://a" }),
+        "linear",
+        "linear-2",
+      ]),
+    });
+    await runMcpAdd(deps);
+    expect(imports).toEqual([{ "linear-2": { type: "http", url: "https://a" } }]);
+    expect(logs.join("\n")).toContain('Name "linear" already exists');
+  });
+
+  it("single body with blank name cancels", async () => {
+    const { deps, imports, logs } = makeDeps({
+      pick: async (items, _opts) => ({ kind: "selected", value: items[0]! }),
+      readLine: makeReader([
+        JSON.stringify({ type: "http", url: "https://a" }),
+        "   ",
+      ]),
+    });
+    await runMcpAdd(deps);
+    expect(imports).toEqual([]);
+    expect(logs.join("\n")).toContain("Cancelled");
+  });
 });

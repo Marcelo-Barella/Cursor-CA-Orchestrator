@@ -101,10 +101,30 @@ export async function runPasteJsonFlow(deps: McpPickerDeps): Promise<void> {
     return;
   }
   if (shape.kind === "single") {
-    deps.writeLine(tui.red("Single-body paste not yet supported."));
+    const name = await promptUniqueName(deps);
+    if (name === null) {
+      deps.writeLine(tui.dim("Cancelled."));
+      return;
+    }
+    await importAndReport(deps, { [name]: shape.body });
     return;
   }
   await importAndReport(deps, shape.map);
+}
+
+async function promptUniqueName(deps: McpPickerDeps): Promise<string | null> {
+  let prompt = "Server name: ";
+  while (true) {
+    const raw = await deps.readLine(prompt);
+    if (raw === null) return null;
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    if (!deps.existingNames.has(trimmed)) return trimmed;
+    deps.writeLine(
+      tui.red(`Name "${trimmed}" already exists. Enter a different name or blank to cancel:`),
+    );
+    prompt = "Server name: ";
+  }
 }
 
 async function importAndReport(
