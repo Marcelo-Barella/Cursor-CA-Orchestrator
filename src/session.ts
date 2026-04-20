@@ -3,9 +3,9 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
-import type { OrchestratorConfig } from "./config/types.js";
-import { parseConfig, toYaml } from "./config/parse.js";
-import { validateConfig } from "./config/validate.js";
+import type { McpServerConfig, OrchestratorConfig } from "./config/types.js";
+import { parseConfig, parseMcpServers, toYaml } from "./config/parse.js";
+import { validateConfig, validateMcpServers } from "./config/validate.js";
 
 type SessionPaths = {
   sessionDir: string;
@@ -49,6 +49,21 @@ export const SESSION_PATH = defaultSessionPaths.sessionPath;
 export const SETUP_STATE_PATH = defaultSessionPaths.setupStatePath;
 export const VALID_SETUP_STEPS = new Set(["model", "prompt", "confirm"]);
 
+function extractMcpServersPayload(raw: unknown): unknown {
+  if (raw === null || raw === undefined) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("MCP servers file must contain a mapping");
+  }
+  const o = raw as Record<string, unknown>;
+  if ("mcp_servers" in o && o.mcp_servers !== undefined) {
+    return o.mcp_servers;
+  }
+  if ("mcpServers" in o && o.mcpServers !== undefined) {
+    return o.mcpServers;
+  }
+  return o;
+}
+
 export function createDefaultOrchestratorConfig(): OrchestratorConfig {
   return {
     name: "",
@@ -58,6 +73,7 @@ export function createDefaultOrchestratorConfig(): OrchestratorConfig {
     tasks: [],
     target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
+    mcp_servers: {},
   };
 }
 const LEGACY_SESSION_ROOT = path.join(os.homedir(), ".cursor-orch");
@@ -121,6 +137,51 @@ export class Session {
 
   setBootstrapRepo(name: string): void {
     this._config.bootstrap_repo_name = name;
+  }
+
+  setMcpServer(name: string, server: McpServerConfig): void {
+    validateMcpServers({ [name]: server });
+    const current = this._config.mcp_servers ?? {};
+    current[name] = server;
+    this._config.mcp_servers = current;
+  }
+
+  removeMcpServer(name: string): boolean {
+    const current = this._config.mcp_servers;
+    if (current && name in current) {
+      delete current[name];
+      return true;
+    }
+    return false;
+  }
+
+  clearMcpServers(): void {
+    this._config.mcp_servers = {};
+  }
+
+  importMcpServersFromMap(map: Record<string, McpServerConfig>): { added: string[]; replaced: string[] } {
+    const parsed = parseMcpServers(map);
+    validateMcpServers(parsed);
+    const current = this._config.mcp_servers ?? {};
+    const added: string[] = [];
+    const replaced: string[] = [];
+    for (const [name, server] of Object.entries(parsed)) {
+      if (name in current) {
+        replaced.push(name);
+      } else {
+        added.push(name);
+      }
+      current[name] = server;
+    }
+    this._config.mcp_servers = current;
+    return { added, replaced };
+  }
+
+  importMcpServersFromFile(filePath: string): { added: string[]; replaced: string[] } {
+    const content = fs.readFileSync(filePath, "utf8");
+    const raw = YAML.parse(content);
+    const candidate = extractMcpServersPayload(raw);
+    return this.importMcpServersFromMap(candidate as Record<string, McpServerConfig>);
   }
 
   resetSessionToDefaults(): void {
