@@ -755,4 +755,131 @@ target:
       else process.env.CURSOR_ORCH_BRANCH_LAYOUT = prevBl;
     }
   });
+
+  it("parses mcp_servers with stdio and http entries", () => {
+    const yaml = `
+name: t
+model: composer-2
+prompt: p
+repositories: {}
+tasks: []
+target:
+  auto_create_pr: true
+  consolidate_prs: true
+  branch_prefix: cursor-orch
+  branch_layout: consolidated
+mcp_servers:
+  github:
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_TOKEN: ghp_xxx
+  linear:
+    type: http
+    url: https://mcp.linear.app/sse
+    headers:
+      Authorization: Bearer xxx
+`;
+    const c = parseConfig(yaml);
+    expect(Object.keys(c.mcp_servers ?? {})).toEqual(["github", "linear"]);
+    expect(c.mcp_servers!.github).toEqual({
+      type: "stdio",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github"],
+      env: { GITHUB_TOKEN: "ghp_xxx" },
+    });
+    expect(c.mcp_servers!.linear).toEqual({
+      type: "http",
+      url: "https://mcp.linear.app/sse",
+      headers: { Authorization: "Bearer xxx" },
+    });
+  });
+
+  it("toYaml round-trips mcp_servers", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: "composer-2",
+      prompt: "p",
+      repositories: {},
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+      mcp_servers: {
+        linear: {
+          type: "http",
+          url: "https://mcp.linear.app/sse",
+          auth: { CLIENT_ID: "cid", CLIENT_SECRET: "csec", scopes: ["read"] },
+        },
+      },
+    };
+    const parsed = parseConfig(toYaml(config));
+    expect(parsed.mcp_servers).toEqual(config.mcp_servers);
+  });
+
+  it("parseConfig rejects invalid mcp_servers type", () => {
+    const yaml = `
+name: t
+model: composer-2
+prompt: p
+repositories: {}
+tasks: []
+target:
+  auto_create_pr: true
+  consolidate_prs: true
+  branch_prefix: cursor-orch
+  branch_layout: consolidated
+mcp_servers:
+  bad:
+    type: websocket
+    url: https://x
+`;
+    expect(() => parseConfig(yaml)).toThrow(/type must be/);
+  });
+
+  it("validateConfig rejects mcp_servers with invalid name", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: "composer-2",
+      prompt: "p",
+      repositories: {},
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+      mcp_servers: {
+        "bad name": { type: "http", url: "https://x" },
+      },
+    };
+    expect(() => validateConfig(config)).toThrow(/name 'bad name'/);
+  });
+
+  it("validateConfig rejects stdio server with empty command", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: "composer-2",
+      prompt: "p",
+      repositories: {},
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+      mcp_servers: {
+        gh: { type: "stdio", command: "   " },
+      },
+    };
+    expect(() => validateConfig(config)).toThrow(/command/);
+  });
+
+  it("toYaml omits mcp_servers when empty", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: "composer-2",
+      prompt: "p",
+      repositories: {},
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+      mcp_servers: {},
+    };
+    expect(toYaml(config)).not.toMatch(/mcp_servers/);
+  });
 });

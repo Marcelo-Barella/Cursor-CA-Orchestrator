@@ -11,6 +11,7 @@ import {
 import type {
   AgentOptions as SdkAgentOptions,
   AssistantMessage as SdkAssistantMessageChunk,
+  McpServerConfig as SdkMcpServerConfig,
   Run as SdkRun,
   RunResult as SdkRunResult,
   SDKAgent as SdkAgent,
@@ -40,6 +41,7 @@ export type {
   SdkRun,
   SdkRunResult,
   SdkAgentOptions,
+  SdkMcpServerConfig,
   SDKArtifact,
   SDKMessage,
   SDKAssistantMessage,
@@ -63,16 +65,53 @@ export interface CreateCloudAgentOpts {
   autoCreatePR: boolean;
   skipReviewerRequest?: boolean;
   signal?: AbortSignal;
+  mcpServers?: Record<string, SdkMcpServerConfig>;
 }
 
 export interface AgentClient {
   createCloudAgent(opts: CreateCloudAgentOpts): SdkAgent;
   resumeCloudAgent(agentId: string, opts: Partial<SdkAgentOptions>): SdkAgent;
   promptOneShot(message: string, opts: SdkAgentOptions): Promise<SdkRunResult>;
+  fetchAgentConversationText?(agentId: string): Promise<string | null>;
+}
+
+const CURSOR_API_BASE_URL = "https://api.cursor.com";
+
+export async function fetchAgentConversationTextFromApi(agentId: string, apiKey: string): Promise<string | null> {
+  let response: Response;
+  try {
+    response = await fetch(`${CURSOR_API_BASE_URL}/v0/agents/${encodeURIComponent(agentId)}/conversation`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok) {
+    return null;
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return null;
+  }
+  if (typeof payload !== "object" || payload === null) return null;
+  const messages = (payload as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return null;
+  const parts: string[] = [];
+  for (const entry of messages) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as { type?: unknown; text?: unknown };
+    if (e.type !== "assistant_message") continue;
+    if (typeof e.text !== "string") continue;
+    parts.push(e.text);
+  }
+  if (parts.length === 0) return null;
+  return parts.join("");
 }
 
 export function buildCloudAgentOptions(opts: CreateCloudAgentOpts): SdkAgentOptions {
-  return {
+  const options: SdkAgentOptions = {
     apiKey: opts.apiKey,
     model: { id: opts.model },
     cloud: {
@@ -84,6 +123,10 @@ export function buildCloudAgentOptions(opts: CreateCloudAgentOpts): SdkAgentOpti
     },
     signal: opts.signal,
   };
+  if (opts.mcpServers && Object.keys(opts.mcpServers).length > 0) {
+    options.mcpServers = opts.mcpServers;
+  }
+  return options;
 }
 
 export function createDefaultAgentClient(apiKey: string): AgentClient {
@@ -96,6 +139,9 @@ export function createDefaultAgentClient(apiKey: string): AgentClient {
     },
     async promptOneShot(message: string, opts: SdkAgentOptions): Promise<SdkRunResult> {
       return CursorAgent.prompt(message, { apiKey, ...opts });
+    },
+    async fetchAgentConversationText(agentId: string): Promise<string | null> {
+      return fetchAgentConversationTextFromApi(agentId, apiKey);
     },
   };
 }

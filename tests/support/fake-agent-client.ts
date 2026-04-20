@@ -144,12 +144,15 @@ class FakeSdkAgent implements SdkAgent {
 export interface FakeAgentClientOptions {
   runsByAgent?: Record<string, FakeRunScript[]>;
   defaultScripts?: FakeRunScript[];
+  conversationText?: string | null | ((agentId: string) => string | null);
 }
 
 export class FakeAgentClient implements AgentClient {
   readonly launches: FakeLaunch[] = [];
+  readonly conversationCalls: string[] = [];
   private readonly runsByAgent: Map<string, FakeRunScript[]>;
   private readonly defaultScripts: FakeRunScript[];
+  private readonly conversationText: string | null | ((agentId: string) => string | null) | undefined;
 
   constructor(opts: FakeAgentClientOptions = {}) {
     this.runsByAgent = new Map();
@@ -157,6 +160,16 @@ export class FakeAgentClient implements AgentClient {
       this.runsByAgent.set(k, [...v]);
     }
     this.defaultScripts = [...(opts.defaultScripts ?? [])];
+    this.conversationText = opts.conversationText;
+  }
+
+  async fetchAgentConversationText(agentId: string): Promise<string | null> {
+    this.conversationCalls.push(agentId);
+    if (this.conversationText === undefined) return null;
+    if (typeof this.conversationText === "function") {
+      return this.conversationText(agentId);
+    }
+    return this.conversationText;
   }
 
   createCloudAgent(opts: CreateCloudAgentOpts): SdkAgent {

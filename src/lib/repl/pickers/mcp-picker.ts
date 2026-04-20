@@ -53,6 +53,20 @@ type PasteShape =
 const PASTE_HINT =
   "Paste MCP JSON. Ctrl+J or Alt+Enter for newline, Enter submits. Blank line cancels.";
 
+function tryParseAsEntryFragment(raw: string): unknown | undefined {
+  const trimmed = raw.trim().replace(/,\s*$/, "");
+  if (!trimmed.startsWith('"')) return undefined;
+  try {
+    const wrapped = JSON.parse(`{${trimmed}}`);
+    if (wrapped && typeof wrapped === "object" && !Array.isArray(wrapped)) {
+      return wrapped;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function detectPasteShape(raw: unknown): PasteShape {
   if (raw === null || raw === undefined) return { kind: "unrecognized" };
   if (typeof raw !== "object" || Array.isArray(raw)) return { kind: "unrecognized" };
@@ -88,8 +102,13 @@ export async function runPasteJsonFlow(deps: McpPickerDeps): Promise<void> {
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    deps.writeLine(tui.red(`Invalid JSON: ${(e as Error).message}`));
-    return;
+    const wrapped = tryParseAsEntryFragment(raw);
+    if (wrapped !== undefined) {
+      parsed = wrapped;
+    } else {
+      deps.writeLine(tui.red(`Invalid JSON: ${(e as Error).message}`));
+      return;
+    }
   }
   const shape = detectPasteShape(parsed);
   if (shape.kind === "unrecognized") {

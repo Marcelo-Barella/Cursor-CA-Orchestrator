@@ -39,6 +39,29 @@ export interface DelegationMapConfig {
   phases: DelegationPhaseConfig[];
 }
 
+export type McpStdioConfig = {
+  type: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+};
+
+export type McpHttpAuth = {
+  CLIENT_ID: string;
+  CLIENT_SECRET?: string;
+  scopes?: string[];
+};
+
+export type McpHttpConfig = {
+  type: "http" | "sse";
+  url: string;
+  headers?: Record<string, string>;
+  auth?: McpHttpAuth;
+};
+
+export type McpServerConfig = McpStdioConfig | McpHttpConfig;
+
 export interface OrchestratorConfig {
   name: string;
   model: string;
@@ -48,6 +71,7 @@ export interface OrchestratorConfig {
   delegation_map?: DelegationMapConfig | null;
   target: TargetConfig;
   bootstrap_repo_name: string;
+  mcp_servers?: Record<string, McpServerConfig>;
 }
 
 export interface ResolvedValue {
