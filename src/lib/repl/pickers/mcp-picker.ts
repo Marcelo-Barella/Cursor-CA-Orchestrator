@@ -45,8 +45,91 @@ export async function runMcpAdd(deps: McpPickerDeps): Promise<void> {
   await runCursorPickFlow(deps);
 }
 
-export async function runPasteJsonFlow(_deps: McpPickerDeps): Promise<void> {
-  throw new Error("not implemented");
+type PasteShape =
+  | { kind: "map"; map: Record<string, unknown> }
+  | { kind: "single"; body: Record<string, unknown> }
+  | { kind: "unrecognized" };
+
+const PASTE_HINT =
+  "Paste MCP JSON. Ctrl+J or Alt+Enter for newline, Enter submits. Blank line cancels.";
+
+function detectPasteShape(raw: unknown): PasteShape {
+  if (raw === null || raw === undefined) return { kind: "unrecognized" };
+  if (typeof raw !== "object" || Array.isArray(raw)) return { kind: "unrecognized" };
+  const o = raw as Record<string, unknown>;
+  if ("mcpServers" in o && o.mcpServers !== undefined) {
+    const inner = o.mcpServers;
+    if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+      return { kind: "map", map: inner as Record<string, unknown> };
+    }
+    return { kind: "unrecognized" };
+  }
+  if ("mcp_servers" in o && o.mcp_servers !== undefined) {
+    const inner = o.mcp_servers;
+    if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+      return { kind: "map", map: inner as Record<string, unknown> };
+    }
+    return { kind: "unrecognized" };
+  }
+  if ("type" in o || "command" in o || "url" in o) {
+    return { kind: "single", body: o };
+  }
+  return { kind: "map", map: o };
+}
+
+export async function runPasteJsonFlow(deps: McpPickerDeps): Promise<void> {
+  deps.writeLine(tui.dim(PASTE_HINT));
+  const raw = await deps.readLine("");
+  if (raw === null || raw.trim() === "") {
+    deps.writeLine(tui.dim("Cancelled."));
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    deps.writeLine(tui.red(`Invalid JSON: ${(e as Error).message}`));
+    return;
+  }
+  const shape = detectPasteShape(parsed);
+  if (shape.kind === "unrecognized") {
+    deps.writeLine(
+      tui.red(
+        'Unrecognized MCP shape. Expected { "mcpServers": {...} }, a name-keyed map, or a single server body.',
+      ),
+    );
+    return;
+  }
+  if (shape.kind === "single") {
+    deps.writeLine(tui.red("Single-body paste not yet supported."));
+    return;
+  }
+  await importAndReport(deps, shape.map);
+}
+
+async function importAndReport(
+  deps: McpPickerDeps,
+  map: Record<string, unknown>,
+): Promise<void> {
+  let result: { added: string[]; replaced: string[] };
+  try {
+    result = deps.importMap(map as Record<string, McpServerConfig>);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    const nameMatch = /^mcp_servers\['([^']+)'\]/.exec(message);
+    if (nameMatch) {
+      deps.writeLine(tui.red(`Validation failed for "${nameMatch[1]}": ${message}`));
+    } else {
+      deps.writeLine(tui.red(`Validation failed: ${message}`));
+    }
+    return;
+  }
+  if (result.added.length) {
+    deps.writeLine(tui.green(`Added: ${result.added.join(", ")}`));
+  }
+  if (result.replaced.length) {
+    deps.writeLine(tui.yellow(`Replaced: ${result.replaced.join(", ")}`));
+  }
 }
 
 export async function runCursorPickFlow(_deps: McpPickerDeps): Promise<void> {
