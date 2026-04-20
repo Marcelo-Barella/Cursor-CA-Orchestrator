@@ -152,6 +152,32 @@ async function importAndReport(
   }
 }
 
-export async function runCursorPickFlow(_deps: McpPickerDeps): Promise<void> {
-  throw new Error("not implemented");
+export async function runCursorPickFlow(deps: McpPickerDeps): Promise<void> {
+  const discovered = await deps.listCursorSources();
+  for (const w of discovered.warnings) {
+    deps.writeLine(tui.dim(w));
+  }
+  if (discovered.rows.length === 0) {
+    deps.writeLine(
+      tui.dim("No MCP servers found in ~/.cursor/mcp.json or ./.cursor/mcp.json."),
+    );
+    return;
+  }
+  const picked = await deps.pick(discovered.rows, {
+    title: "Pick MCP servers to add",
+    renderItem: (row) =>
+      `${row.name}  ${tui.dim(`[${row.source}]`)}  ${tui.dim(`(${row.config.type})`)}`,
+    filterText: (row) => `${row.name} ${row.source}`,
+    multiSelect: true,
+    isTTY: deps.isTTY,
+  });
+  if (picked.kind === "cancelled" || !("values" in picked) || picked.values.length === 0) {
+    deps.writeLine(tui.dim("Cancelled."));
+    return;
+  }
+  const map: Record<string, McpServerConfig> = {};
+  for (const row of picked.values) {
+    map[row.name] = row.config;
+  }
+  await importAndReport(deps, map);
 }
