@@ -65,6 +65,8 @@ describe("runOrchestration with SDK (happy path)", () => {
   beforeEach(() => {
     process.env.CURSOR_API_KEY = "sk-fake";
     process.env.GH_TOKEN = "ghp-fake";
+    process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES = "0";
+    delete process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRY_MS;
   });
   afterEach(() => {
     process.env = { ...originalEnv };
@@ -135,6 +137,34 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
+  });
+
+  it("after run error, retries resolving output and finishes when conversation JSON appears on a later attempt", async () => {
+    process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES = "4";
+    process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRY_MS = "0";
+    const config = singleTaskConfig();
+    const workerJson = { task_id: "t1", status: "completed", summary: "late conversation", outputs: { k: "v" } };
+    let convCalls = 0;
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING")],
+          result: { id: "r1", status: "error" },
+        },
+      ],
+      conversationText: () => {
+        convCalls += 1;
+        if (convCalls < 2) {
+          return "still generating screens";
+        }
+        return `\n\n\`\`\`json\n${JSON.stringify(workerJson)}\n\`\`\`\n`;
+      },
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-conv-retry", fake, store);
+    expect(convCalls).toBeGreaterThanOrEqual(2);
+    expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
+    expect(JSON.parse(files.get("state.json")!).agents.t1.status).toBe("finished");
   });
 
   it("recovers a completed task from the conversation API when the stream ends before the final JSON", async () => {

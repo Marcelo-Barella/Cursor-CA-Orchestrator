@@ -49,6 +49,28 @@ const STOP_POLL_INTERVAL_MS = 5_000;
 const MAX_WAKEUP_INTERVAL_MS = 10_000;
 const BLOCKED_TIMEOUT_SECONDS = 300;
 const MAX_RETRY_COUNT = 1;
+const WORKER_ARTIFACT_ERROR_RETRIES_DEFAULT = 6;
+const WORKER_ARTIFACT_ERROR_RETRY_MS_DEFAULT = 2_000;
+
+function readWorkerArtifactErrorRetryPlan(): { maxRetries: number; delayMs: number } {
+  let maxRetries = WORKER_ARTIFACT_ERROR_RETRIES_DEFAULT;
+  const retriesRaw = process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES;
+  if (retriesRaw !== undefined && retriesRaw !== "") {
+    const n = Number(retriesRaw);
+    if (Number.isFinite(n) && n >= 0 && n <= 60) {
+      maxRetries = Math.floor(n);
+    }
+  }
+  let delayMs = WORKER_ARTIFACT_ERROR_RETRY_MS_DEFAULT;
+  const delayRaw = process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRY_MS;
+  if (delayRaw !== undefined && delayRaw !== "") {
+    const n = Number(delayRaw);
+    if (Number.isFinite(n) && n >= 0 && n <= 60_000) {
+      delayMs = Math.floor(n);
+    }
+  }
+  return { maxRetries, delayMs };
+}
 const MAX_WORKER_OUTPUT_BYTES = 512 * 1024;
 const MAX_SUMMARY_BYTES = 4096;
 const MAX_OUTPUTS_BYTES = 256 * 1024;
@@ -771,36 +793,48 @@ async function runWorkerStream(
   }
 
   const sdkAgent = handle.sdkAgent;
-  let payloadRaw: unknown = null;
-  let payloadSource: "artifact" | "assistant" | "conversation" | "none" = "none";
-  try {
-    const artifact = await tryDownloadJsonArtifact(sdkAgent, WORKER_OUTPUT_ARTIFACT_PATH);
-    if (artifact.value !== null) {
-      payloadRaw = artifact.value;
-      payloadSource = "artifact";
-    }
-  } catch {
-    /* handled as null below */
-  }
-  if (payloadRaw === null) {
-    const fallback = parseAssistantJsonFromMessages(handle.assistantMessages);
-    if (fallback !== null) {
-      payloadRaw = fallback;
-      payloadSource = "assistant";
-    }
-  }
-  if (payloadRaw === null && typeof ctx.agentClient.fetchAgentConversationText === "function") {
+  const resolveWorkerOutput = async (): Promise<{ raw: unknown | null; source: "artifact" | "assistant" | "conversation" | "none" }> => {
     try {
-      const conversationText = await ctx.agentClient.fetchAgentConversationText(sdkAgent.agentId);
-      if (conversationText) {
-        const parsed = parseAssistantJsonFromText(conversationText);
-        if (parsed !== null) {
-          payloadRaw = parsed;
-          payloadSource = "conversation";
-        }
+      const artifact = await tryDownloadJsonArtifact(sdkAgent, WORKER_OUTPUT_ARTIFACT_PATH);
+      if (artifact.value !== null) {
+        return { raw: artifact.value, source: "artifact" };
       }
     } catch {
-      /* conversation fallback is best-effort */
+      /* handled as null below */
+    }
+    const fallback = parseAssistantJsonFromMessages(handle.assistantMessages);
+    if (fallback !== null) {
+      return { raw: fallback, source: "assistant" };
+    }
+    if (typeof ctx.agentClient.fetchAgentConversationText === "function") {
+      try {
+        const conversationText = await ctx.agentClient.fetchAgentConversationText(sdkAgent.agentId);
+        if (conversationText) {
+          const parsed = parseAssistantJsonFromText(conversationText);
+          if (parsed !== null) {
+            return { raw: parsed, source: "conversation" };
+          }
+        }
+      } catch {
+        /* conversation fallback is best-effort */
+      }
+    }
+    return { raw: null, source: "none" };
+  };
+
+  let { raw: payloadRaw, source: payloadSource } = await resolveWorkerOutput();
+  if (payloadRaw === null && result.status === "error") {
+    const { maxRetries, delayMs } = readWorkerArtifactErrorRetryPlan();
+    for (let retry = 0; retry < maxRetries; retry++) {
+      if (delayMs > 0) {
+        await delay(delayMs);
+      }
+      const next = await resolveWorkerOutput();
+      if (next.raw !== null) {
+        payloadRaw = next.raw;
+        payloadSource = next.source;
+        break;
+      }
     }
   }
   const payload = normalizeWorkerPayload(payloadRaw, taskId);
