@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.1 - 2026-04-22
+
+- Minor bug fixes
+
 ## 2.0.0 - 2026-04-17
 
 - **Documentation:** The Cloud Agent TypeScript SDK is documented at [cursor.com/docs/cloud-agent/typescript-sdk](https://cursor.com/docs/cloud-agent/typescript-sdk).
