@@ -129,7 +129,46 @@ export function buildCloudAgentOptions(opts: CreateCloudAgentOpts): SdkAgentOpti
   return options;
 }
 
+let createAgentBodyRewriteInstalled = false;
+
+function isCreateAgentsEndpoint(url: string, method: string): boolean {
+  if (method.toUpperCase() !== "POST") return false;
+  return /https:\/\/api\.cursor\.com\/v1\/agents(?:\?|$)/.test(url);
+}
+
+function stripUnsupportedBranchFields(body: Record<string, unknown>): Record<string, unknown> {
+  const hasBranchName = Object.prototype.hasOwnProperty.call(body, "branchName");
+  const hasAutoGen = Object.prototype.hasOwnProperty.call(body, "autoGenerateBranch");
+  if (!hasBranchName && !hasAutoGen) return body;
+  const next: Record<string, unknown> = { ...body };
+  delete next.branchName;
+  delete next.autoGenerateBranch;
+  return next;
+}
+
+function installCreateAgentBodyRewrite(): void {
+  if (createAgentBodyRewriteInstalled) return;
+  createAgentBodyRewriteInstalled = true;
+  const orig = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = (async (input: unknown, init?: unknown) => {
+    const url = typeof input === "string" ? input : (input as { url?: string })?.url ?? String(input);
+    const method = (init as { method?: string } | undefined)?.method ?? "GET";
+    let nextInit = init as (RequestInit & { body?: unknown }) | undefined;
+    if (typeof url === "string" && isCreateAgentsEndpoint(url, method) && typeof nextInit?.body === "string") {
+      try {
+        const parsed = JSON.parse(nextInit.body) as Record<string, unknown>;
+        const rewritten = stripUnsupportedBranchFields(parsed);
+        if (rewritten !== parsed) {
+          nextInit = { ...nextInit, body: JSON.stringify(rewritten) };
+        }
+      } catch {}
+    }
+    return orig(input as Parameters<typeof fetch>[0], nextInit as Parameters<typeof fetch>[1]);
+  }) as typeof fetch;
+}
+
 export function createDefaultAgentClient(apiKey: string): AgentClient {
+  installCreateAgentBodyRewrite();
   return {
     createCloudAgent(opts: CreateCloudAgentOpts): SdkAgent {
       return CursorAgent.create(buildCloudAgentOptions({ ...opts, apiKey }));
