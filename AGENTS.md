@@ -6,7 +6,7 @@ The full reference for the `@cursor/february` TypeScript SDK is captured in Noti
 
 - **Notion page**: [Cursor SDK February](https://www.notion.so/348e0d0138a7817280e5f70290f4ad5d)
 - **Notion page ID**: `348e0d01-38a7-8172-80e5-f70290f4ad5d`
-- **Upstream source**: https://cursor.com/docs/api/sdk/typescript
+- **Upstream source**: [https://cursor.com/docs/api/sdk/typescript](https://cursor.com/docs/api/sdk/typescript)
 
 ### How to Retrieve
 
