@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.2 - 2026-04-23
+
+- Fix plan ref and SDK `startingRef` for consolidated run-line and per-task worker launches.
+- Fix repo-creation prompt when using consolidated run-line (example run branch in instructions).
+- **Failure / cascade debugging:** `state.json` task agents include `cascade_source_task_id` when a failure is only due to an upstream task; `status` and `logs --run` print a “Failure analysis” block (root vs cascaded, suggested `logs --run … --task <root>`); `logs --task` notes cascaded tasks with no worker transcript; the watch TUI status bar shows root task ids. Legacy runs without the new field still classify cascades from the `Upstream task … failed` summary.
+- Tests: parallel delegation overlap coverage, `startingRef` expectations, fake client concurrent-send tracking, and `failure-diagnostics` unit tests.
+
 ## 2.0.1 - 2026-04-22
 
 - Minor bug fixes
