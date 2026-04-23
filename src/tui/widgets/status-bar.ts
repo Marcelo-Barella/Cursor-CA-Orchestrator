@@ -1,4 +1,5 @@
 import blessed from "blessed";
+import { partitionFailedAgents } from "../../lib/failure-diagnostics.js";
 import type { OrchestrationState } from "../../state.js";
 
 const TERMINAL_ORCH_STATUSES = new Set(["completed", "failed", "stopped"]);
@@ -58,7 +59,15 @@ export function updateStatusBar(bar: blessed.Widgets.BoxElement, state: Orchestr
     if (s === "completed") {
       tagged = `{green-fg}Completed{/} — Press q or Ctrl+C to exit`;
     } else if (s === "failed") {
-      tagged = `{red-fg}Failed{/} — Press q or Ctrl+C to exit`;
+      const { roots } = partitionFailedAgents(state.agents);
+      const rootHint =
+        roots.length > 0
+          ? ` — root: ${roots
+              .map((r) => r.taskId)
+              .slice(0, 3)
+              .join(", ")}${roots.length > 3 ? "..." : ""}`
+          : "";
+      tagged = `{red-fg}Failed{/}${rootHint} — q/quit`;
     } else {
       tagged = `{gray-fg}Stopped{/} — Press q or Ctrl+C to exit`;
     }

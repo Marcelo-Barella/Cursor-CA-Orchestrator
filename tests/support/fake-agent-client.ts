@@ -145,11 +145,15 @@ export interface FakeAgentClientOptions {
   runsByAgent?: Record<string, FakeRunScript[]>;
   defaultScripts?: FakeRunScript[];
   conversationText?: string | null | ((agentId: string) => string | null);
+  sendPreDelayMs?: number;
 }
 
 export class FakeAgentClient implements AgentClient {
   readonly launches: FakeLaunch[] = [];
   readonly conversationCalls: string[] = [];
+  maxConcurrentSends = 0;
+  private _activeSends = 0;
+  private readonly sendPreDelayMs: number;
   private readonly runsByAgent: Map<string, FakeRunScript[]>;
   private readonly defaultScripts: FakeRunScript[];
   private readonly conversationText: string | null | ((agentId: string) => string | null) | undefined;
@@ -161,6 +165,7 @@ export class FakeAgentClient implements AgentClient {
     }
     this.defaultScripts = [...(opts.defaultScripts ?? [])];
     this.conversationText = opts.conversationText;
+    this.sendPreDelayMs = opts.sendPreDelayMs ?? 0;
   }
 
   async fetchAgentConversationText(agentId: string): Promise<string | null> {
@@ -182,9 +187,18 @@ export class FakeAgentClient implements AgentClient {
     this.launches.push({ opts, agent, run: null as unknown as FakeSdkRun });
     const originalSend = agent.send.bind(agent);
     agent.send = async () => {
-      const run = await originalSend();
-      this.launches[this.launches.length - 1]!.run = run as FakeSdkRun;
-      return run;
+      this._activeSends += 1;
+      this.maxConcurrentSends = Math.max(this.maxConcurrentSends, this._activeSends);
+      try {
+        if (this.sendPreDelayMs > 0) {
+          await new Promise<void>((r) => setTimeout(r, this.sendPreDelayMs));
+        }
+        const run = await originalSend();
+        this.launches[this.launches.length - 1]!.run = run as FakeSdkRun;
+        return run;
+      } finally {
+        this._activeSends -= 1;
+      }
     };
     return agent;
   }

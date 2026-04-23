@@ -1,3 +1,9 @@
+import {
+  buildFailureDiagnosisLines,
+  hasAnyFailedAgent,
+  inferCascadeSourceTaskId,
+  isFailedDueToCascade,
+} from "../failure-diagnostics.js";
 import { RepoStoreClient } from "../../api/repo-store.js";
 import { deserialize, readEvents } from "../../state.js";
 import { tui } from "../../tui/style.js";
@@ -202,6 +208,17 @@ export async function runLogsCommand(opts: LogsOptions): Promise<void> {
         exitCode: 1,
       });
     }
+    if (isFailedDueToCascade(agent)) {
+      const src = inferCascadeSourceTaskId(agent);
+      if (src) {
+        console.log(
+          tui.dim(
+            `Task ${opts.task} failed due to upstream task ${src} (no worker run). Inspect: cursor-orch logs --run ${opts.run} --task ${src}`,
+          ),
+        );
+        console.log();
+      }
+    }
     const transcript = await repoStore.readFile(opts.run, `transcripts/${opts.task}.jsonl`);
     if (!transcript.trim()) {
       renderFeedback({
@@ -225,6 +242,16 @@ export async function runLogsCommand(opts: LogsOptions): Promise<void> {
   }
 
   const events = await readEvents(repoStore, opts.run);
+  if (hasAnyFailedAgent(state.agents)) {
+    const failLines = buildFailureDiagnosisLines(state, state.run_id);
+    if (failLines?.length) {
+      console.log(tui.bold("Failure analysis"));
+      for (const line of failLines) {
+        console.log(line);
+      }
+      console.log();
+    }
+  }
   if (!events.length) {
     renderFeedback({
       code: "LOGS-007",

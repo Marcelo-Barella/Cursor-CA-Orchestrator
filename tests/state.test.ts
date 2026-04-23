@@ -29,6 +29,7 @@ describe("state", () => {
     const back = deserialize(s);
     expect(back.run_id).toBe("run1");
     expect(back.agents.a).toBeDefined();
+    expect(back.agents.a!.cascade_source_task_id).toBeNull();
   });
 
   it("roundtrip preserves delegation phase and group cursors", () => {

@@ -29,19 +29,25 @@ export function buildWorkerPrompt(
   return sections.filter(Boolean).join("\n\n");
 }
 
+export type RepoCreationPromptOpts = {
+  exampleRunBranch?: string;
+};
+
 export function buildRepoCreationPrompt(
   task: TaskConfig,
   runId: string,
   dependencyOutputs: Record<string, Record<string, unknown>>,
+  opts?: RepoCreationPromptOpts,
 ): string {
   const sections = [
     WORKER_SYSTEM_PROMPT,
     sectionRunContext(runId),
     sectionTask(task),
     sectionRepoCreation(task),
+    opts?.exampleRunBranch ? sectionRepoCreationRunLine(opts.exampleRunBranch) : "",
     sectionDependencies(task, dependencyOutputs),
     sectionOutputProtocol(task),
-    sectionRules(),
+    sectionRules(opts?.exampleRunBranch),
   ];
   return sections.filter(Boolean).join("\n\n");
 }
@@ -69,6 +75,15 @@ function sectionRepoCreation(task: TaskConfig): string {
     "All code MUST go to the new repo, not to the current working directory.",
   );
   return lines.join("\n");
+}
+
+function sectionRepoCreationRunLine(exampleRunBranch: string): string {
+  return [
+    "GIT TARGET (new repository, consolidated run line):",
+    "After you create and clone the new repository, determine the default branch name you will report as \"repo_ref\" in your output (e.g. main).",
+    `Commit and push all work to branch "${exampleRunBranch}" on the new remote only. The example uses "main" in the branch name; if your default branch is not "main", substitute your outputs.repo_ref for "main" in that pattern.`,
+    "Do not open a pull request; the orchestrator opens one from the run branch when all tasks complete.",
+  ].join("\n");
 }
 
 function sectionTask(task: TaskConfig): string {

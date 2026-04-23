@@ -2,6 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { RepoStoreClient } from "./api/repo-store.js";
 import { parseConfig } from "./config/index.js";
 import type { OrchestratorConfig } from "./config/types.js";
+import { buildFailureDiagnosisLines, hasAnyFailedAgent } from "./lib/failure-diagnostics.js";
 import { type OrchestrationEvent, type OrchestrationState, deserialize, readEvents } from "./state.js";
 import { isQuietProgress } from "./tui/progress.js";
 import { table, tui } from "./tui/style.js";
@@ -96,6 +97,16 @@ export async function renderSnapshot(state: OrchestrationState, config: Orchestr
   console.log(buildHeader(state, config));
   console.log();
   console.log(buildTable(state, config));
+  if (hasAnyFailedAgent(state.agents)) {
+    const failLines = buildFailureDiagnosisLines(state, state.run_id);
+    if (failLines?.length) {
+      console.log();
+      console.log(tui.bold("Failure analysis"));
+      for (const line of failLines) {
+        console.log(line);
+      }
+    }
+  }
   const cpl = consolidatedPrLines(state);
   if (cpl.length) {
     console.log();

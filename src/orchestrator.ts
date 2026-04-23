@@ -4,7 +4,7 @@ import { RepoStoreClient } from "./api/repo-store.js";
 import type { OrchestratorConfig, TaskConfig } from "./config/types.js";
 import { canonicalizeOrchestratorConfig } from "./config/canonicalize.js";
 import { parseConfig, toYaml } from "./config/parse.js";
-import { canonicalRepoAliasForTask, validateConfig } from "./config/validate.js";
+import { validateConfig } from "./config/validate.js";
 import { buildPlannerPrompt, parseTaskPlan, waitForPlan } from "./planner.js";
 import { WORKER_OUTPUT_ARTIFACT_PATH, buildRepoCreationPrompt, buildWorkerPrompt } from "./prompt-builder.js";
 import { extractConstraintsFromPrompt, validateTaskPromptsAgainstConstraints } from "./lib/constraint-validator.js";
@@ -272,13 +272,8 @@ export function computeBranchName(branchPrefix: string, runId: string, taskId: s
   return base;
 }
 
-function resolvePlanRefForTask(task: TaskConfig, config: OrchestratorConfig): string | null {
-  const alias = canonicalRepoAliasForTask(task, config.repositories);
-  if (!alias) {
-    return null;
-  }
-  const rc = config.repositories[alias];
-  return rc ? rc.ref : null;
+export function planRefForConsolidatedRunLine(task: TaskConfig, resolvedRef: string): string | null {
+  return task.create_repo ? null : resolvedRef;
 }
 
 function makeEvent(
@@ -421,6 +416,7 @@ async function cascadeFailures(
     const agent = state.agents[taskId];
     if (!agent || (agent.status !== "pending" && agent.status !== "blocked")) continue;
     agent.status = "failed";
+    agent.cascade_source_task_id = failedTaskId;
     agent.summary = `Upstream task ${failedTaskId} failed`;
     cascaded.push(taskId);
     await appendEvent(repoStore, runId, makeEvent("task_failed", `Task ${taskId} failed: upstream ${failedTaskId} failed`, taskId));
@@ -511,6 +507,7 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
         blocked_reason: null,
         blocked_since: null,
         retry_count: 0,
+        cascade_source_task_id: null,
       };
     }
   }
@@ -590,12 +587,16 @@ async function launchWorkerAgent(
 ): Promise<void> {
   const agent = ctx.state.agents[taskId]!;
   const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
-  const planRef = resolvePlanRefForTask(task, ctx.config);
+  const planRef = planRefForConsolidatedRunLine(task, ref);
   const runLine =
-    !task.create_repo && ctx.config.target.branch_layout === "consolidated" && ctx.config.target.consolidate_prs && planRef;
-  let launchRef = ref;
+    Boolean(planRef) &&
+    !task.create_repo &&
+    ctx.config.target.branch_layout === "consolidated" &&
+    ctx.config.target.consolidate_prs;
+  let startingRefForSdk = ref;
   let workerBranch = computeBranchName(ctx.config.target.branch_prefix, ctx.runId, taskId, agent.retry_count);
   let runBranchForPrompt: string | undefined;
+  let promptLaunchRef: string | undefined;
   if (runLine && planRef) {
     const ownerRepo = parseGithubOwnerRepo(repoUrl);
     const rb = runBranchName(ctx.config.target.branch_prefix, ctx.runId, planRef);
@@ -618,34 +619,65 @@ async function launchWorkerAgent(
       }
     }
     const gk = groupKeyForRepo(repoUrl, planRef);
-    launchRef = ctx.state.repo_run_head?.[gk] ?? planRef;
+    startingRefForSdk = ownerRepo ? (ctx.state.repo_run_head?.[gk] ?? rb) : planRef;
     workerBranch = rb;
     runBranchForPrompt = rb;
+    promptLaunchRef = startingRefForSdk;
+  } else if (!task.create_repo) {
+    const ownerRepo = parseGithubOwnerRepo(repoUrl);
+    if (ownerRepo && ctx.ghToken) {
+      const ensured = await ensureRunBranchFromBase(ctx.ghToken, ownerRepo.owner, ownerRepo.repo, ref, workerBranch);
+      if (ensured.error) {
+        const summary = `Failed to prepare task branch for task ${taskId}: ${ensured.error}`;
+        console.error(summary);
+        agent.status = "failed";
+        agent.summary = summary;
+        await appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed: ${ensured.error}`, taskId, {
+            payload: { repository: repoUrl, ref },
+          }),
+        );
+        markStateDirty(ctx);
+        return;
+      }
+      startingRefForSdk = workerBranch;
+    }
+    runBranchForPrompt = workerBranch;
+    promptLaunchRef = undefined;
   }
+  const exampleRunBranch = runBranchName(ctx.config.target.branch_prefix, ctx.runId, "main");
   const prompt = task.create_repo
-    ? buildRepoCreationPrompt(task, ctx.runId, depOutputs)
+    ? buildRepoCreationPrompt(
+        task,
+        ctx.runId,
+        depOutputs,
+        ctx.config.target.branch_layout === "consolidated" && ctx.config.target.consolidate_prs
+          ? { exampleRunBranch }
+          : undefined,
+      )
     : buildWorkerPrompt(task, ctx.runId, depOutputs, {
         runBranch: runBranchForPrompt,
-        launchRef,
+        launchRef: promptLaunchRef,
         perTaskBranch: computeBranchName(ctx.config.target.branch_prefix, ctx.runId, taskId, agent.retry_count),
       });
   const model = task.model ?? ctx.config.model;
-  const autoPr = ctx.config.target.auto_create_pr && !ctx.config.target.consolidate_prs;
   let sdkAgent: SdkAgent;
   try {
     sdkAgent = ctx.agentClient.createCloudAgent({
       apiKey: ctx.apiKey,
       model,
       repoUrl,
-      startingRef: launchRef,
+      startingRef: startingRefForSdk,
       branchName: workerBranch,
-      autoCreatePR: autoPr,
+      autoCreatePR: false,
       skipReviewerRequest: true,
       mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${launchRef})`;
+    const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${startingRefForSdk})`;
     console.error(summary);
     agent.status = "failed";
     agent.summary = summary;
@@ -653,7 +685,7 @@ async function launchWorkerAgent(
       ctx.repoStore,
       ctx.runId,
       makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
-        payload: { repository: repoUrl, ref: launchRef },
+        payload: { repository: repoUrl, ref: startingRefForSdk },
       }),
     );
     markStateDirty(ctx);
@@ -673,7 +705,7 @@ async function launchWorkerAgent(
       ctx.repoStore,
       ctx.runId,
       makeEvent("task_failed", `Task ${taskId} failed: send error (${detail})`, taskId, {
-        payload: { repository: repoUrl, ref: launchRef },
+        payload: { repository: repoUrl, ref: startingRefForSdk },
       }),
     );
     markStateDirty(ctx);
@@ -690,7 +722,7 @@ async function launchWorkerAgent(
       phase_id: "execution",
       agent_node_id: taskId,
       agent_kind: "task",
-      payload: { run_id: run.id, repository: repoUrl, ref: launchRef, branch: workerBranch },
+      payload: { run_id: run.id, repository: repoUrl, ref: startingRefForSdk, branch: workerBranch },
     }),
   );
   const transcript = createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId });
@@ -702,7 +734,7 @@ async function launchWorkerAgent(
     transcript,
     done: Promise.resolve(),
   };
-  handle.done = runWorkerStream(ctx, handle, { repoUrl, ref: launchRef, runLine: Boolean(runLine) && Boolean(planRef), planRef });
+  handle.done = runWorkerStream(ctx, handle, { repoUrl, ref: startingRefForSdk, runLine, planRef });
   ctx.activeWorkers.set(taskId, handle);
   markStateDirty(ctx);
 }
@@ -851,6 +883,7 @@ async function runWorkerStream(
   const payloadSummary = typeof payload?.summary === "string" ? (payload.summary as string) : null;
   const payloadBlockedReason = typeof payload?.blocked_reason === "string" ? (payload.blocked_reason as string) : null;
 
+  const taskCfg = ctx.config.tasks.find((t) => t.id === taskId);
   if (info.runLine && info.planRef) {
     const ownerRepo = parseGithubOwnerRepo(info.repoUrl);
     if (ownerRepo) {
@@ -858,6 +891,24 @@ async function runWorkerStream(
       ctx.state.repo_run_head = ctx.state.repo_run_head ?? {};
       ctx.state.repo_run_head[gk] = runBranchName(ctx.config.target.branch_prefix, ctx.runId, info.planRef);
       agent.branch_name = ctx.state.repo_run_head[gk]!;
+    }
+  } else if (
+    taskCfg?.create_repo &&
+    payload &&
+    payloadStatus === "completed" &&
+    typeof (payload.outputs as Record<string, unknown> | undefined)?.repo_url === "string"
+  ) {
+    const outputs = payload.outputs as Record<string, unknown>;
+    const repoRefRaw = outputs.repo_ref;
+    const repoRef = typeof repoRefRaw === "string" && repoRefRaw.trim() !== "" ? repoRefRaw.trim() : "main";
+    const rb = runBranchName(ctx.config.target.branch_prefix, ctx.runId, repoRef);
+    agent.branch_name = rb;
+    const ownerRepo = parseGithubOwnerRepo(String(outputs.repo_url));
+    if (ctx.ghToken && ownerRepo) {
+      const ensured = await ensureRunBranchFromBase(ctx.ghToken, ownerRepo.owner, ownerRepo.repo, repoRef, rb);
+      if (ensured.error) {
+        console.warn(`create_repo run branch ensure failed for ${taskId}: ${ensured.error}`);
+      }
     }
   } else if (result.git?.branch) {
     agent.branch_name = result.git.branch;
@@ -1005,8 +1056,12 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
       const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
       info.repoUrl = repoUrl;
       info.ref = ref;
-      info.planRef = resolvePlanRefForTask(task, ctx.config);
-      info.runLine = Boolean(info.planRef) && !task.create_repo && ctx.config.target.branch_layout === "consolidated" && ctx.config.target.consolidate_prs;
+      info.planRef = planRefForConsolidatedRunLine(task, ref);
+      info.runLine =
+        Boolean(info.planRef) &&
+        !task.create_repo &&
+        ctx.config.target.branch_layout === "consolidated" &&
+        ctx.config.target.consolidate_prs;
     } catch {
       /* fall through with empty info; branch_name will not update via run-line logic */
     }
@@ -1047,14 +1102,16 @@ async function launchReadyTasks(ctx: LoopContext): Promise<void> {
   const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks);
   if (eligible.length === 0) return;
   const taskMap = Object.fromEntries(ctx.config.tasks.map((t) => [t.id, t]));
-  for (const taskId of eligible) {
-    const task = taskMap[taskId];
-    if (!task) continue;
-    assignTaskPhase(ctx.state, taskId, "execution");
-    setPhaseStatus(ctx.state, "execution", "running", { timestamp: nowIso() });
-    const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
-    await launchWorkerAgent(ctx, taskId, task, depOutputs);
-  }
+  await Promise.all(
+    eligible.map(async (taskId) => {
+      const task = taskMap[taskId];
+      if (!task) return;
+      assignTaskPhase(ctx.state, taskId, "execution");
+      setPhaseStatus(ctx.state, "execution", "running", { timestamp: nowIso() });
+      const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+      await launchWorkerAgent(ctx, taskId, task, depOutputs);
+    }),
+  );
 }
 
 async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
@@ -1089,7 +1146,87 @@ async function writeProgress(ctx: LoopContext): Promise<void> {
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
 }
 
-async function maybeConsolidatePullRequests(
+async function openPerTaskPullRequests(
+  state: OrchestrationState,
+  config: OrchestratorConfig,
+  repoStore: RepoStoreClient,
+  runId: string,
+  ghToken: string,
+): Promise<void> {
+  const urls: Record<string, string> = {};
+  const errors: Record<string, string> = {};
+
+  for (const task of config.tasks) {
+    const agent = state.agents[task.id];
+    if (!agent || agent.status !== "finished") continue;
+    const branch = agent.branch_name;
+    if (!branch) {
+      errors[`task:${task.id}`] = "missing branch_name";
+      continue;
+    }
+    let repoUrl: string;
+    let baseRef: string;
+    if (task.create_repo) {
+      const workerOut = await readWorkerOutputFromRepo(repoStore, runId, task.id);
+      const outputs = (workerOut?.outputs as Record<string, unknown>) ?? {};
+      const url = typeof outputs.repo_url === "string" ? outputs.repo_url : null;
+      if (!url || !parseGithubOwnerRepo(url)) {
+        errors[`task:${task.id}`] = "missing repo_url in worker output";
+        continue;
+      }
+      repoUrl = url;
+      baseRef = typeof outputs.repo_ref === "string" ? outputs.repo_ref : "main";
+    } else {
+      try {
+        const depOutputs = await gatherDepOutputs(task, repoStore, runId);
+        const resolved = await resolveRepoForTask(task, config, depOutputs, ghToken);
+        repoUrl = resolved[0];
+        baseRef = resolved[1];
+      } catch (e) {
+        errors[`task:${task.id}`] = e instanceof Error ? e.message : String(e);
+        continue;
+      }
+    }
+    const ownerRepo = parseGithubOwnerRepo(repoUrl);
+    if (!ownerRepo) {
+      errors[`task:${task.id}`] = `not a GitHub repo URL: ${repoUrl}`;
+      continue;
+    }
+    const gk = `task:${task.id}`;
+    const title = `cursor-orch: ${config.name} / ${task.id} (${runId})`;
+    const body = `Task ${task.id}\n\nRun: ${runId}\nBase: ${baseRef}`;
+    const r = await openPullRequestForRunBranch(ghToken, {
+      groupKey: gk,
+      owner: ownerRepo.owner,
+      repo: ownerRepo.repo,
+      baseRef,
+      runBranch: branch,
+      title,
+      body,
+    });
+    if (r.error) {
+      errors[gk] = r.error;
+    } else if (r.prUrl) {
+      urls[gk] = r.prUrl;
+      agent.pr_url = r.prUrl;
+    }
+    await appendEvent(
+      repoStore,
+      runId,
+      makeEvent(
+        r.error ? "consolidated_pr_failed" : "consolidated_pr_created",
+        r.error ?? `Pull request ${r.prUrl ?? ""}`,
+        task.id,
+        { agent_node_id: "main-orchestrator", agent_kind: "main", payload: { group_key: gk, task_id: task.id } },
+      ),
+    );
+  }
+
+  state.consolidated_pr_urls = Object.keys(urls).length ? urls : null;
+  state.consolidated_pr_errors = Object.keys(errors).length ? errors : null;
+}
+
+async function maybeFinalizePullRequests(
   state: OrchestrationState,
   config: OrchestratorConfig,
   graph: Record<string, Set<string>>,
@@ -1099,6 +1236,12 @@ async function maybeConsolidatePullRequests(
   const ghToken = process.env.GH_TOKEN;
   if (!ghToken) return;
   if (state.consolidated_pr_urls && Object.keys(state.consolidated_pr_urls).length > 0) return;
+  if (!config.target.auto_create_pr) return;
+
+  if (!config.target.consolidate_prs) {
+    await openPerTaskPullRequests(state, config, repoStore, runId, ghToken);
+    return;
+  }
 
   const groups = new Map<string, { repoUrl: string; ref: string; taskIds: string[] }>();
 
@@ -1209,8 +1352,8 @@ async function maybeConsolidatePullRequests(
 async function checkCompletion(ctx: LoopContext): Promise<boolean> {
   if (ctx.activeWorkers.size > 0) return false;
   if (!checkAllFinished(ctx.state)) return false;
-  if (ctx.config.target.auto_create_pr && ctx.config.target.consolidate_prs) {
-    await maybeConsolidatePullRequests(ctx.state, ctx.config, ctx.graph, ctx.runId, ctx.repoStore);
+  if (ctx.config.target.auto_create_pr) {
+    await maybeFinalizePullRequests(ctx.state, ctx.config, ctx.graph, ctx.runId, ctx.repoStore);
   }
   ctx.state.status = "completed";
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
@@ -1391,8 +1534,12 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
           const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
           info.repoUrl = repoUrl;
           info.ref = ref;
-          info.planRef = resolvePlanRefForTask(task, ctx.config);
-          info.runLine = Boolean(info.planRef) && !task.create_repo && ctx.config.target.branch_layout === "consolidated" && ctx.config.target.consolidate_prs;
+          info.planRef = planRefForConsolidatedRunLine(task, ref);
+          info.runLine =
+            Boolean(info.planRef) &&
+            !task.create_repo &&
+            ctx.config.target.branch_layout === "consolidated" &&
+            ctx.config.target.consolidate_prs;
         } catch {
           /* ignore */
         }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
@@ -60,6 +60,67 @@ function singleTaskConfig(): OrchestratorConfig {
   };
 }
 
+let unmockedFetch: typeof fetch;
+
+function installGithubBranchPrepMock(): void {
+  unmockedFetch = globalThis.fetch;
+  globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (!url.startsWith("https://api.github.com/")) {
+      return unmockedFetch(input, init);
+    }
+    if (url.includes("/git/ref/heads/")) {
+      const tail = url.split("/git/ref/heads/")[1] ?? "";
+      const decoded = decodeURIComponent(tail);
+      if (decoded === "main" || decoded.endsWith("/main")) {
+        return new Response(JSON.stringify({ object: { sha: "0123456789abcdef0123456789abcdef01234567" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ message: "Not Found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("/git/refs") && init?.method === "POST") {
+      return new Response(JSON.stringify({ ref: "refs/heads/x" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return unmockedFetch(input, init);
+  }) as typeof fetch;
+}
+
+function twoRepoParallelTaskConfig(): OrchestratorConfig {
+  const mk = (id: string, repo: "svc" | "svc2") => ({
+    id,
+    repo,
+    prompt: `task ${id}`,
+    model: null,
+    depends_on: [] as string[],
+    timeout_minutes: 30,
+    create_repo: false,
+    repo_config: null,
+  });
+  return {
+    name: "demo",
+    model: "composer-2",
+    prompt: "",
+    repositories: {
+      svc: { url: "https://github.com/acme/svc", ref: "main" },
+      svc2: { url: "https://github.com/acme/svc2", ref: "main" },
+    },
+    tasks: [mk("t-a", "svc"), mk("t-b", "svc2")],
+    delegation_map: {
+      phases: [{ id: "p1", groups: [{ id: "g1", task_ids: ["t-a", "t-b"] }] }],
+    },
+    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
+    bootstrap_repo_name: "cursor-orch-bootstrap",
+  };
+}
+
 describe("runOrchestration with SDK (happy path)", () => {
   const originalEnv = { ...process.env };
   beforeEach(() => {
@@ -67,9 +128,32 @@ describe("runOrchestration with SDK (happy path)", () => {
     process.env.GH_TOKEN = "ghp-fake";
     process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES = "0";
     delete process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRY_MS;
+    installGithubBranchPrepMock();
   });
   afterEach(() => {
+    globalThis.fetch = unmockedFetch;
     process.env = { ...originalEnv };
+  });
+
+  it("launches all eligible workers in one delegation group before send() returns (overlapping sends)", async () => {
+    const config = twoRepoParallelTaskConfig();
+    const scriptFor = (taskId: string) => ({
+      events: [statusMessage("CREATING"), statusMessage("RUNNING"), assistantText("ok"), statusMessage("FINISHED")],
+      result: { id: `r-${taskId}`, status: "finished" as const, git: { branch: `cursor-orch/run-parallel/${taskId}` } },
+      artifacts: {
+        "cursor-orch-output.json": JSON.stringify({ task_id: taskId, status: "completed", summary: "ok", outputs: {} }),
+      },
+    });
+    const fake = new FakeAgentClient({
+      sendPreDelayMs: 30,
+      defaultScripts: [scriptFor("t-a"), scriptFor("t-b")],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-parallel", fake, store);
+    expect(fake.maxConcurrentSends).toBe(2);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    expect(JSON.parse(files.get("state.json")!).agents["t-a"].status).toBe("finished");
+    expect(JSON.parse(files.get("state.json")!).agents["t-b"].status).toBe("finished");
   });
 
   it("launches a worker, reads the artifact, and marks the run completed", async () => {
@@ -99,6 +183,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
     expect(fake.launches[0]!.opts.branchName).toBe("cursor-orch/run-1/t1");
+    expect(fake.launches[0]!.opts.startingRef).toBe("cursor-orch/run-1/t1");
   });
 
   it("falls back to assistant JSON when the artifact is absent", async () => {
