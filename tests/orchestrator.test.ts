@@ -3,7 +3,9 @@ import type { RepoStoreClient } from "../src/api/repo-store.js";
 import type { AgentClient } from "../src/sdk/agent-client.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import { toYaml } from "../src/config/parse.js";
-import { extractDelegationPhases, filterEligibleReadyTasks, runOrchestration } from "../src/orchestrator.js";
+import type { TaskConfig } from "../src/config/types.js";
+import { buildRepoCreationPrompt } from "../src/prompt-builder.js";
+import { extractDelegationPhases, filterEligibleReadyTasks, planRefForConsolidatedRunLine, runOrchestration } from "../src/orchestrator.js";
 import { createInitialState, deserialize, serialize } from "../src/state.js";
 
 function createConfig(
@@ -277,6 +279,35 @@ describe("orchestrator launch eligibility", () => {
     expect(eligible).toEqual(["b", "c"]);
     expect(restored.delegation_phase_index).toBe(0);
     expect(restored.delegation_group_index).toBe(1);
+  });
+});
+
+describe("planRefForConsolidatedRunLine", () => {
+  it("returns null for create_repo", () => {
+    const task = { create_repo: true } as TaskConfig;
+    expect(planRefForConsolidatedRunLine(task, "main")).toBeNull();
+  });
+  it("returns resolved ref for __new__ surrogate", () => {
+    const task = { create_repo: false } as TaskConfig;
+    expect(planRefForConsolidatedRunLine(task, "develop")).toBe("develop");
+  });
+});
+
+describe("buildRepoCreationPrompt consolidated run line", () => {
+  it("includes exampleRunBranch when passed", () => {
+    const task: TaskConfig = {
+      id: "r1",
+      repo: "svc",
+      prompt: "create",
+      model: null,
+      depends_on: [],
+      timeout_minutes: 30,
+      create_repo: true,
+      repo_config: null,
+    };
+    const example = "p/run-x/main";
+    const p = buildRepoCreationPrompt(task, "run-x", {}, { exampleRunBranch: example });
+    expect(p).toContain(example);
   });
 });
 

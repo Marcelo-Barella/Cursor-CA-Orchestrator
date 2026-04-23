@@ -1,6 +1,7 @@
 import { Command, Flags } from "@oclif/core";
 import { RepoStoreClient } from "../api/repo-store.js";
 import { parseConfig } from "../config/index.js";
+import { formatFailureLogHint, partitionFailedAgents } from "../lib/failure-diagnostics.js";
 import { renderLive, renderSnapshot } from "../dashboard.js";
 import { deserialize, readEvents } from "../state.js";
 
@@ -196,6 +197,12 @@ export default class Status extends Command {
       printNextActions(`Request stop when needed: cursor-orch stop --run ${opts.run}`);
     }
     if (state.status === "failed") {
+      const { roots } = partitionFailedAgents(state.agents);
+      if (roots.length) {
+        printNextActions(
+          ...roots.map((r) => `Inspect root transcript: ${formatFailureLogHint(opts.run, r.taskId)}`),
+        );
+      }
       printNextActions(
         "Re-run with validated configuration: cursor-orch run --config ./orchestrator.yaml",
         `Fetch conversation details: cursor-orch logs --run ${opts.run}`,
