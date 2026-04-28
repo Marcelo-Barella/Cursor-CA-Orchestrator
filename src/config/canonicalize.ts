@@ -66,6 +66,7 @@ export function canonicalizeOrchestratorConfig(config: OrchestratorConfig): Orch
     repositories: newRepos,
     tasks: newTasks,
     delegation_map: delegationMap,
+    inventory: config.inventory == null ? null : { ...config.inventory },
   };
 }
 

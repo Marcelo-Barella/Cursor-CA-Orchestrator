@@ -1,7 +1,60 @@
-import type { BranchLayout, DelegationMapConfig, McpServerConfig, OrchestratorConfig, TaskConfig } from "./types.js";
+import type {
+  BranchLayout,
+  DelegationMapConfig,
+  InventoryManifestV1,
+  McpServerConfig,
+  OrchestratorConfig,
+  TaskConfig,
+} from "./types.js";
 import { resolveRepoTarget } from "../lib/repo-target.js";
 
 const BRANCH_LAYOUT_VALUES = new Set<BranchLayout>(["consolidated", "per_task"]);
+
+const INVENTORY_SOURCES = new Set<string>(["declared", "discovered", "merged"]);
+const PRODUCT_CLASSES = new Set<string>(["web_app", "api", "library", "static_site"]);
+
+export function validateInventory(manifest: InventoryManifestV1): void {
+  if (manifest.version !== 1) {
+    throw new Error(`inventory.version must be 1, got ${manifest.version}`);
+  }
+  if (!INVENTORY_SOURCES.has(manifest.source)) {
+    throw new Error("inventory.source must be one of: declared, discovered, merged");
+  }
+  if (!PRODUCT_CLASSES.has(manifest.product_class)) {
+    throw new Error(
+      `inventory.product_class must be one of: web_app, api, library, static_site, got '${manifest.product_class}'`,
+    );
+  }
+  if (!Array.isArray(manifest.layers)) {
+    throw new Error("inventory.layers must be an array");
+  }
+  for (const layer of manifest.layers) {
+    if (typeof layer !== "string" || !layer.trim()) {
+      throw new Error("inventory.layers must contain non-empty strings");
+    }
+  }
+  if (manifest.greenfield && manifest.layers.length === 0) {
+    throw new Error("inventory.greenfield: true requires a non-empty inventory.layers list");
+  }
+  if (!Array.isArray(manifest.explicit_deferrals) || !Array.isArray(manifest.required_integrations)) {
+    throw new Error("inventory.explicit_deferrals and inventory.required_integrations must be arrays");
+  }
+  for (const s of manifest.explicit_deferrals) {
+    if (typeof s !== "string" || !s.trim()) {
+      throw new Error("inventory.explicit_deferrals entries must be non-empty strings");
+    }
+  }
+  for (const s of manifest.required_integrations) {
+    if (typeof s !== "string" || !s.trim()) {
+      throw new Error("inventory.required_integrations entries must be non-empty strings");
+    }
+  }
+  if (manifest.repo_hints !== undefined) {
+    if (typeof manifest.repo_hints !== "object" || manifest.repo_hints === null || Array.isArray(manifest.repo_hints)) {
+      throw new Error("inventory.repo_hints must be a mapping of repo key to object");
+    }
+  }
+}
 
 function validateBranchLayout(layout: string): asserts layout is BranchLayout {
   if (!BRANCH_LAYOUT_VALUES.has(layout as BranchLayout)) {
@@ -344,6 +397,9 @@ export function validateConfig(config: OrchestratorConfig): void {
   validateBranchLayout(config.target.branch_layout);
   if (config.mcp_servers) {
     validateMcpServers(config.mcp_servers);
+  }
+  if (config.inventory) {
+    validateInventory(config.inventory);
   }
   if (Object.keys(config.repositories).length > 0) {
     validateRepositoryResolvableUrls(config.repositories);

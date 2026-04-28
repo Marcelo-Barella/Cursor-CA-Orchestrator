@@ -1,5 +1,12 @@
 import { jsonrepair } from "jsonrepair";
-import type { DelegationGroupConfig, DelegationMapConfig, DelegationPhaseConfig, OrchestratorConfig, TaskConfig } from "./config/types.js";
+import type {
+  DelegationGroupConfig,
+  DelegationMapConfig,
+  DelegationPhaseConfig,
+  InventoryManifestV1,
+  OrchestratorConfig,
+  TaskConfig,
+} from "./config/types.js";
 import { PLANNER_SYSTEM_PROMPT } from "./system-prompt.js";
 import type { RepoStoreClient } from "./api/repo-store.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,7 +17,7 @@ const PLANNER_PROMPT_TEMPLATE = `You are a task planner for a multi-repository o
 
 {prompt}
 
-## Available Repositories
+{inventory_block}## Available Repositories
 
 {repo_list}
  
@@ -20,6 +27,8 @@ Analyze the user request above and decompose it into concrete, actionable tasks.
 Each task targets exactly one repository. Respect repository boundaries: create \
 one task per repository per concern. Tasks may declare dependencies on other tasks \
 by referencing their IDs.
+
+**Full product default:** Unless the user request contains explicit scoping that narrows work (MVP, prototype, phase, "only", "just", "later", etc.), the plan must cover a complete application stack: do not return only a UI or only a backend when the user described a system that needs many layers. **Layer deferrals** come only from the inventory's \`explicit_deferrals\` or directly from the user request -- never from an invented "MVP" label.
 
 Produce a JSON task plan with the following structure and write it to the run branch as \
 a file named \`task-plan.json\`.
@@ -115,6 +124,11 @@ gh api --method PUT /repos/{bootstrap_owner}/{bootstrap_repo}/contents/task-plan
 \`\`\`
 `;
 
+function formatInventoryBlock(m: InventoryManifestV1): string {
+  const copy: Record<string, unknown> = { ...m };
+  return `## Inventory\n\nThe following inventory manifest is authoritative for which product layers and integrations this plan must cover. User-declared fields win over any discovered data when they conflict. \`source\` is ${m.source}.\n\n\`\`\`json\n${JSON.stringify(copy, null, 2)}\n\`\`\`\n\n`;
+}
+
 export function buildPlannerPrompt(
   config: OrchestratorConfig,
   runId: string,
@@ -128,7 +142,9 @@ export function buildPlannerPrompt(
     repoLines.push(`- \`${repo.url}\` (ref: \`${repo.ref}\`)`);
   }
   const repoList = repoLines.join("\n");
+  const inventoryBlock = config.inventory ? formatInventoryBlock(config.inventory) : "";
   const body = PLANNER_PROMPT_TEMPLATE.replace("{prompt}", config.prompt)
+    .replace("{inventory_block}", inventoryBlock)
     .replace("{repo_list}", repoList)
     .replace("{run_id}", runId)
     .replace("{plan_tmp_path}", planTmpPath)

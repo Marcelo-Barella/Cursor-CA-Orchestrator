@@ -1,23 +1,86 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import YAML from "yaml";
 import type {
   BranchLayout,
   DelegationGroupConfig,
   DelegationMapConfig,
   DelegationPhaseConfig,
+  InventoryManifestV1,
+  InventorySource,
   McpHttpAuth,
   McpServerConfig,
   OrchestratorConfig,
+  ProductClass,
   RepoConfig,
   TargetConfig,
   TaskConfig,
 } from "./types.js";
 
-export function parseConfig(yamlStr: string): OrchestratorConfig {
-  const raw = YAML.parse(yamlStr) as unknown;
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new Error("Config must be a YAML mapping");
+function isRecord(x: unknown): x is Record<string, unknown> {
+  return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+function parseJsonOrYamlInventoryFile(filePath: string): unknown {
+  const ext = path.extname(filePath).toLowerCase();
+  const raw = fs.readFileSync(filePath, "utf8");
+  if (ext === ".json") {
+    return JSON.parse(raw) as unknown;
   }
-  const r = raw as Record<string, unknown>;
+  if (ext === ".yaml" || ext === ".yml") {
+    return YAML.parse(raw) as unknown;
+  }
+  throw new Error(`inventory_file must end with .json, .yaml, or .yml, got: ${ext || "(empty)"}`);
+}
+
+function parseInventoryValue(raw: unknown): InventoryManifestV1 | null {
+  if (raw === undefined || raw === null) return null;
+  if (!isRecord(raw)) throw new Error("inventory must be a mapping");
+  if (Number(raw.version) !== 1) throw new Error("inventory.version must be 1");
+  return {
+    version: 1,
+    source: String(raw.source) as InventorySource,
+    product_class: String(raw.product_class) as ProductClass,
+    layers: Array.isArray(raw.layers) ? raw.layers.map((x) => String(x)) : [],
+    explicit_deferrals: Array.isArray(raw.explicit_deferrals) ? raw.explicit_deferrals.map((x) => String(x)) : [],
+    required_integrations: Array.isArray(raw.required_integrations)
+      ? raw.required_integrations.map((x) => String(x))
+      : [],
+    greenfield: Boolean(raw.greenfield),
+    repo_hints:
+      raw.repo_hints !== undefined && isRecord(raw.repo_hints)
+        ? (raw.repo_hints as InventoryManifestV1["repo_hints"])
+        : undefined,
+  };
+}
+
+const INVENTORY_MERGE_KEYS = [
+  "version",
+  "source",
+  "product_class",
+  "layers",
+  "explicit_deferrals",
+  "required_integrations",
+  "repo_hints",
+  "greenfield",
+] as const;
+
+function mergeInventoryFromFileAndInline(
+  fromFile: InventoryManifestV1,
+  inlineRecord: Record<string, unknown>,
+  inlineParsed: InventoryManifestV1,
+): InventoryManifestV1 {
+  const o: Record<string, unknown> = { ...(fromFile as unknown as Record<string, unknown>) };
+  for (const k of INVENTORY_MERGE_KEYS) {
+    if (k in inlineRecord) {
+      o[k] = (inlineParsed as unknown as Record<string, unknown>)[k];
+    }
+  }
+  o.version = 1;
+  return o as unknown as InventoryManifestV1;
+}
+
+function parseConfigFromRecord(r: Record<string, unknown>, inventory: InventoryManifestV1 | null): OrchestratorConfig {
   const repositories = parseRepositories((r.repositories as Record<string, unknown>) || {});
   const tasks = parseTasks((r.tasks as unknown[]) || []);
   const delegationMap = parseDelegationMap(r.delegation_map ?? r.delegationMap);
@@ -33,7 +96,47 @@ export function parseConfig(yamlStr: string): OrchestratorConfig {
     target,
     bootstrap_repo_name: (r.bootstrap_repo_name as string) ?? "cursor-orch-bootstrap",
     mcp_servers: mcpServers,
+    inventory,
   };
+}
+
+export function parseConfig(yamlStr: string, options?: { inventoryBaseDir?: string }): OrchestratorConfig {
+  const raw = YAML.parse(yamlStr) as unknown;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("Config must be a YAML mapping");
+  }
+  const r = raw as Record<string, unknown>;
+  let resolvedInventory: InventoryManifestV1 | null = null;
+  const invFileRaw = r.inventory_file;
+  if (typeof invFileRaw === "string" && invFileRaw.trim()) {
+    const baseDir = options?.inventoryBaseDir;
+    if (!baseDir) {
+      throw new Error(
+        "inventory_file is set but inventoryBaseDir was not provided; pass the config file directory when parsing from disk.",
+      );
+    }
+    const filePath = path.resolve(baseDir, invFileRaw.trim());
+    const fromFile = parseInventoryValue(parseJsonOrYamlInventoryFile(filePath));
+    if (!fromFile) {
+      throw new Error("inventory_file must contain a valid inventory manifest");
+    }
+    const inlineRaw = r.inventory;
+    if (isRecord(inlineRaw)) {
+      const mergedRaw = { ...(fromFile as unknown as Record<string, unknown>), ...inlineRaw };
+      const inlineParsed = parseInventoryValue(mergedRaw);
+      if (!inlineParsed) {
+        throw new Error("inventory must be a valid manifest when merging with inventory_file");
+      }
+      resolvedInventory = mergeInventoryFromFileAndInline(fromFile, inlineRaw, inlineParsed);
+    } else {
+      resolvedInventory = fromFile;
+    }
+  } else {
+    resolvedInventory = parseInventoryValue(r.inventory) ?? null;
+  }
+  const rForRest = { ...r };
+  delete rForRest.inventory_file;
+  return parseConfigFromRecord(rForRest, resolvedInventory);
 }
 
 export function toYaml(config: OrchestratorConfig): string {
@@ -82,6 +185,21 @@ export function toYaml(config: OrchestratorConfig): string {
   }
   if (config.mcp_servers && Object.keys(config.mcp_servers).length > 0) {
     data.mcp_servers = serializeMcpServers(config.mcp_servers);
+  }
+  if (config.inventory) {
+    const inv: Record<string, unknown> = {
+      version: config.inventory.version,
+      source: config.inventory.source,
+      product_class: config.inventory.product_class,
+      layers: [...config.inventory.layers],
+      explicit_deferrals: [...config.inventory.explicit_deferrals],
+      required_integrations: [...config.inventory.required_integrations],
+      greenfield: config.inventory.greenfield,
+    };
+    if (config.inventory.repo_hints !== undefined) {
+      inv.repo_hints = config.inventory.repo_hints;
+    }
+    data.inventory = inv;
   }
   return YAML.stringify(data, { sortMapEntries: false });
 }

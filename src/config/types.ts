@@ -18,6 +18,29 @@ export interface TaskConfig {
 
 export type BranchLayout = "consolidated" | "per_task";
 
+export type InventorySource = "declared" | "discovered" | "merged";
+
+export type ProductClass = "web_app" | "api" | "library" | "static_site";
+
+export type InventoryRepoEntry = {
+  role?: string;
+  has_server?: boolean;
+  has_db?: boolean;
+};
+
+export type InventoryRepoHints = Record<string, InventoryRepoEntry>;
+
+export interface InventoryManifestV1 {
+  version: 1;
+  source: InventorySource;
+  product_class: ProductClass;
+  layers: string[];
+  explicit_deferrals: string[];
+  required_integrations: string[];
+  repo_hints?: InventoryRepoHints;
+  greenfield: boolean;
+}
+
 export interface TargetConfig {
   auto_create_pr: boolean;
   consolidate_prs: boolean;
@@ -72,6 +95,7 @@ export interface OrchestratorConfig {
   target: TargetConfig;
   bootstrap_repo_name: string;
   mcp_servers?: Record<string, McpServerConfig>;
+  inventory?: InventoryManifestV1 | null;
 }
 
 export interface ResolvedValue {

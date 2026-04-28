@@ -165,7 +165,8 @@ function loadSourceConfig(
     return { config: null, raw: null };
   }
   try {
-    const parsed = parseConfig(content);
+    const absConfig = path.resolve(configPath);
+    const parsed = parseConfig(content, { inventoryBaseDir: path.dirname(absConfig) });
     return { config: parsed, raw: raw as Record<string, unknown> };
   } catch (exc) {
     findings.push(
@@ -227,7 +228,8 @@ function loadSessionConfig(findings: DiagnosticFinding[]): { config: Orchestrato
     if (typeof raw !== "object" || Array.isArray(raw)) {
       throw new Error("session root must be mapping");
     }
-    const parsed = parseConfig(content);
+    const absSession = path.resolve(sessionPath);
+    const parsed = parseConfig(content, { inventoryBaseDir: path.dirname(absSession) });
     return { config: parsed, raw: raw as Record<string, unknown> };
   } catch {
     findings.push(
