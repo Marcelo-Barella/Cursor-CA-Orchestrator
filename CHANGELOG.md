@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.0 - 2026-04-28
+
+- **Planner inventory manifest v1:** New optional `inventory` block (and sidecar `inventory_file: <path>`) on the orchestrator config declares `product_class`, `layers`, `explicit_deferrals`, `required_integrations`, `greenfield`, and optional `repo_hints`. When present, it is embedded in the planner user prompt (`## Inventory` block) and is authoritative for which product layers and integrations the plan must cover. `parseConfig` now accepts an `inventoryBaseDir` so sidecar paths resolve relative to the loaded config; `Session.load` and `resolveConfigPrecedence` pass the config directory automatically.
+- **Planner prompt completeness rules:** Planner system prompt gains a COMPLETENESS step requiring every inventory `layers` entry to map to at least one task ID (capped at 20 tasks); without an inventory, the planner defaults to client + server/API + persistence for a web app unless the user request uses explicit scoping terms. "MVP", "v1", and "prototype" cannot be used to drop a layer unless the user prompt says so. `explicit_deferrals` may only contain user-stated, narrow concerns and must not be invented.
+- **Worker prompt scope guard:** Worker system prompt instructs agents not to reinterpret tasks as a minimal/MVP slice and not to remove other layers' contracts unless the task prompt explicitly authorizes it.
+- **CLI:** `cursor-orch inventory -o <path>` writes a default `declared`, `greenfield: true` web_app manifest (`client`, `api`, `persistence` + `accounts`) for users to edit and reference from `inventory_file`.
+- **REPL:** `/prompt-set` description now points greenfield users at the inventory block in saved YAML.
+- **Tests:** `tests/planner-prompt-inventory.test.ts` covers planner prompt rendering with/without an inventory; `tests/system-prompt-strings.test.ts` locks in the new planner/worker scope strings; `tests/config.test.ts` adds `validateInventory` cases plus parse coverage for inline manifest, sidecar-only manifest, and inline-overrides-sidecar merge.
+- **Cleanup:** Removed leftover localhost debug fetch instrumentation from `src/lib/github-consolidated-pr.ts` (`mergeBranches` and `openPullRequestForRunBranch`).
+
 ## 2.0.2 - 2026-04-23
 
 - Fix plan ref and SDK `startingRef` for consolidated run-line and per-task worker launches.
