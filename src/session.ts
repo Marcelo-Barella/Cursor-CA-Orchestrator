@@ -74,6 +74,7 @@ export function createDefaultOrchestratorConfig(): OrchestratorConfig {
     target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
     mcp_servers: {},
+    inventory: null,
   };
 }
 const LEGACY_SESSION_ROOT = path.join(os.homedir(), ".cursor-orch");
@@ -246,7 +247,8 @@ export class Session {
   }
 
   load(filePath: string): void {
-    this._config = parseConfig(fs.readFileSync(filePath, "utf8"));
+    const abs = path.resolve(filePath);
+    this._config = parseConfig(fs.readFileSync(abs, "utf8"), { inventoryBaseDir: path.dirname(abs) });
   }
 
   saveSession(): void {

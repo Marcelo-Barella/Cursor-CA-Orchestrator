@@ -6,7 +6,8 @@ import { OrchestratorConfig, TaskConfig } from "../src/config/types.js";
 import { parseConfig, toYaml } from "../src/config/parse.js";
 import { canonicalizeOrchestratorConfig } from "../src/config/canonicalize.js";
 import { resolveConfigPrecedence } from "../src/config/resolve.js";
-import { validateConfig, validateRepoRefs } from "../src/config/validate.js";
+import type { InventoryManifestV1 } from "../src/config/types.js";
+import { validateConfig, validateInventory, validateRepoRefs } from "../src/config/validate.js";
 
 describe("config", () => {
   it("task config create_repo defaults", () => {
@@ -881,5 +882,158 @@ mcp_servers:
       mcp_servers: {},
     };
     expect(toYaml(config)).not.toMatch(/mcp_servers/);
+  });
+
+  it("validateInventory rejects wrong version", () => {
+    const bad = { version: 2 } as unknown as InventoryManifestV1;
+    expect(() => validateInventory(bad)).toThrow(/version must be 1/);
+  });
+
+  it("validateInventory accepts a v1 web_app manifest", () => {
+    const m: InventoryManifestV1 = {
+      version: 1,
+      source: "declared",
+      product_class: "web_app",
+      layers: ["client", "api"],
+      explicit_deferrals: [],
+      required_integrations: ["accounts"],
+      greenfield: true,
+    };
+    expect(() => validateInventory(m)).not.toThrow();
+  });
+
+  it("parseConfig loads inline inventory YAML", () => {
+    const yaml = `
+name: t
+model: m
+prompt: do the thing
+repositories: {}
+target:
+  branch_prefix: p
+  consolidate_prs: true
+  auto_create_pr: true
+inventory:
+  version: 1
+  source: declared
+  product_class: web_app
+  layers:
+    - client
+    - api
+    - persistence
+  explicit_deferrals: []
+  required_integrations:
+    - accounts
+  greenfield: true
+`;
+    const config = parseConfig(yaml);
+    expect(config.inventory?.source).toBe("declared");
+    expect(config.inventory?.layers.length).toBe(3);
+    validateConfig(config);
+  });
+
+  it("parseConfig loads inventory from inventory_file only", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "orch-inv-"));
+    try {
+      const invPath = path.join(tempDir, "inv.json");
+      fs.writeFileSync(
+        invPath,
+        JSON.stringify({
+          version: 1,
+          source: "discovered",
+          product_class: "web_app",
+          layers: ["client"],
+          explicit_deferrals: [],
+          required_integrations: [],
+          greenfield: false,
+        }),
+        "utf8",
+      );
+      const configPath = path.join(tempDir, "config.yaml");
+      fs.writeFileSync(
+        configPath,
+        `
+name: t
+model: m
+prompt: p
+repositories: {}
+target:
+  branch_prefix: p
+  consolidate_prs: true
+  auto_create_pr: true
+inventory_file: inv.json
+`,
+        "utf8",
+      );
+      const content = fs.readFileSync(configPath, "utf8");
+      const config = parseConfig(content, { inventoryBaseDir: tempDir });
+      expect(config.inventory?.source).toBe("discovered");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("parseConfig merges inventory_file with inline overrides using key-in-inline", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "orch-inv-"));
+    try {
+      fs.writeFileSync(
+        path.join(tempDir, "inv.json"),
+        JSON.stringify({
+          version: 1,
+          source: "discovered",
+          product_class: "web_app",
+          layers: ["client"],
+          explicit_deferrals: [],
+          required_integrations: [],
+          greenfield: false,
+        }),
+        "utf8",
+      );
+      const configPath = path.join(tempDir, "config.yaml");
+      fs.writeFileSync(
+        configPath,
+        `
+name: t
+model: m
+prompt: p
+repositories: {}
+target:
+  branch_prefix: p
+  consolidate_prs: true
+  auto_create_pr: true
+inventory_file: inv.json
+inventory:
+  source: declared
+`,
+        "utf8",
+      );
+      const content = fs.readFileSync(configPath, "utf8");
+      const config = parseConfig(content, { inventoryBaseDir: tempDir });
+      expect(config.inventory?.source).toBe("declared");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("toYaml round-trips inventory", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: "m",
+      prompt: "p",
+      repositories: {},
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+      inventory: {
+        version: 1,
+        source: "declared",
+        product_class: "library",
+        layers: ["core"],
+        explicit_deferrals: [],
+        required_integrations: [],
+        greenfield: false,
+      },
+    };
+    const again = parseConfig(toYaml(config));
+    expect(again.inventory).toEqual(config.inventory);
   });
 });

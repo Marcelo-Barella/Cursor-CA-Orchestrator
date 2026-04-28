@@ -480,7 +480,8 @@ export const COMMANDS: Record<string, CommandInfo> = {
     name: "prompt-set",
     handler: cmdPromptSet as (...args: unknown[]) => unknown,
     usage: "/prompt-set <text>",
-    description: "Set the prompt text directly.",
+    description:
+      "Set the prompt text directly. For greenfield runs, state product class, required layers, and what is out of scope; use `inventory` in saved YAML (see README) for a machine-readable layer manifest.",
   },
   prompt: {
     name: "prompt",

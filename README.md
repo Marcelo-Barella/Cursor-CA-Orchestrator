@@ -292,6 +292,45 @@ The REPL accepts `/mcp import <path>` against either a bare top-level mapping of
 
 Because MCP configs may contain literal credentials, the run branch on your private bootstrap repo is the authoritative location for secrets alongside `secrets.json`. The SDK's inline `mcpServers` are not persisted across `Agent.resume()`; the orchestrator re-passes them on every worker reattach.
 
+### Inventory (planner manifest v1)
+
+The optional `inventory` block is a machine-readable description of product layers and integrations. When present, it is embedded in the planner user prompt so the planner maps every declared layer to tasks (within the 20-task cap) and treats `explicit_deferrals` as the only declared deferrals for named concerns.
+
+**Inline example** (short):
+
+```yaml
+inventory:
+  version: 1
+  source: declared
+  product_class: web_app
+  layers: [client, api, persistence]
+  explicit_deferrals: []
+  required_integrations: [accounts]
+  greenfield: true
+```
+
+**Sidecar file** relative to the config file:
+
+```yaml
+inventory_file: cursor-orch-inventory.json
+```
+
+Generate a starter JSON manifest:
+
+```bash
+cursor-orch inventory -o cursor-orch-inventory.json
+```
+
+**Greenfield `prompt:` template** (paste and edit):
+
+```yaml
+prompt: |
+  Product: web app (accounts integration required).
+  Layers to deliver: client UI, HTTP API, persistence.
+  Out of scope for this run: mobile apps, billing provider (defer unless blocking).
+  Use the inventory manifest for layer coverage; do not shrink to a UI-only or API-only slice.
+```
+
 ## Architecture
 
 ```
