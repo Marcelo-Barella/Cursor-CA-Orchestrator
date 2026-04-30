@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.1 - 2026-04-30
+
+- **REPL:** TTY multiline editor clears and redraws using physical wrapped rows (`visibleWidth` and terminal width) so slash suggestions and cursor positioning stay correct when lines wrap.
+- **Cleanup:** Removed accidental localhost debug ingest calls from `tty-line-editor.ts`.
+
 ## 2.1.0 - 2026-04-28
 
 - **Planner inventory manifest v1:** New optional `inventory` block (and sidecar `inventory_file: <path>`) on the orchestrator config declares `product_class`, `layers`, `explicit_deferrals`, `required_integrations`, `greenfield`, and optional `repo_hints`. When present, it is embedded in the planner user prompt (`## Inventory` block) and is authoritative for which product layers and integrations the plan must cover. `parseConfig` now accepts an `inventoryBaseDir` so sidecar paths resolve relative to the loaded config; `Session.load` and `resolveConfigPrecedence` pass the config directory automatically.

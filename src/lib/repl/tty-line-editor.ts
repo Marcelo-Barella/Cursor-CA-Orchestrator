@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { tui } from "../../tui/style.js";
+import { tui, visibleWidth } from "../../tui/style.js";
 import {
   filterSlashSuggestions,
   labelStem,
@@ -346,18 +346,70 @@ function appendHistoryLine(historyPath: string, line: string): void {
   } catch {}
 }
 
+function lineWrapPhysicalRows(text: string, columns: number): number {
+  if (columns <= 0) {
+    return 1;
+  }
+  const w = visibleWidth(text);
+  return Math.max(1, Math.ceil(w / columns));
+}
+
+function editLinePrefix(editIndex: number): string {
+  return editIndex === 0 ? "> " : ". ";
+}
+
+function totalEditPhysicalRows(lines: string[], columns: number): number {
+  let t = 0;
+  for (let i = 0; i < lines.length; i++) {
+    t += lineWrapPhysicalRows(editLinePrefix(i) + lines[i]!, columns);
+  }
+  return t;
+}
+
+function totalSuggestionPhysicalRows(sugLines: string[], columns: number): number {
+  let t = 0;
+  for (const s of sugLines) {
+    t += lineWrapPhysicalRows(s, columns);
+  }
+  return t;
+}
+
+function editCursorPhysicalOffsetUp(
+  lines: string[],
+  row: number,
+  col: number,
+  columns: number,
+): number {
+  if (columns <= 0) {
+    return row;
+  }
+  let up = 0;
+  for (let i = 0; i < row; i++) {
+    up += lineWrapPhysicalRows(editLinePrefix(i) + lines[i]!, columns);
+  }
+  up += Math.floor((col - 1) / columns);
+  return up;
+}
+
+function totalEditPhysicalRowsFromLineIndex(lines: string[], startIdx: number, columns: number): number {
+  let t = 0;
+  for (let i = startIdx; i < lines.length; i++) {
+    t += lineWrapPhysicalRows(editLinePrefix(i) + lines[i]!, columns);
+  }
+  return t;
+}
+
 function clearPromptFrame(
   stdout: NodeJS.WriteStream,
-  cursorRowInEditBlock: number,
-  prevEditRows: number,
-  prevSuggestionRows: number,
+  prevCursorPhysicalOffset: number,
+  prevFramePhysicalRows: number,
 ): void {
-  const total = prevEditRows + prevSuggestionRows;
+  const total = prevFramePhysicalRows;
   if (total <= 0) {
     return;
   }
-  if (cursorRowInEditBlock > 0) {
-    stdout.write(`\x1b[${cursorRowInEditBlock}A`);
+  if (prevCursorPhysicalOffset > 0) {
+    stdout.write(`\x1b[${prevCursorPhysicalOffset}A`);
   }
   stdout.write("\r");
   for (let i = 0; i < total; i++) {
@@ -407,9 +459,8 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
 
   let buffer = "";
   let cursor = 0;
-  let prevEditRows = 1;
-  let prevSuggestionRows = 0;
-  let lastCursorRow = 0;
+  let prevFramePhysicalRows = 1;
+  let prevCursorPhysicalOffset = 0;
   const sessionHistory = loadHistoryLines(historyPath);
   let histIndex: number | null = null;
   let stashBuffer = "";
@@ -466,7 +517,7 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
       while (keyWaiters.length) {
         keyWaiters.shift()!({ kind: "eof" });
       }
-      clearPromptFrame(stdout, lastCursorRow, prevEditRows, prevSuggestionRows);
+      clearPromptFrame(stdout, prevCursorPhysicalOffset, prevFramePhysicalRows);
       if (line === null) {
         resolve(null);
         return;
@@ -513,7 +564,7 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
       if (settled) {
         return;
       }
-      clearPromptFrame(stdout, lastCursorRow, prevEditRows, prevSuggestionRows);
+      clearPromptFrame(stdout, prevCursorPhysicalOffset, prevFramePhysicalRows);
       const lines = bufferEditLines(buffer);
       for (let i = 0; i < lines.length; i++) {
         if (i > 0) {
@@ -533,20 +584,24 @@ export async function readReplLineTTY(historyPath: string): Promise<string | nul
       }
       const sug = show ? formatSlashSuggestionLines(qp, suggestHighlight) : { lines: [], matchCount: 0 };
       const sugLines = sug.lines;
+      const cols = stdout.columns ?? 0;
+      const editPhy = totalEditPhysicalRows(lines, cols);
+      const sugPhy = totalSuggestionPhysicalRows(sugLines, cols);
+      const framePhy = editPhy + sugPhy;
+      const cursorPhyUp = editCursorPhysicalOffsetUp(lines, row, col, cols);
       if (sugLines.length) {
         positionEditCursor(stdout, lines, row, col);
         stdout.write(`\n${sugLines.join("\n")}`);
-        prevSuggestionRows = sugLines.length;
-        const upCount = sugLines.length + (lines.length - 1 - row);
+        const rowsBelowCursor = totalEditPhysicalRowsFromLineIndex(lines, row + 1, cols);
+        const upCount = sugPhy + rowsBelowCursor;
         stdout.write(`\x1b[${upCount}A`);
         stdout.write("\r");
         stdout.write(`\x1b[${col}C`);
       } else {
-        prevSuggestionRows = 0;
         positionEditCursor(stdout, lines, row, col);
       }
-      prevEditRows = lines.length;
-      lastCursorRow = row;
+      prevFramePhysicalRows = framePhy;
+      prevCursorPhysicalOffset = cursorPhyUp;
     }
 
     function scheduleRedraw(): void {
