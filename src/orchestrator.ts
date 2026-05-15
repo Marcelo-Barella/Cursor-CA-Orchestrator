@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { RepoStoreClient } from "./api/repo-store.js";
-import type { OrchestratorConfig, TaskConfig } from "./config/types.js";
+import type { ModelSelectionConfig, OrchestratorConfig, TaskConfig } from "./config/types.js";
 import { canonicalizeOrchestratorConfig } from "./config/canonicalize.js";
 import { parseConfig, toYaml } from "./config/parse.js";
 import { validateConfig } from "./config/validate.js";
@@ -31,6 +31,7 @@ import {
   topoSortTaskGroup,
 } from "./lib/github-consolidated-pr.js";
 import { parseGithubOwnerRepo, resolveRepoTarget } from "./lib/repo-target.js";
+import { toSdkModelSelection } from "./lib/model-selection.js";
 import {
   type AgentClient,
   type SDKAssistantMessage,
@@ -51,6 +52,67 @@ const BLOCKED_TIMEOUT_SECONDS = 300;
 const MAX_RETRY_COUNT = 1;
 const WORKER_ARTIFACT_ERROR_RETRIES_DEFAULT = 6;
 const WORKER_ARTIFACT_ERROR_RETRY_MS_DEFAULT = 2_000;
+const TASK_FAILURE_MAX_RETRIES_DEFAULT = 0;
+const TASK_FAILURE_MAX_RETRIES_CAP = 32;
+
+function readTaskFailureRetryCap(): number {
+  const raw = process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES;
+  if (raw !== undefined && raw !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0 && n <= TASK_FAILURE_MAX_RETRIES_CAP) {
+      return Math.floor(n);
+    }
+  }
+  return TASK_FAILURE_MAX_RETRIES_DEFAULT;
+}
+
+function resetAgentToSchedulableForRetry(agent: AgentState): void {
+  agent.agent_id = null;
+  agent.status = "pending";
+  agent.started_at = null;
+  agent.finished_at = null;
+  agent.branch_name = null;
+  agent.pr_url = null;
+  agent.summary = null;
+  agent.blocked_reason = null;
+  agent.blocked_since = null;
+  agent.cascade_source_task_id = null;
+}
+
+async function handleTaskFailureWithOptionalRetry(
+  ctx: LoopContext,
+  taskId: string,
+  appendTaskFailedEvent: () => Promise<void>,
+  terminal: { finishedAt: string; summary: string },
+): Promise<"retried" | "terminal"> {
+  const agent = ctx.state.agents[taskId]!;
+  await appendTaskFailedEvent();
+  const cap = readTaskFailureRetryCap();
+  if (agent.retry_count < cap) {
+    agent.retry_count += 1;
+    resetAgentToSchedulableForRetry(agent);
+    try {
+      await ctx.repoStore.deleteFile(ctx.runId, `agent-${taskId}.json`);
+    } catch {
+      /* advisory */
+    }
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("task_retried", `Task ${taskId} retried (failure retry ${agent.retry_count})`, taskId, {
+        payload: { retry_count: String(agent.retry_count) },
+      }),
+    );
+    markStateDirty(ctx);
+    return "retried";
+  }
+  agent.status = "failed";
+  agent.finished_at = terminal.finishedAt;
+  agent.summary = terminal.summary;
+  await cascadeFailures(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
+  markStateDirty(ctx);
+  return "terminal";
+}
 
 function readWorkerArtifactErrorRetryPlan(): { maxRetries: number; delayMs: number } {
   let maxRetries = WORKER_ARTIFACT_ERROR_RETRIES_DEFAULT;
@@ -605,16 +667,20 @@ async function launchWorkerAgent(
       if (ensured.error) {
         const summary = `Failed to prepare run branch for task ${taskId}: ${ensured.error}`;
         console.error(summary);
-        agent.status = "failed";
-        agent.summary = summary;
-        await appendEvent(
-          ctx.repoStore,
-          ctx.runId,
-          makeEvent("task_failed", `Task ${taskId} failed: ${ensured.error}`, taskId, {
-            payload: { repository: repoUrl, ref: planRef },
-          }),
+        const finishedAt = nowIso();
+        await handleTaskFailureWithOptionalRetry(
+          ctx,
+          taskId,
+          () =>
+            appendEvent(
+              ctx.repoStore,
+              ctx.runId,
+              makeEvent("task_failed", `Task ${taskId} failed: ${ensured.error}`, taskId, {
+                payload: { repository: repoUrl, ref: planRef },
+              }),
+            ),
+          { finishedAt, summary },
         );
-        markStateDirty(ctx);
         return;
       }
     }
@@ -630,16 +696,20 @@ async function launchWorkerAgent(
       if (ensured.error) {
         const summary = `Failed to prepare task branch for task ${taskId}: ${ensured.error}`;
         console.error(summary);
-        agent.status = "failed";
-        agent.summary = summary;
-        await appendEvent(
-          ctx.repoStore,
-          ctx.runId,
-          makeEvent("task_failed", `Task ${taskId} failed: ${ensured.error}`, taskId, {
-            payload: { repository: repoUrl, ref },
-          }),
+        const finishedAt = nowIso();
+        await handleTaskFailureWithOptionalRetry(
+          ctx,
+          taskId,
+          () =>
+            appendEvent(
+              ctx.repoStore,
+              ctx.runId,
+              makeEvent("task_failed", `Task ${taskId} failed: ${ensured.error}`, taskId, {
+                payload: { repository: repoUrl, ref },
+              }),
+            ),
+          { finishedAt, summary },
         );
-        markStateDirty(ctx);
         return;
       }
       startingRefForSdk = workerBranch;
@@ -662,15 +732,14 @@ async function launchWorkerAgent(
         launchRef: promptLaunchRef,
         perTaskBranch: computeBranchName(ctx.config.target.branch_prefix, ctx.runId, taskId, agent.retry_count),
       });
-  const model = task.model ?? ctx.config.model;
+  const model: ModelSelectionConfig = task.model != null ? { id: task.model } : ctx.config.model;
   let sdkAgent: SdkAgent;
   try {
-    sdkAgent = ctx.agentClient.createCloudAgent({
+    sdkAgent = await ctx.agentClient.createCloudAgent({
       apiKey: ctx.apiKey,
       model,
       repoUrl,
       startingRef: startingRefForSdk,
-      branchName: workerBranch,
       autoCreatePR: false,
       skipReviewerRequest: true,
       mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
@@ -679,16 +748,20 @@ async function launchWorkerAgent(
     const detail = error instanceof Error ? error.message : String(error);
     const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${startingRefForSdk})`;
     console.error(summary);
-    agent.status = "failed";
-    agent.summary = summary;
-    await appendEvent(
-      ctx.repoStore,
-      ctx.runId,
-      makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
-        payload: { repository: repoUrl, ref: startingRefForSdk },
-      }),
+    const finishedAt = nowIso();
+    await handleTaskFailureWithOptionalRetry(
+      ctx,
+      taskId,
+      () =>
+        appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
+            payload: { repository: repoUrl, ref: startingRefForSdk },
+          }),
+        ),
+      { finishedAt, summary },
     );
-    markStateDirty(ctx);
     return;
   }
   let run: SdkRun;
@@ -698,17 +771,21 @@ async function launchWorkerAgent(
     const detail = error instanceof Error ? error.message : String(error);
     const summary = `Failed to dispatch prompt for task ${taskId}: ${detail}`;
     console.error(summary);
-    agent.status = "failed";
-    agent.summary = summary;
     await safeDisposeAgent(sdkAgent);
-    await appendEvent(
-      ctx.repoStore,
-      ctx.runId,
-      makeEvent("task_failed", `Task ${taskId} failed: send error (${detail})`, taskId, {
-        payload: { repository: repoUrl, ref: startingRefForSdk },
-      }),
+    const finishedAt = nowIso();
+    await handleTaskFailureWithOptionalRetry(
+      ctx,
+      taskId,
+      () =>
+        appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed: send error (${detail})`, taskId, {
+            payload: { repository: repoUrl, ref: startingRefForSdk },
+          }),
+        ),
+      { finishedAt, summary },
     );
-    markStateDirty(ctx);
     return;
   }
   agent.agent_id = sdkAgent.agentId;
@@ -813,11 +890,12 @@ async function runWorkerStream(
   let result: { status: "finished" | "error" | "cancelled" | "unknown"; durationMs?: number; git?: { branch?: string; prUrl?: string }; model?: string; resultText?: string } = { status: "unknown" };
   try {
     const awaited = await handle.run.wait();
+    const gitHead = awaited.git?.branches?.[0];
     result = {
       status: awaited.status,
       durationMs: awaited.durationMs,
-      git: awaited.git,
-      model: awaited.model,
+      git: gitHead != null ? { branch: gitHead.branch, prUrl: gitHead.prUrl } : undefined,
+      model: awaited.model?.id,
       resultText: awaited.result,
     };
   } catch (err) {
@@ -954,18 +1032,23 @@ async function runWorkerStream(
       }),
     );
   } else if (result.status === "error" || payloadStatus === "failed" || streamError) {
-    agent.status = "failed";
-    agent.finished_at = finalizedAt;
     const errText = streamError instanceof Error ? streamError.message : streamError !== null ? String(streamError) : null;
-    agent.summary = payloadSummary ?? errText ?? "Worker agent errored";
-    await appendEvent(
-      ctx.repoStore,
-      ctx.runId,
-      makeEvent("task_failed", `Task ${taskId} failed${errText ? `: ${errText}` : ""}`, taskId, {
-        payload: errText ? { error: errText, payload_source: payloadSource, last_status: String(lastStatus ?? "") } : { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
-      }),
+    const summaryLine = payloadSummary ?? errText ?? "Worker agent errored";
+    await handleTaskFailureWithOptionalRetry(
+      ctx,
+      taskId,
+      () =>
+        appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed${errText ? `: ${errText}` : ""}`, taskId, {
+            payload: errText
+              ? { error: errText, payload_source: payloadSource, last_status: String(lastStatus ?? "") }
+              : { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
+          }),
+        ),
+      { finishedAt: finalizedAt, summary: summaryLine },
     );
-    await cascadeFailures(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
   } else if (result.status === "finished") {
     agent.status = "finished";
     agent.finished_at = finalizedAt;
@@ -982,17 +1065,20 @@ async function runWorkerStream(
       }),
     );
   } else {
-    agent.status = "failed";
-    agent.finished_at = finalizedAt;
-    agent.summary = payloadSummary ?? `Worker run status=${result.status}`;
-    await appendEvent(
-      ctx.repoStore,
-      ctx.runId,
-      makeEvent("task_failed", `Task ${taskId} failed (run status=${result.status})`, taskId, {
-        payload: { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
-      }),
+    const summaryLine = payloadSummary ?? `Worker run status=${result.status}`;
+    await handleTaskFailureWithOptionalRetry(
+      ctx,
+      taskId,
+      () =>
+        appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed (run status=${result.status})`, taskId, {
+            payload: { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
+          }),
+        ),
+      { finishedAt: finalizedAt, summary: summaryLine },
     );
-    await cascadeFailures(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
   }
 
   ctx.activeWorkers.delete(taskId);
@@ -1098,20 +1184,22 @@ async function handleBlockedTasks(ctx: LoopContext): Promise<void> {
 }
 
 async function launchReadyTasks(ctx: LoopContext): Promise<void> {
-  const readyTasks = getReadyTasks(ctx.graph, ctx.state.agents);
-  const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks);
-  if (eligible.length === 0) return;
   const taskMap = Object.fromEntries(ctx.config.tasks.map((t) => [t.id, t]));
-  await Promise.all(
-    eligible.map(async (taskId) => {
-      const task = taskMap[taskId];
-      if (!task) return;
-      assignTaskPhase(ctx.state, taskId, "execution");
-      setPhaseStatus(ctx.state, "execution", "running", { timestamp: nowIso() });
-      const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
-      await launchWorkerAgent(ctx, taskId, task, depOutputs);
-    }),
-  );
+  for (;;) {
+    const readyTasks = getReadyTasks(ctx.graph, ctx.state.agents);
+    const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks);
+    if (eligible.length === 0) return;
+    await Promise.all(
+      eligible.map(async (taskId) => {
+        const task = taskMap[taskId];
+        if (!task) return;
+        assignTaskPhase(ctx.state, taskId, "execution");
+        setPhaseStatus(ctx.state, "execution", "running", { timestamp: nowIso() });
+        const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+        await launchWorkerAgent(ctx, taskId, task, depOutputs);
+      }),
+    );
+  }
 }
 
 async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
@@ -1400,12 +1488,11 @@ async function runPlanningPhase(
     const ghUser = await resolveGithubUsername(ghToken);
     const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
     const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-    const plannerAgent = agentClient.createCloudAgent({
+    const plannerAgent = await agentClient.createCloudAgent({
       apiKey,
       model: config.model,
       repoUrl: bootstrapUrl,
       startingRef: resolveBootstrapRef(),
-      branchName: `cursor-orch-planner-${runId.slice(0, 8)}`,
       autoCreatePR: false,
       skipReviewerRequest: true,
       mcpServers: nonEmptyMcpServers(config.mcp_servers),
@@ -1419,7 +1506,7 @@ async function runPlanningPhase(
     let planContent = await waitForPlan(repoStore, runId);
     if (!planContent) {
       try {
-        const runs = await (await import("@cursor/february")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
+        const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
         for (const r of runs.items) {
           if (typeof r.result === "string" && r.result.trim()) {
             planContent = r.result;
@@ -1495,7 +1582,7 @@ async function persistUnexpectedFailure(state: OrchestrationState, repoStore: Re
 }
 
 async function reattachWorkers(ctx: LoopContext): Promise<void> {
-  const { Agent } = await import("@cursor/february");
+  const { Agent } = await import("@cursor/sdk");
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
     if (!agent.agent_id) continue;
     if (agent.status !== "launching" && agent.status !== "running" && agent.status !== "blocked") continue;
@@ -1503,13 +1590,13 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
     try {
       const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
         apiKey: ctx.apiKey,
-        model: { id: ctx.config.model },
+        model: toSdkModelSelection(ctx.config.model),
       };
       const mcpServers = nonEmptyMcpServers(ctx.config.mcp_servers);
       if (mcpServers) {
         resumeOptions.mcpServers = mcpServers;
       }
-      const sdkAgent = ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
+      const sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
       const latest = runs.items[0];
       if (!latest) {

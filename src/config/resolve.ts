@@ -2,12 +2,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
+import { normalizeModelFromYaml } from "../lib/model-selection.js";
 import { parseConfig } from "./parse.js";
 import type {
   BranchLayout,
   ConfigResolution,
   DelegationMapConfig,
   DiagnosticFinding,
+  ModelSelectionConfig,
   OrchestratorConfig,
   RepoConfig,
   ResolvedValue,
@@ -398,6 +400,229 @@ function resolveStringValue(
   return selectWithConflict(opts.fieldName, candidates, opts.findings);
 }
 
+function resolveModelValue(opts: {
+  fieldName: string;
+  defaultValue: string;
+  flagValue: string | null | undefined;
+  flagRef: string;
+  envName: string;
+  projectRaw: Record<string, unknown> | null;
+  projectKeyPath: string[];
+  projectRef: string;
+  sessionRaw: Record<string, unknown> | null;
+  sessionKeyPath: string[];
+  sessionRef: string;
+  findings: DiagnosticFinding[];
+}): ResolvedValue {
+  const candidates: ResolvedValue[] = [];
+  if (opts.flagValue !== undefined && opts.flagValue !== null && opts.flagValue.trim()) {
+    candidates.push({
+      value: normalizeModelFromYaml(opts.flagValue.trim()),
+      source: "flag",
+      source_ref: opts.flagRef,
+    });
+  }
+  const envValue = process.env[opts.envName];
+  if (envValue !== undefined) {
+    if (envValue.trim()) {
+      candidates.push({
+        value: normalizeModelFromYaml(envValue.trim()),
+        source: "env",
+        source_ref: opts.envName,
+      });
+    } else {
+      opts.findings.push(
+        finding({
+          code: "CFG_ENV_EMPTY_IGNORED",
+          severity: "warn",
+          category: "environment",
+          message: `Environment variable ${opts.envName} is set but empty and will be ignored.`,
+          field: opts.fieldName,
+          source: "env",
+          source_ref: opts.envName,
+          expected: "non-empty string",
+          actual: "empty",
+          why_it_failed: "Empty env values are treated as unset during precedence resolution.",
+          fix: `Unset \`${opts.envName}\` or provide a non-empty value before running command again.`,
+          is_blocking: false,
+          suggested_commands: [`unset ${opts.envName}`, `export ${opts.envName}=<value>`, "cursor-orch config doctor --strict"],
+          docs_ref: "README#onboarding-clone-to-first-run",
+        }),
+      );
+    }
+  }
+  const [projectValue, projectExists] = getNested(opts.projectRaw, opts.projectKeyPath);
+  if (projectExists) {
+    if (typeof projectValue === "string") {
+      if (projectValue.trim()) {
+        candidates.push({
+          value: normalizeModelFromYaml(projectValue.trim()),
+          source: "project",
+          source_ref: opts.projectRef,
+        });
+      } else {
+        opts.findings.push(
+          finding({
+            code: "CFG_VALUE_INVALID",
+            severity: "error",
+            category: "config",
+            message: `Invalid empty value for ${opts.fieldName}.`,
+            field: opts.fieldName,
+            source: "project",
+            source_ref: opts.projectRef,
+            expected: "non-empty string or model mapping",
+            actual: "empty",
+            why_it_failed: "Project config values for this field must be a non-empty string or { id, params? }.",
+            fix: `Set a non-empty value for \`${opts.fieldName}\` in project config.`,
+            is_blocking: true,
+            suggested_commands: ["cursor-orch config doctor --strict"],
+            docs_ref: "README#onboarding-clone-to-first-run",
+          }),
+        );
+      }
+    } else if (
+      projectValue !== null &&
+      projectValue !== undefined &&
+      typeof projectValue === "object" &&
+      !Array.isArray(projectValue)
+    ) {
+      try {
+        candidates.push({
+          value: normalizeModelFromYaml(projectValue),
+          source: "project",
+          source_ref: opts.projectRef,
+        });
+      } catch (exc) {
+        opts.findings.push(
+          finding({
+            code: "CFG_VALUE_INVALID",
+            severity: "error",
+            category: "config",
+            message: `Invalid value for ${opts.fieldName}: ${exc instanceof Error ? exc.message : String(exc)}`,
+            field: opts.fieldName,
+            source: "project",
+            source_ref: opts.projectRef,
+            expected: "model string or { id, params? }",
+            actual: "invalid mapping",
+            why_it_failed: "Project model field could not be parsed.",
+            fix: `Fix \`${opts.fieldName}\` in project config.`,
+            is_blocking: true,
+            suggested_commands: ["cursor-orch config doctor --strict"],
+            docs_ref: "README#onboarding-clone-to-first-run",
+          }),
+        );
+      }
+    } else {
+      opts.findings.push(
+        finding({
+          code: "CFG_VALUE_INVALID",
+          severity: "error",
+          category: "config",
+          message: `Invalid value for ${opts.fieldName}.`,
+          field: opts.fieldName,
+          source: "project",
+          source_ref: opts.projectRef,
+          expected: "non-empty string or model mapping",
+          actual: "wrong type",
+          why_it_failed: "Project config values for this field must be a string or a mapping.",
+          fix: `Set a valid value for \`${opts.fieldName}\` in project config.`,
+          is_blocking: true,
+          suggested_commands: ["cursor-orch config doctor --strict"],
+          docs_ref: "README#onboarding-clone-to-first-run",
+        }),
+      );
+    }
+  }
+  const [sessionValue, sessionExists] = getNested(opts.sessionRaw, opts.sessionKeyPath);
+  if (sessionExists) {
+    if (typeof sessionValue === "string") {
+      if (sessionValue.trim()) {
+        candidates.push({
+          value: normalizeModelFromYaml(sessionValue.trim()),
+          source: "session",
+          source_ref: opts.sessionRef,
+        });
+      } else {
+        opts.findings.push(
+          finding({
+            code: "CFG_SESSION_INVALID",
+            severity: "warn",
+            category: "session",
+            message: `Session value for ${opts.fieldName} is invalid and ignored.`,
+            field: opts.fieldName,
+            source: "session",
+            source_ref: opts.sessionRef,
+            expected: "non-empty string or model mapping",
+            actual: "empty",
+            why_it_failed: "Session fallback was present but invalid.",
+            fix: `Fix or remove session value for \`${opts.fieldName}\`.`,
+            is_blocking: false,
+            suggested_commands: ["cursor-orch config doctor --strict"],
+            docs_ref: "README#onboarding-clone-to-first-run",
+          }),
+        );
+      }
+    } else if (
+      sessionValue !== null &&
+      sessionValue !== undefined &&
+      typeof sessionValue === "object" &&
+      !Array.isArray(sessionValue)
+    ) {
+      try {
+        candidates.push({
+          value: normalizeModelFromYaml(sessionValue),
+          source: "session",
+          source_ref: opts.sessionRef,
+        });
+      } catch {
+        opts.findings.push(
+          finding({
+            code: "CFG_SESSION_INVALID",
+            severity: "warn",
+            category: "session",
+            message: `Session value for ${opts.fieldName} is invalid and ignored.`,
+            field: opts.fieldName,
+            source: "session",
+            source_ref: opts.sessionRef,
+            expected: "model string or { id, params? }",
+            actual: "invalid mapping",
+            why_it_failed: "Session model field could not be parsed.",
+            fix: `Fix or remove session value for \`${opts.fieldName}\`.`,
+            is_blocking: false,
+            suggested_commands: ["cursor-orch config doctor --strict"],
+            docs_ref: "README#onboarding-clone-to-first-run",
+          }),
+        );
+      }
+    } else {
+      opts.findings.push(
+        finding({
+          code: "CFG_SESSION_INVALID",
+          severity: "warn",
+          category: "session",
+          message: `Session value for ${opts.fieldName} is invalid and ignored.`,
+          field: opts.fieldName,
+          source: "session",
+          source_ref: opts.sessionRef,
+          expected: "non-empty string or model mapping",
+          actual: "wrong type",
+          why_it_failed: "Session fallback was present but invalid.",
+          fix: `Fix or remove session value for \`${opts.fieldName}\`.`,
+          is_blocking: false,
+          suggested_commands: ["cursor-orch config doctor --strict"],
+          docs_ref: "README#onboarding-clone-to-first-run",
+        }),
+      );
+    }
+  }
+  candidates.push({
+    value: normalizeModelFromYaml(undefined, opts.defaultValue),
+    source: "default",
+    source_ref: `default:${opts.fieldName}`,
+  });
+  return selectWithConflict(opts.fieldName, candidates, opts.findings);
+}
+
 function resolveBoolValue(opts: {
   fieldName: string;
   defaultValue: boolean;
@@ -664,7 +889,7 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
   });
   provenance.bootstrap_repo_name = bootstrapRepo;
 
-  const model = resolveStringValue({
+  const model = resolveModelValue({
     fieldName: "model",
     defaultValue: "composer-2",
     flagValue: null,
@@ -794,7 +1019,7 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
 
   const config: OrchestratorConfig = {
     name: String(name.value),
-    model: String(model.value),
+    model: model.value as ModelSelectionConfig,
     prompt: String(prompt.value),
     repositories,
     tasks,

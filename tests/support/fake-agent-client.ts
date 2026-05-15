@@ -1,3 +1,5 @@
+import type { ModelSelection } from "@cursor/sdk";
+import type { ModelSelectionConfig } from "../../src/config/types.js";
 import type {
   AgentClient,
   CreateCloudAgentOpts,
@@ -9,12 +11,23 @@ import type {
   SdkRunResult,
 } from "../../src/sdk/agent-client.js";
 
+type SdkRunGit = NonNullable<SdkRunResult["git"]>;
+
+function modelConfigToSelection(c: ModelSelectionConfig): ModelSelection {
+  return {
+    id: c.id,
+    params: c.params?.map((p) => ({ id: p.id, value: p.value })),
+  };
+}
+
 export interface FakeRunScript {
   events?: SDKMessage[];
   result: SdkRunResult;
   artifacts?: Record<string, string>;
   throwOnWait?: unknown;
   throwOnStream?: unknown;
+  /** When set, send() throws before starting the run (launch-time failure). */
+  sendThrows?: unknown;
 }
 
 export interface FakeLaunch {
@@ -80,7 +93,7 @@ class FakeSdkRun implements SdkRun {
     return this.script.result.result;
   }
 
-  get model(): string | undefined {
+  get model(): ModelSelection | undefined {
     return this.script.result.model;
   }
 
@@ -88,19 +101,21 @@ class FakeSdkRun implements SdkRun {
     return this.script.result.durationMs;
   }
 
-  get git(): { branch?: string; prUrl?: string } | undefined {
+  get git(): SdkRunGit | undefined {
     return this.script.result.git;
   }
 }
 
 class FakeSdkAgent implements SdkAgent {
   readonly agentId: string;
+  readonly model: ModelSelection | undefined;
   readonly scripts: FakeRunScript[];
   private readonly artifacts: Record<string, string>;
   disposed = false;
 
-  constructor(agentId: string, scripts: FakeRunScript[]) {
+  constructor(agentId: string, model: ModelSelection | undefined, scripts: FakeRunScript[]) {
     this.agentId = agentId;
+    this.model = model;
     this.scripts = scripts;
     this.artifacts = { ...(scripts[0]?.artifacts ?? {}) };
   }
@@ -109,6 +124,9 @@ class FakeSdkAgent implements SdkAgent {
     const script = this.scripts.shift();
     if (!script) {
       throw new Error(`FakeSdkAgent(${this.agentId}) received more send() calls than scripted`);
+    }
+    if (script.sendThrows !== undefined) {
+      throw script.sendThrows instanceof Error ? script.sendThrows : new Error(String(script.sendThrows));
     }
     Object.assign(this.artifacts, script.artifacts ?? {});
     return new FakeSdkRun(this.agentId, script);
@@ -146,6 +164,8 @@ export interface FakeAgentClientOptions {
   defaultScripts?: FakeRunScript[];
   conversationText?: string | null | ((agentId: string) => string | null);
   sendPreDelayMs?: number;
+  /** First N createCloudAgent calls throw before any agent is returned. */
+  createFailCount?: number;
 }
 
 export class FakeAgentClient implements AgentClient {
@@ -157,6 +177,7 @@ export class FakeAgentClient implements AgentClient {
   private readonly runsByAgent: Map<string, FakeRunScript[]>;
   private readonly defaultScripts: FakeRunScript[];
   private readonly conversationText: string | null | ((agentId: string) => string | null) | undefined;
+  private readonly createFailCount: { value: number };
 
   constructor(opts: FakeAgentClientOptions = {}) {
     this.runsByAgent = new Map();
@@ -166,6 +187,7 @@ export class FakeAgentClient implements AgentClient {
     this.defaultScripts = [...(opts.defaultScripts ?? [])];
     this.conversationText = opts.conversationText;
     this.sendPreDelayMs = opts.sendPreDelayMs ?? 0;
+    this.createFailCount = { value: opts.createFailCount ?? 0 };
   }
 
   async fetchAgentConversationText(agentId: string): Promise<string | null> {
@@ -177,13 +199,17 @@ export class FakeAgentClient implements AgentClient {
     return this.conversationText;
   }
 
-  createCloudAgent(opts: CreateCloudAgentOpts): SdkAgent {
+  async createCloudAgent(opts: CreateCloudAgentOpts): Promise<SdkAgent> {
+    if (this.createFailCount.value > 0) {
+      this.createFailCount.value -= 1;
+      throw new Error("fake createCloudAgent failure");
+    }
     counter += 1;
     const agentId = `fake-agent-${counter}`;
-    const scripts = this.runsByAgent.get(opts.branchName) ?? [this.defaultScripts.shift() ?? {
+    const scripts = this.runsByAgent.get(opts.startingRef) ?? [this.defaultScripts.shift() ?? {
       result: { id: agentId, status: "finished", result: "" },
     }];
-    const agent = new FakeSdkAgent(agentId, [...scripts]);
+    const agent = new FakeSdkAgent(agentId, modelConfigToSelection(opts.model), [...scripts]);
     this.launches.push({ opts, agent, run: null as unknown as FakeSdkRun });
     const originalSend = agent.send.bind(agent);
     agent.send = async () => {
@@ -203,9 +229,9 @@ export class FakeAgentClient implements AgentClient {
     return agent;
   }
 
-  resumeCloudAgent(agentId: string): SdkAgent {
+  async resumeCloudAgent(agentId: string, opts: Partial<SdkAgentOptions>): Promise<SdkAgent> {
     const scripts = this.runsByAgent.get(agentId) ?? [];
-    return new FakeSdkAgent(agentId, [...scripts]);
+    return new FakeSdkAgent(agentId, opts.model, [...scripts]);
   }
 
   async promptOneShot(_message: string, _opts: SdkAgentOptions): Promise<SdkRunResult> {

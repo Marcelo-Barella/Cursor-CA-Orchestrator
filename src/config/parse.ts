@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import YAML from "yaml";
+import { normalizeModelFromYaml } from "../lib/model-selection.js";
 import type {
   BranchLayout,
   DelegationGroupConfig,
@@ -88,7 +89,7 @@ function parseConfigFromRecord(r: Record<string, unknown>, inventory: InventoryM
   const mcpServers = parseMcpServers(r.mcp_servers ?? r.mcpServers);
   return {
     name: (r.name as string) ?? "unnamed",
-    model: (r.model as string) ?? "composer-2",
+    model: normalizeModelFromYaml(r.model),
     prompt: (r.prompt as string) ?? "",
     repositories,
     tasks,
@@ -140,9 +141,13 @@ export function parseConfig(yamlStr: string, options?: { inventoryBaseDir?: stri
 }
 
 export function toYaml(config: OrchestratorConfig): string {
+  const modelOut: { id: string; params?: { id: string; value: string }[] } = { id: config.model.id };
+  if (config.model.params?.length) {
+    modelOut.params = config.model.params.map((p) => ({ id: p.id, value: p.value }));
+  }
   const data: Record<string, unknown> = {
     name: config.name,
-    model: config.model,
+    model: modelOut,
   };
   if (config.prompt) {
     data.prompt = config.prompt;

@@ -46,6 +46,16 @@ describe("getRequiredEnvKeysForCliArgs", () => {
       "BOOTSTRAP_OWNER",
       "BOOTSTRAP_REPO",
     ]);
+    expect(getRequiredEnvKeysForCliArgs(["runs"])).toEqual([
+      "GH_TOKEN",
+      "BOOTSTRAP_OWNER",
+      "BOOTSTRAP_REPO",
+    ]);
+    expect(getRequiredEnvKeysForCliArgs(["watch", "--run", "x"])).toEqual([
+      "GH_TOKEN",
+      "BOOTSTRAP_OWNER",
+      "BOOTSTRAP_REPO",
+    ]);
     expect(getRequiredEnvKeysForCliArgs(["cleanup"])).toEqual([
       "GH_TOKEN",
       "BOOTSTRAP_OWNER",

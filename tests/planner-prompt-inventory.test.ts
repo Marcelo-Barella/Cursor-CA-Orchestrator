@@ -5,7 +5,7 @@ import { countOrchestrationPromptTokens } from "../src/lib/prompt-token-count.js
 
 const base: OrchestratorConfig = {
   name: "n",
-  model: "m",
+  model: { id: "m" },
   prompt: "Build the product.",
   repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
   tasks: [],

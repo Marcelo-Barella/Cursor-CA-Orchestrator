@@ -16,7 +16,7 @@ function createConfig(
   const repoFor = opts?.repoFor ?? {};
   return {
     name: "n",
-    model: "m",
+    model: { id: "m" },
     prompt: "",
     repositories: {
       svc: { url: "https://github.com/o/r", ref: "main" },
@@ -315,7 +315,7 @@ describe("runOrchestration validation gate", () => {
   it("aborts before repo writes when delegation_map fails validateConfig", async () => {
     const bad: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [

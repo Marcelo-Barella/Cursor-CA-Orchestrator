@@ -15,7 +15,7 @@ vi.mock("node:timers/promises", async (importOriginal) => {
 function baseConfig(): OrchestratorConfig {
   return {
     name: "test-orch",
-    model: "m",
+    model: { id: "m" },
     prompt: "",
     repositories: {},
     tasks: [

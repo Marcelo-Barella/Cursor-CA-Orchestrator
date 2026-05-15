@@ -35,6 +35,37 @@
         "cleanup.js"
       ]
     },
+    "inventory": {
+      "aliases": [],
+      "args": {},
+      "description": "Write a declared, greenfield inventory manifest template (JSON) for use with inventory_file or config inventory:",
+      "flags": {
+        "output": {
+          "char": "o",
+          "description": "Output file path",
+          "name": "output",
+          "default": "cursor-orch-inventory.json",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "inventory",
+      "pluginAlias": "cursor-orch",
+      "pluginName": "cursor-orch",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Scaffold a default inventory manifest file",
+      "enableJsonFlag": false,
+      "isESM": true,
+      "relativePath": [
+        "dist",
+        "commands",
+        "inventory.js"
+      ]
+    },
     "logs": {
       "aliases": [],
       "args": {},
@@ -106,6 +137,37 @@
         "run.js"
       ]
     },
+    "runs": {
+      "aliases": [],
+      "args": {},
+      "flags": {
+        "limit": {
+          "char": "l",
+          "description": "Maximum number of runs to list (sorted newest started_at first). Default 50.",
+          "name": "limit",
+          "required": false,
+          "default": 50,
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "runs",
+      "pluginAlias": "cursor-orch",
+      "pluginName": "cursor-orch",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "List orchestration runs in the bootstrap repository",
+      "enableJsonFlag": false,
+      "isESM": true,
+      "relativePath": [
+        "dist",
+        "commands",
+        "runs.js"
+      ]
+    },
     "status": {
       "aliases": [],
       "args": {},
@@ -170,6 +232,35 @@
         "stop.js"
       ]
     },
+    "watch": {
+      "aliases": [],
+      "args": {},
+      "flags": {
+        "run": {
+          "description": "Run ID",
+          "name": "run",
+          "required": true,
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "watch",
+      "pluginAlias": "cursor-orch",
+      "pluginName": "cursor-orch",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Live dashboard for a run (same as status --watch)",
+      "enableJsonFlag": false,
+      "isESM": true,
+      "relativePath": [
+        "dist",
+        "commands",
+        "watch.js"
+      ]
+    },
     "config:doctor": {
       "aliases": [],
       "args": {},
@@ -220,5 +311,5 @@
       ]
     }
   },
-  "version": "2.0.1"
+  "version": "2.1.3"
 }

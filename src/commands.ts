@@ -1,10 +1,40 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
-import type { McpServerConfig } from "./config/types.js";
+import type { McpServerConfig, ModelSelectionConfig } from "./config/types.js";
 import { copyToClipboard } from "./lib/clipboard.js";
+import { fetchModelsCatalog } from "./lib/models-catalog.js";
+import { formatModelSummary, matchVariantParamsByDisplayName } from "./lib/model-selection.js";
+import type { PickerContext } from "./lib/repl/pickers/picker-context.js";
+import { MODELS_CATALOG_CACHE_KEY, MODELS_TTL_MS } from "./lib/repl/pickers/picker-context.js";
 import { countOrchestrationPromptTokens } from "./lib/prompt-token-count.js";
 import type { Session } from "./session.js";
 import { tui } from "./tui/style.js";
+
+export const CURSOR_ORCH_ALLOW_UNKNOWN_MODEL_ENV = "CURSOR_ORCH_ALLOW_UNKNOWN_MODEL";
+
+function catalogIdCheckDisabledByEnv(): boolean {
+  return process.env[CURSOR_ORCH_ALLOW_UNKNOWN_MODEL_ENV]?.trim() === "1";
+}
+
+export async function validateModelIdInCatalog(modelId: string, ctx: PickerContext | null): Promise<string | null> {
+  if (!ctx || catalogIdCheckDisabledByEnv()) {
+    return null;
+  }
+  const mid = modelId.trim();
+  try {
+    const res = await ctx.cache.get(MODELS_CATALOG_CACHE_KEY, MODELS_TTL_MS, () => fetchModelsCatalog(ctx.apiKey));
+    const items = res.data;
+    if (!Array.isArray(items) || items.length === 0) {
+      return null;
+    }
+    if (!items.some((m) => m.id === mid)) {
+      return `Unknown model id "${mid}". Try /refresh models, or run /model with no arguments to pick from the catalog. To skip this check, set ${CURSOR_ORCH_ALLOW_UNKNOWN_MODEL_ENV}=1.`;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 export interface CommandInfo {
   name: string;
@@ -69,14 +99,14 @@ export function promptSetCommandText(prompt: string): string {
 
 export function setupSummaryLines(session: Session): string[] {
   const cfg = session.config;
-  const model = cfg.model || "composer-2";
+  const modelLine = formatModelSummary(cfg.model.id.trim() ? cfg.model : { id: "composer-2" });
   const prompt = promptPreview(cfg.prompt, 120);
   const name = cfg.name || "<empty>";
   const repoCount = Object.keys(cfg.repositories).length;
   const autoPr = cfg.target.auto_create_pr ? "on" : "off";
   const consolidatePrs = cfg.target.consolidate_prs ? "on" : "off";
   return [
-    `- Model: ${model}`,
+    `- Model: ${modelLine}`,
     `- Prompt: ${prompt}`,
     `- Name: ${name}`,
     `- Repositories: ${repoCount}`,
@@ -92,13 +122,47 @@ export function cmdName(session: Session, name: string): string {
   return `${tui.green("Session name set to")} ${tui.bold(name)}`;
 }
 
+export function applyModelSelection(session: Session, sel: ModelSelectionConfig): string {
+  session.setModelSelection(sel);
+  return `${tui.green("Model set to")} ${tui.bold(formatModelSummary(sel))}`;
+}
+
 export function cmdModel(session: Session, model: string): string {
   const error = validateModelValue(model);
   if (error) {
     return tui.red(error);
   }
-  session.setModel(model);
-  return `${tui.green("Model set to")} ${tui.bold(model)}`;
+  return applyModelSelection(session, { id: model.trim() });
+}
+
+
+export async function cmdModelSlash(
+  session: Session,
+  modelId: string,
+  variantToken: string | undefined,
+  ctx: PickerContext | null,
+): Promise<string> {
+  const mid = modelId.trim();
+  const err = validateModelValue(mid);
+  if (err) {
+    return tui.red(err);
+  }
+  const catalogErr = await validateModelIdInCatalog(mid, ctx);
+  if (catalogErr) {
+    return tui.red(catalogErr);
+  }
+  if (!variantToken?.trim()) {
+    return applyModelSelection(session, { id: mid });
+  }
+  if (!ctx) {
+    return tui.red("CURSOR_API_KEY not set; cannot resolve a variant. Use /model with only a model id, or set the API key.");
+  }
+  const res = await ctx.cache.get(MODELS_CATALOG_CACHE_KEY, MODELS_TTL_MS, () => fetchModelsCatalog(ctx.apiKey));
+  const matched = matchVariantParamsByDisplayName(mid, variantToken, res.data);
+  if ("error" in matched) {
+    return tui.red(matched.error);
+  }
+  return applyModelSelection(session, { id: mid, params: matched.params });
 }
 
 export function cmdRepo(session: Session, alias: string, url: string, ref = "main"): string {
@@ -230,7 +294,7 @@ export function cmdConfig(session: Session): string {
   return [
     tui.bold("Current Configuration:"),
     `  ${tui.bold("Name:")}           ${cfg.name}`,
-    `  ${tui.bold("Model:")}          ${cfg.model}`,
+    `  ${tui.bold("Model:")}          ${formatModelSummary(cfg.model)}`,
     `  ${tui.bold("Repositories:")}   ${repoCount}`,
     `  ${tui.bold("Prompt:")}         ${preview || tui.dim("not set")}`,
     `  ${tui.bold("Branch prefix:")}  ${cfg.target.branch_prefix}`,
@@ -397,13 +461,14 @@ export function cmdRun(session: Session): { errors: string[] } | { config: impor
 }
 
 export type RefreshResult =
-  | { ok: true; count: number; fetchedAt: Date }
+  | { ok: true; count: number; catalogCount?: number; restIdCount?: number; fetchedAt: Date }
   | { ok: false; error: Error };
 
 export type RefreshDeps = {
   refreshModels: () => Promise<RefreshResult>;
   refreshRepos: () => Promise<RefreshResult>;
   ageModels: () => Promise<Date | null>;
+  ageModelsCatalog?: () => Promise<Date | null>;
   ageRepos: () => Promise<Date | null>;
 };
 
@@ -424,19 +489,30 @@ export async function cmdRefresh(target: string | undefined, deps: RefreshDeps |
     return tui.red("CURSOR_API_KEY not set; cannot refresh cache.");
   }
   if (target === undefined) {
-    const [m, r] = await Promise.all([deps.ageModels(), deps.ageRepos()]);
-    return [
-      `${tui.bold("Cache ages:")}`,
-      `  models:       ${ageLabel(m)}`,
-      `  repositories: ${ageLabel(r)}`,
-    ].join("\n");
+    const [ageRest, ageCatalog, r] = await Promise.all([
+      deps.ageModels(),
+      deps.ageModelsCatalog?.() ?? Promise.resolve(null),
+      deps.ageRepos(),
+    ]);
+    const lines = [`${tui.bold("Cache ages:")}`];
+    if (deps.ageModelsCatalog) {
+      lines.push(`  models (SDK catalog): ${ageLabel(ageCatalog)}`);
+      lines.push(`  models (REST /v0):    ${ageLabel(ageRest)}`);
+    } else {
+      lines.push(`  models (cache):       ${ageLabel(ageRest)}`);
+    }
+    lines.push(`  repositories:         ${ageLabel(r)}`);
+    return lines.join("\n");
   }
   const t = target.toLowerCase();
   if (t === "models") {
     const r = await deps.refreshModels();
-    return r.ok
-      ? `${tui.green(`models refreshed:`)} ${r.count} items (age: ${ageLabel(r.fetchedAt)})`
-      : tui.red(`models refresh failed: ${r.error.message}`);
+    if (!r.ok) {
+      return tui.red(`models refresh failed: ${r.error.message}`);
+    }
+    const cat = r.catalogCount ?? r.count;
+    const rest = r.restIdCount !== undefined ? `; REST ${r.restIdCount} ids (diagnostic)` : "";
+    return `${tui.green(`models refreshed:`)} catalog ${cat} models${rest} (age: ${ageLabel(r.fetchedAt)})`;
   }
   if (t === "repos") {
     const r = await deps.refreshRepos();
@@ -448,9 +524,15 @@ export async function cmdRefresh(target: string | undefined, deps: RefreshDeps |
     const m = await deps.refreshModels();
     const r = await deps.refreshRepos();
     const lines: string[] = [];
-    lines.push(m.ok
-      ? `${tui.green(`models refreshed:`)} ${m.count} items (age: ${ageLabel(m.fetchedAt)})`
-      : tui.red(`models refresh failed: ${m.error.message}`));
+    if (!m.ok) {
+      lines.push(tui.red(`models refresh failed: ${m.error.message}`));
+    } else {
+      const cat = m.catalogCount ?? m.count;
+      const rest = m.restIdCount !== undefined ? `; REST ${m.restIdCount} ids (diagnostic)` : "";
+      lines.push(
+        `${tui.green(`models refreshed:`)} catalog ${cat} models${rest} (age: ${ageLabel(m.fetchedAt)})`,
+      );
+    }
     lines.push(r.ok
       ? `${tui.green(`repositories refreshed:`)} ${r.count} items (age: ${ageLabel(r.fetchedAt)})`
       : tui.red(`repositories refresh failed: ${r.error.message}`));
@@ -461,7 +543,13 @@ export async function cmdRefresh(target: string | undefined, deps: RefreshDeps |
 
 export const COMMANDS: Record<string, CommandInfo> = {
   name: { name: "name", handler: cmdName as (...args: unknown[]) => unknown, usage: "/name <session-name>", description: "Set the session name." },
-  model: { name: "model", handler: cmdModel as (...args: unknown[]) => unknown, usage: "/model <model-name>", description: "Set the AI model to use." },
+  model: {
+    name: "model",
+    handler: cmdModel as (...args: unknown[]) => unknown,
+    usage: "/model [<model-id> [variant]]",
+    description:
+      "Set the AI model (and optional preset variant by display name). With no args, pick model then variant interactively.",
+  },
   repo: {
     name: "repo",
     handler: cmdRepo as (...args: unknown[]) => unknown,
@@ -540,5 +628,17 @@ export const COMMANDS: Record<string, CommandInfo> = {
     handler: (() => "") as (...args: unknown[]) => unknown,
     usage: "/refresh [models|repos|all]",
     description: "Bypass TTL and re-fetch Cursor API cache; no args prints cache ages.",
+  },
+  runs: {
+    name: "runs",
+    handler: (() => "") as (...args: unknown[]) => unknown,
+    usage: "/runs [limit]",
+    description: "List runs from bootstrap GitHub repo (requires GH_TOKEN, BOOTSTRAP_OWNER, BOOTSTRAP_REPO). Limit defaults to 50.",
+  },
+  watch: {
+    name: "watch",
+    handler: (() => "") as (...args: unknown[]) => unknown,
+    usage: "/watch <run_id>",
+    description: "Live dashboard for a run — same behavior as cursor-orch status --run … --watch; requires bootstrap env vars.",
   },
 };

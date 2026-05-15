@@ -59,6 +59,9 @@ export function getRequiredEnvKeysForCliArgs(argv: string[]): string[] | null {
   if (root === "status" || root === "stop") {
     return ["GH_TOKEN", "BOOTSTRAP_OWNER", "BOOTSTRAP_REPO"];
   }
+  if (root === "runs" || root === "watch") {
+    return ["GH_TOKEN", "BOOTSTRAP_OWNER", "BOOTSTRAP_REPO"];
+  }
   if (root === "logs") {
     return ["CURSOR_API_KEY", "GH_TOKEN", "BOOTSTRAP_OWNER", "BOOTSTRAP_REPO"];
   }

@@ -7,10 +7,11 @@ import tty from "node:tty";
 import type { Interface as ReadlineInterface } from "node:readline/promises";
 import {
   COMMANDS,
+  applyModelSelection,
   cmdConfig,
   cmdConfigClear,
   cmdHelp,
-  cmdModel,
+  cmdModelSlash,
   cmdPromptSet,
   cmdRefresh,
   cmdRepo,
@@ -18,12 +19,15 @@ import {
   formatRepoEquivalentCommand,
   promptSetCommandText,
   setupSummaryLines,
+  validateModelIdInCatalog,
   validateModelValue,
   validatePromptValue,
   type RefreshDeps,
 } from "./commands.js";
-import { classifyRepoPositionalArgs, needsRepoInteractive } from "./lib/repo-interactive.js";
-import type { OrchestratorConfig } from "./config/types.js";
+import { bootstrapEnvIssues, createBootstrapRepoStoreLoose } from "./lib/commands/bootstrap-repo-store.js";
+import { printRunsList } from "./lib/commands/runs-list-impl.js";
+import { StatusCommandExit, runStatusCommand } from "./lib/commands/status-impl.js";
+import type { ModelSelectionConfig, OrchestratorConfig } from "./config/types.js";
 import { Session } from "./session.js";
 import { readReplLineTTY } from "./lib/repl/tty-line-editor.js";
 import { readVersion } from "./version.js";
@@ -33,17 +37,63 @@ import {
   MODELS_TTL_MS,
   REPOS_TTL_MS,
   MODELS_CACHE_KEY,
+  MODELS_CATALOG_CACHE_KEY,
   REPOS_CACHE_KEY,
   type PickerContext,
 } from "./lib/repl/pickers/picker-context.js";
-import { runModelPicker } from "./lib/repl/pickers/model-picker.js";
+import { runModelAndVariantPicker } from "./lib/repl/pickers/model-picker.js";
 import { runRepoPicker } from "./lib/repl/pickers/repo-picker.js";
 import { runMcpAdd, type McpPickerDeps } from "./lib/repl/pickers/mcp-picker.js";
 import { discoverCursorMcpSources } from "./lib/repl/cursor-mcp-sources.js";
+import { classifyRepoPositionalArgs, needsRepoInteractive } from "./lib/repo-interactive.js";
 import { pickFromList } from "./lib/repl/list-picker.js";
+import { equivalentModelSlashCommand, formatModelSummary } from "./lib/model-selection.js";
+import { fetchModelsCatalog } from "./lib/models-catalog.js";
 
-const NON_MUTATION = new Set(["help", "config", "repos", "run", "prompt", "tokens", "mcp"]);
+const NON_MUTATION = new Set(["help", "config", "repos", "run", "prompt", "tokens", "mcp", "runs", "watch"]);
 const MCP_MUTATING_SUBCOMMANDS = new Set(["import", "remove", "clear"]);
+
+async function execReplRuns(limitRaw: string | undefined): Promise<void> {
+  const envErr = bootstrapEnvIssues();
+  if (envErr) {
+    console.log(tui.red(envErr));
+    return;
+  }
+  const store = createBootstrapRepoStoreLoose();
+  if (!store) {
+    console.log(tui.red("Bootstrap GitHub credentials missing (unexpected after check)."));
+    return;
+  }
+  const limit = limitRaw === undefined ? 50 : Number.parseInt(limitRaw, 10);
+  if (!Number.isInteger(limit) || limit < 1) {
+    console.log(tui.red("Usage: /runs [limit] — limit must be an integer >= 1 when provided."));
+    return;
+  }
+  await printRunsList(store, limit);
+}
+
+async function execReplWatch(runId: string): Promise<void> {
+  const envErr = bootstrapEnvIssues();
+  if (envErr) {
+    console.log(tui.red(envErr));
+    return;
+  }
+  try {
+    await runStatusCommand({ run: runId, watch: true }, {
+      finish: (c: number): never => {
+        throw new StatusCommandExit(c);
+      },
+    });
+  } catch (e) {
+    if (e instanceof StatusCommandExit) {
+      if (e.exitCode !== 0) {
+        console.log(tui.dim(`(command ended with exit ${e.exitCode})`));
+      }
+      return;
+    }
+    throw e;
+  }
+}
 
 function parseInput(raw: string): [string, string[]] {
   const parts = raw.slice(1).trim().split(/\s+/);
@@ -178,10 +228,25 @@ export function buildRefreshDeps(ctx: PickerContext): RefreshDeps {
   return {
     refreshModels: async () => {
       try {
+        const apiKey = ctx.apiKey;
+        if (!apiKey) {
+          throw new Error("API key missing on picker context");
+        }
         await ctx.cache.invalidate(MODELS_CACHE_KEY);
-        const data = await ctx.api.listModels();
-        const res = await ctx.cache.get(MODELS_CACHE_KEY, MODELS_TTL_MS, async () => data);
-        return { ok: true, count: data.length, fetchedAt: res.fetchedAt ?? new Date() };
+        await ctx.cache.invalidate(MODELS_CATALOG_CACHE_KEY);
+        const [restIds, catalog] = await Promise.all([
+          ctx.api.listModels(),
+          fetchModelsCatalog(apiKey),
+        ]);
+        await ctx.cache.get(MODELS_CACHE_KEY, MODELS_TTL_MS, async () => restIds);
+        const resCat = await ctx.cache.get(MODELS_CATALOG_CACHE_KEY, MODELS_TTL_MS, async () => catalog);
+        return {
+          ok: true,
+          count: catalog.length,
+          catalogCount: catalog.length,
+          restIdCount: restIds.length,
+          fetchedAt: resCat.fetchedAt ?? new Date(),
+        };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e : new Error(String(e)) };
       }
@@ -197,6 +262,7 @@ export function buildRefreshDeps(ctx: PickerContext): RefreshDeps {
       }
     },
     ageModels: () => ctx.cache.age(MODELS_CACHE_KEY),
+    ageModelsCatalog: () => ctx.cache.age(MODELS_CATALOG_CACHE_KEY),
     ageRepos: () => ctx.cache.age(REPOS_CACHE_KEY),
   };
 }
@@ -207,17 +273,19 @@ export async function runBareModel(
   useTtyEditor: boolean,
   holder: RlHolder,
   _historyPath: string,
-): Promise<string | null> {
+): Promise<ModelSelectionConfig | null> {
   if (!ctx) {
     console.log(tui.dim("Model list unavailable; enter value manually."));
     const raw = await readPromptLine(holder, useTtyEditor, "AI model [default: composer-2]: ");
     if (raw === null) return null;
     const t = raw.trim();
-    if (t === "" || isControl(t, "skip")) return "composer-2";
-    return t;
+    if (t === "" || isControl(t, "skip")) return { id: "composer-2" };
+    return { id: t };
   }
-  return runModelPicker({
-    listModels: () => ctx.cache.get(MODELS_CACHE_KEY, MODELS_TTL_MS, () => ctx.api.listModels()),
+  const apiKey = ctx.apiKey;
+  return runModelAndVariantPicker({
+    listCatalog: () =>
+      ctx.cache.get(MODELS_CATALOG_CACHE_KEY, MODELS_TTL_MS, () => fetchModelsCatalog(apiKey)),
     pick: (items, opts) => pickFromList(items, opts),
     fallbackPrompt: async () => {
       const raw = await readPromptLine(holder, useTtyEditor, "AI model [default: composer-2]: ");
@@ -227,7 +295,8 @@ export async function runBareModel(
       return t;
     },
     writeLine: (s) => console.log(s),
-    currentModel: session.config.model,
+    currentModel: session.config.model.id,
+    currentModelParams: session.config.model.params,
     isTTY: isInteractiveTty(),
   });
 }
@@ -294,16 +363,29 @@ async function runGuidedSetup(
         session.saveSession();
         return null;
       }
-      const err = validateModelValue(picked);
+      const err = validateModelValue(picked.id);
       if (err) {
         console.log(tui.red(err));
         continue;
       }
-      session.setModel(picked);
+      const catalogErr = await validateModelIdInCatalog(picked.id, ctx);
+      if (catalogErr) {
+        console.log(tui.red(catalogErr));
+        continue;
+      }
+      session.setModelSelection(picked);
       session.setSetupState({ active: true, step: "prompt" });
       session.saveSession();
-      console.log(`Model set to: ${picked}`);
-      console.log(`Equivalent command: /model ${picked}`);
+      const catSnap =
+        ctx
+          ? (
+              await ctx.cache.get(MODELS_CATALOG_CACHE_KEY, MODELS_TTL_MS, () =>
+                fetchModelsCatalog(ctx.apiKey),
+              )
+            ).data
+          : null;
+      console.log(`Model set to: ${formatModelSummary(picked)}`);
+      console.log(`Equivalent command: ${equivalentModelSlashCommand(picked, catSnap)}`);
       step = "prompt";
       continue;
     }
@@ -461,10 +543,6 @@ function dispatch(cmd: string, args: string[], session: Session): string | null 
         return cmdConfig(session);
       case "mcp":
         return cmdInfo.handler(session, args[0], args[1]) as string;
-      case "save":
-        return cmdInfo.handler(session, args[0]) as string;
-      case "load":
-        return cmdInfo.handler(session, args[0] ?? "") as string;
       default:
         return (cmdInfo.handler as (s: Session) => string)(session);
     }
@@ -488,7 +566,7 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
 
   const ctx: PickerContext | null = buildPickerContext(process.env.CURSOR_API_KEY);
   if (ctx) {
-    void ctx.cache.get(MODELS_CACHE_KEY, MODELS_TTL_MS, () => ctx.api.listModels()).catch(() => {});
+    void ctx.cache.get(MODELS_CATALOG_CACHE_KEY, MODELS_TTL_MS, () => fetchModelsCatalog(ctx.apiKey)).catch(() => {});
     void ctx.cache.get(REPOS_CACHE_KEY, REPOS_TTL_MS, () => ctx.api.listRepositories()).catch(() => {});
   }
 
@@ -580,10 +658,17 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
         console.log(tui.red(`Unknown command: /${cmd}. Type /help for available commands.`));
         continue;
       }
+      if (cmd === "model" && args.length > 0) {
+        const variant = args.slice(1).join(" ").trim() || undefined;
+        const out = await cmdModelSlash(session, args[0] ?? "", variant, ctx);
+        console.log(out);
+        session.saveSession();
+        continue;
+      }
       if (cmd === "model" && args.length === 0) {
         const picked = await runBareModel(session, ctx, useTtyEditor, holder, historyPath);
         if (picked) {
-          console.log(cmdModel(session, picked));
+          console.log(applyModelSelection(session, picked));
           session.saveSession();
         }
         continue;
@@ -640,6 +725,19 @@ export async function runRepl(): Promise<OrchestratorConfig | null> {
         session.clearSetupState();
         session.saveSession();
         return result.config;
+      }
+      if (cmd === "runs") {
+        await execReplRuns(args[0]);
+        continue;
+      }
+      if (cmd === "watch") {
+        const runId = (args[0] ?? "").trim();
+        if (!runId) {
+          console.log(tui.red("Usage: /watch <run_id>"));
+          continue;
+        }
+        await execReplWatch(runId);
+        continue;
       }
       const output = dispatch(cmd, args, session);
       if (output) {

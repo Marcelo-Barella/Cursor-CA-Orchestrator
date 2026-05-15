@@ -7,7 +7,7 @@ import {
   NetworkError,
   RateLimitError,
   UnsupportedRunOperationError,
-} from "@cursor/february";
+} from "@cursor/sdk";
 import type {
   AgentOptions as SdkAgentOptions,
   AssistantMessage as SdkAssistantMessageChunk,
@@ -26,7 +26,9 @@ import type {
   SDKUserMessageEvent,
   TextBlock,
   ToolUseBlock,
-} from "@cursor/february";
+} from "@cursor/sdk";
+import type { ModelSelectionConfig } from "../config/types.js";
+import { toSdkModelSelection } from "../lib/model-selection.js";
 
 export {
   AuthenticationError,
@@ -58,19 +60,17 @@ export type {
 
 export interface CreateCloudAgentOpts {
   apiKey: string;
-  model: string;
+  model: ModelSelectionConfig;
   repoUrl: string;
   startingRef: string;
-  branchName: string;
   autoCreatePR: boolean;
   skipReviewerRequest?: boolean;
-  signal?: AbortSignal;
   mcpServers?: Record<string, SdkMcpServerConfig>;
 }
 
 export interface AgentClient {
-  createCloudAgent(opts: CreateCloudAgentOpts): SdkAgent;
-  resumeCloudAgent(agentId: string, opts: Partial<SdkAgentOptions>): SdkAgent;
+  createCloudAgent(opts: CreateCloudAgentOpts): Promise<SdkAgent>;
+  resumeCloudAgent(agentId: string, opts: Partial<SdkAgentOptions>): Promise<SdkAgent>;
   promptOneShot(message: string, opts: SdkAgentOptions): Promise<SdkRunResult>;
   fetchAgentConversationText?(agentId: string): Promise<string | null>;
 }
@@ -113,15 +113,12 @@ export async function fetchAgentConversationTextFromApi(agentId: string, apiKey:
 export function buildCloudAgentOptions(opts: CreateCloudAgentOpts): SdkAgentOptions {
   const options: SdkAgentOptions = {
     apiKey: opts.apiKey,
-    model: { id: opts.model },
+    model: toSdkModelSelection(opts.model),
     cloud: {
       repos: [{ url: opts.repoUrl, startingRef: opts.startingRef }],
-      branchName: opts.branchName,
-      autoGenerateBranch: false,
       autoCreatePR: opts.autoCreatePR,
       skipReviewerRequest: opts.skipReviewerRequest ?? true,
     },
-    signal: opts.signal,
   };
   if (opts.mcpServers && Object.keys(opts.mcpServers).length > 0) {
     options.mcpServers = opts.mcpServers;
@@ -170,10 +167,10 @@ function installCreateAgentBodyRewrite(): void {
 export function createDefaultAgentClient(apiKey: string): AgentClient {
   installCreateAgentBodyRewrite();
   return {
-    createCloudAgent(opts: CreateCloudAgentOpts): SdkAgent {
+    async createCloudAgent(opts: CreateCloudAgentOpts): Promise<SdkAgent> {
       return CursorAgent.create(buildCloudAgentOptions({ ...opts, apiKey }));
     },
-    resumeCloudAgent(agentId: string, opts: Partial<SdkAgentOptions>): SdkAgent {
+    async resumeCloudAgent(agentId: string, opts: Partial<SdkAgentOptions>): Promise<SdkAgent> {
       return CursorAgent.resume(agentId, { apiKey, ...opts });
     },
     async promptOneShot(message: string, opts: SdkAgentOptions): Promise<SdkRunResult> {

@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { setTimeout as delay } from "node:timers/promises";
 import { REQUIRED_SDK_SPEC, buildRuntimeRef, packageRuntimeSnapshot, validatePayloadSize } from "./packager.js";
 
@@ -11,7 +12,46 @@ const MAX_RETRIES_TRANSIENT = 3;
 const JITTER_FACTOR = 0.2;
 const TRANSIENT_CODES = new Set([502, 503, 504]);
 
-export const BOOTSTRAP_INSTALL_COMMAND = `npm install --no-save --no-audit --no-fund --prefix . ${REQUIRED_SDK_SPEC}`;
+function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildBootstrapInstallInnerScript(): string {
+  const specQ = shellSingleQuote(REQUIRED_SDK_SPEC);
+  return [
+    "set -euo pipefail",
+    '_log() { echo "cursor-orch bootstrap: $*" >&2; }',
+    "_ensure_node_and_npm() {",
+    "  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then",
+    '    _log "using existing node/npm ($(command -v node), $(command -v npm))"',
+    "    return 0",
+    "  fi",
+    "  if command -v apt-get >/dev/null 2>&1; then",
+    "    export DEBIAN_FRONTEND=noninteractive",
+    '    _log "installing nodejs and npm via apt-get"',
+    "    apt-get update -y",
+    "    apt-get install -y nodejs npm",
+    "    hash -r 2>/dev/null || true",
+    "  fi",
+    "  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then",
+    "    return 0",
+    "  fi",
+    '  _log "no node/npm toolchain (PATH=${PATH})"',
+    "  exit 127",
+    "}",
+    "_try_install_with_resolved_toolchain() {",
+    "  _ensure_node_and_npm",
+    `  npm install --no-save --no-audit --no-fund --prefix . ${specQ}`,
+    "}",
+    "_try_install_with_resolved_toolchain",
+  ].join("\n");
+}
+
+export const BOOTSTRAP_INSTALL_COMMAND = ((): string => {
+  const b64 = Buffer.from(buildBootstrapInstallInnerScript(), "utf8").toString("base64");
+  return `printf '%s' ${JSON.stringify(b64)} | base64 -d | bash -l`;
+})();
+
 export const BOOTSTRAP_ENTRYPOINT = "node dist/orchestrator-runtime.cjs";
 export const RULE_PATH = ".cursor/rules/orchestrator.mdc";
 export const READONLY_RULE_PATH = ".cursor/rules/readonly-guard.mdc";
