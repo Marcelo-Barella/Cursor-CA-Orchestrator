@@ -293,12 +293,11 @@ export async function runOrchestrationCli(
     `Launching orchestrator agent (${owner}/${repoInfo.name})`,
     async (updateMessage) => {
       updateMessage("Creating SDK agent…");
-      const sdkAgent = agentClient.createCloudAgent({
+      const sdkAgent = await agentClient.createCloudAgent({
         apiKey: cursorApiKey,
         model: config.model,
         repoUrl,
         startingRef: runtimeRef,
-        branchName: `cursor-orch-run-${orchestrationId}`,
         autoCreatePR: false,
         skipReviewerRequest: true,
       });

@@ -30,7 +30,7 @@ const repoCreateTask: TaskConfig = {
 
 const plannerConfig: OrchestratorConfig = {
   name: "parallel-run",
-  model: "gpt",
+  model: { id: "gpt" },
   prompt: "Ship the feature across repos.",
   repositories: {
     backend: { url: "https://github.com/acme/backend", ref: "main" },

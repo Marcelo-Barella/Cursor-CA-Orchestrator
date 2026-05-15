@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
-import type { McpServerConfig, OrchestratorConfig } from "./config/types.js";
+import type { McpServerConfig, ModelSelectionConfig, OrchestratorConfig } from "./config/types.js";
 import { parseConfig, parseMcpServers, toYaml } from "./config/parse.js";
 import { validateConfig, validateMcpServers } from "./config/validate.js";
 
@@ -67,7 +67,7 @@ function extractMcpServersPayload(raw: unknown): unknown {
 export function createDefaultOrchestratorConfig(): OrchestratorConfig {
   return {
     name: "",
-    model: "",
+    model: { id: "" },
     prompt: "",
     repositories: {},
     tasks: [],
@@ -96,8 +96,12 @@ export class Session {
     this._config.name = name;
   }
 
-  setModel(model: string): void {
-    this._config.model = model;
+  setModel(modelId: string): void {
+    this.setModelSelection({ id: modelId });
+  }
+
+  setModelSelection(selection: ModelSelectionConfig): void {
+    this._config.model = selection;
   }
 
   setPrompt(prompt: string): void {
@@ -203,7 +207,7 @@ export class Session {
   }
 
   hasRequiredGuidedValues(): boolean {
-    return Boolean(this._config.model.trim()) && Boolean(this._config.prompt.trim());
+    return Boolean(this._config.model.id.trim()) && Boolean(this._config.prompt.trim());
   }
 
   setupState(): { active: boolean; step: string } {

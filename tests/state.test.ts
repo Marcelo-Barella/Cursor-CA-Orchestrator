@@ -6,7 +6,7 @@ describe("state", () => {
   it("roundtrip serialize", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: {},
       tasks: [
@@ -35,7 +35,7 @@ describe("state", () => {
   it("roundtrip preserves delegation phase and group cursors", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: {},
       tasks: [

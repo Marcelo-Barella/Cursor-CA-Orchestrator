@@ -1,3 +1,4 @@
+import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
@@ -10,6 +11,10 @@ import {
 } from "./support/fake-agent-client.js";
 
 type FileStore = Map<string, string>;
+
+function runGit(branch: string, repoUrl = "https://github.com/acme/svc"): NonNullable<SdkRunResult["git"]> {
+  return { branches: [{ repoUrl, branch }] };
+}
 
 function createInMemoryRepoStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
   const files: FileStore = new Map(Object.entries(initial));
@@ -38,7 +43,7 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
 function singleTaskConfig(): OrchestratorConfig {
   return {
     name: "demo",
-    model: "composer-2",
+    model: { id: "composer-2" },
     prompt: "",
     repositories: {
       svc: { url: "https://github.com/acme/svc", ref: "main" },
@@ -106,7 +111,7 @@ function twoRepoParallelTaskConfig(): OrchestratorConfig {
   });
   return {
     name: "demo",
-    model: "composer-2",
+    model: { id: "composer-2" },
     prompt: "",
     repositories: {
       svc: { url: "https://github.com/acme/svc", ref: "main" },
@@ -128,6 +133,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     process.env.GH_TOKEN = "ghp-fake";
     process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES = "0";
     delete process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRY_MS;
+    delete process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES;
     installGithubBranchPrepMock();
   });
   afterEach(() => {
@@ -139,7 +145,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const config = twoRepoParallelTaskConfig();
     const scriptFor = (taskId: string) => ({
       events: [statusMessage("CREATING"), statusMessage("RUNNING"), assistantText("ok"), statusMessage("FINISHED")],
-      result: { id: `r-${taskId}`, status: "finished" as const, git: { branch: `cursor-orch/run-parallel/${taskId}` } },
+      result: { id: `r-${taskId}`, status: "finished" as const, git: runGit(`cursor-orch/run-parallel/${taskId}`) },
       artifacts: {
         "cursor-orch-output.json": JSON.stringify({ task_id: taskId, status: "completed", summary: "ok", outputs: {} }),
       },
@@ -168,7 +174,7 @@ describe("runOrchestration with SDK (happy path)", () => {
       defaultScripts: [
         {
           events: [statusMessage("CREATING"), statusMessage("RUNNING"), assistantText("working"), statusMessage("FINISHED")],
-          result: { id: "r1", status: "finished", git: { branch: "cursor-orch/run-1/t1" } },
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-1/t1") },
           artifacts: { "cursor-orch-output.json": JSON.stringify(workerPayload) },
         },
       ],
@@ -182,7 +188,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
-    expect(fake.launches[0]!.opts.branchName).toBe("cursor-orch/run-1/t1");
     expect(fake.launches[0]!.opts.startingRef).toBe("cursor-orch/run-1/t1");
   });
 
@@ -222,6 +227,103 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
+  });
+
+  it("retries worker run error once when failure retries allowed and completes on second attempt", async () => {
+    process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "1";
+    const config = singleTaskConfig();
+    const okPayload = { task_id: "t1", status: "completed", summary: "ok", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("ERROR")],
+          result: { id: "r1", status: "error" },
+        },
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r2", status: "finished", git: runGit("cursor-orch/run-retry-ok/t1-retry-1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(okPayload) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-retry-ok", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.agents.t1.status).toBe("finished");
+    expect(state.agents.t1.retry_count).toBe(1);
+    expect(fake.launches[1]!.opts.startingRef).toBe("cursor-orch/run-retry-ok/t1-retry-1");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_retried")).toBe(true);
+    expect(events.filter((e: { event_type: string }) => e.event_type === "task_failed").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("stays failed after repeated run errors when failure retries are exhausted", async () => {
+    process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "1";
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("ERROR")],
+          result: { id: "r1", status: "error" },
+        },
+        {
+          events: [statusMessage("RUNNING"), statusMessage("ERROR")],
+          result: { id: "r2", status: "error" },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-retry-fail", fake, store)).rejects.toThrow();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.agents.t1.status).toBe("failed");
+    expect(state.agents.t1.retry_count).toBe(1);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.filter((e: { event_type: string }) => e.event_type === "task_failed").length).toBe(2);
+  });
+
+  it("retries after createCloudAgent failure when failure retries allowed", async () => {
+    process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "1";
+    const config = singleTaskConfig();
+    const okPayload = { task_id: "t1", status: "completed", summary: "ok", outputs: {} };
+    const fake = new FakeAgentClient({
+      createFailCount: 1,
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-create-retry/t1-retry-1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(okPayload) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-create-retry", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.agents.t1.retry_count).toBe(1);
+  });
+
+  it("retries after send() failure when failure retries allowed", async () => {
+    process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "1";
+    const config = singleTaskConfig();
+    const okPayload = { task_id: "t1", status: "completed", summary: "ok", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { sendThrows: new Error("send failed"), result: { id: "skip", status: "finished", result: "" } },
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-send-retry/t1-retry-1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(okPayload) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-send-retry", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.agents.t1.retry_count).toBe(1);
   });
 
   it("after run error, retries resolving output and finishes when conversation JSON appears on a later attempt", async () => {

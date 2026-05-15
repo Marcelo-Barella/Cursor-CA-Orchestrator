@@ -20,14 +20,14 @@ function readText(p: string): string {
 function parseSdkVersion(): string {
   const raw = readText(join(PROJECT_ROOT, "package.json"));
   const pkg = JSON.parse(raw) as { dependencies?: Record<string, string> };
-  const declared = pkg.dependencies?.["@cursor/february"];
+  const declared = pkg.dependencies?.["@cursor/sdk"];
   if (!declared || typeof declared !== "string") {
-    throw new Error("package.json must declare @cursor/february in dependencies");
+    throw new Error("package.json must declare @cursor/sdk in dependencies");
   }
   return declared;
 }
 
-export const REQUIRED_SDK_PACKAGE = "@cursor/february";
+export const REQUIRED_SDK_PACKAGE = "@cursor/sdk";
 export const REQUIRED_SDK_VERSION: string = parseSdkVersion();
 export const REQUIRED_SDK_SPEC: string = `${REQUIRED_SDK_PACKAGE}@${REQUIRED_SDK_VERSION}`;
 

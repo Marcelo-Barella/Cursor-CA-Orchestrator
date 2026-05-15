@@ -25,7 +25,7 @@ describe("packager", () => {
   });
 
   it("exposes the required Cursor SDK version", () => {
-    expect(REQUIRED_SDK_PACKAGE).toBe("@cursor/february");
+    expect(REQUIRED_SDK_PACKAGE).toBe("@cursor/sdk");
     expect(REQUIRED_SDK_VERSION).toMatch(/^[\^~]?[0-9]+\.[0-9]+\.[0-9]+/);
     expect(REQUIRED_SDK_SPEC).toBe(`${REQUIRED_SDK_PACKAGE}@${REQUIRED_SDK_VERSION}`);
   });

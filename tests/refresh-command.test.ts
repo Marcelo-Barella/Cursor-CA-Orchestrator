@@ -3,10 +3,17 @@ import { cmdRefresh, type RefreshDeps } from "../src/commands.js";
 
 function deps(overrides: Partial<RefreshDeps> = {}): RefreshDeps {
   return {
-    refreshModels: async () => ({ ok: true, count: 3, fetchedAt: new Date() }),
+    refreshModels: async () => ({
+      ok: true,
+      count: 2,
+      catalogCount: 2,
+      restIdCount: 3,
+      fetchedAt: new Date(),
+    }),
     refreshRepos: async () => ({ ok: true, count: 5, fetchedAt: new Date() }),
-    ageModels: async () => new Date(Date.now() - 60_000),
-    ageRepos: async () => new Date(Date.now() - 120_000),
+    ageModels: async () => new Date(Date.now() - 120_000),
+    ageModelsCatalog: async () => new Date(Date.now() - 60_000),
+    ageRepos: async () => new Date(Date.now() - 240_000),
     ...overrides,
   };
 }
@@ -14,13 +21,16 @@ function deps(overrides: Partial<RefreshDeps> = {}): RefreshDeps {
 describe("cmdRefresh", () => {
   it("bare prints current ages for both", async () => {
     const out = await cmdRefresh(undefined, deps());
-    expect(out).toMatch(/models.*1m/);
-    expect(out).toMatch(/repositories.*2m/);
+    expect(out).toMatch(/models \(SDK catalog\).*1m/);
+    expect(out).toMatch(/REST \/v0.*2m/);
+    expect(out).toMatch(/repositories.*4m/);
   });
 
   it("models succeeds with count", async () => {
     const out = await cmdRefresh("models", deps());
-    expect(out).toMatch(/models refreshed.*3/);
+    expect(out).toMatch(/models refreshed/);
+    expect(out).toMatch(/catalog 2 models/);
+    expect(out).toMatch(/REST 3 ids \(diagnostic\)/);
   });
 
   it("repos failure surfaces error and does not touch models", async () => {

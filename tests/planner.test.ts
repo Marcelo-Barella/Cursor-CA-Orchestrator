@@ -7,7 +7,7 @@ describe("planner", () => {
   it("parses minimal legacy task plan without delegation map", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [],
@@ -34,7 +34,7 @@ describe("planner", () => {
   it("parses task plan with delegation map phases and groups", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [],
@@ -72,7 +72,7 @@ describe("planner", () => {
   it("parseTaskPlan merged config fails validateConfig when delegation_map omits a task", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [],
@@ -109,7 +109,7 @@ describe("planner", () => {
   it("rejects delegation map that references unknown task IDs", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [],
@@ -142,7 +142,7 @@ describe("planner", () => {
   it("resolves repo name to URL-keyed repository alias", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: { "https://github.com/o/bergamota.git": { url: "https://github.com/o/bergamota.git", ref: "main" } },
       tasks: [],
@@ -168,7 +168,7 @@ describe("planner", () => {
   it("resolves repo to create_repo task id and injects depends_on when two create_repo tasks exist", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: {},
       tasks: [],
@@ -213,7 +213,7 @@ describe("planner", () => {
   it("resolves tideglass-style plan when repo is the create_repo task id", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: {},
       tasks: [],
@@ -258,7 +258,7 @@ describe("planner", () => {
   it("rejects __new__ downstream task when multiple create_repo tasks exist and repo is not disambiguated", () => {
     const config: OrchestratorConfig = {
       name: "n",
-      model: "m",
+      model: { id: "m" },
       prompt: "",
       repositories: {},
       tasks: [],

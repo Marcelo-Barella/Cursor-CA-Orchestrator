@@ -1,6 +1,6 @@
 # cursor-orch
 
-A TypeScript CLI for Node.js 20+ that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, uses per-run branches on that repo as a coordination bulletin board, and launches an orchestrator Cloud Agent that drives worker agents through the official Cursor TypeScript SDK (`@cursor/february`).
+A TypeScript CLI for Node.js 20+ that orchestrates multiple Cursor Cloud Agents working across different GitHub repositories. It provisions a bootstrap repo, uses per-run branches on that repo as a coordination bulletin board, and launches an orchestrator Cloud Agent that drives worker agents through the official Cursor TypeScript SDK (`@cursor/sdk`).
 
 ## Prerequisites
 
@@ -9,7 +9,7 @@ A TypeScript CLI for Node.js 20+ that orchestrates multiple Cursor Cloud Agents 
 - Cursor API key for `CURSOR_API_KEY`
 - For `status`, `logs`, and `stop` against an existing run, set `BOOTSTRAP_OWNER` and `BOOTSTRAP_REPO` to the GitHub owner and repository name of your bootstrap repo (same values used in the run output)
 
-The bootstrap orchestrator installs `@cursor/february` at launch time inside the cloud VM (the CLI bundle pins the version). That SDK ships native `sqlite3` and vendored `rg` binaries, so the install can take a couple of minutes on a cold start.
+The bootstrap orchestrator installs `@cursor/sdk` at launch time inside the cloud VM (the CLI bundle pins the version). That SDK ships native `sqlite3` and vendored `rg` binaries, so the install can take a couple of minutes on a cold start.
 
 ## Onboarding: Clone to First Run
 
@@ -174,7 +174,7 @@ $ cursor-orch
 | Command | Usage | Description |
 |---------|-------|-------------|
 | `/name` | `/name <session-name>` | Set the session name |
-| `/model` | `/model <model-name>` | Set the AI model to use |
+| `/model` | `/model [<model-id> [variant]]` | Set the model and optional preset variant (interactive two-step flow with no args) |
 | `/repo` | `/repo <alias> <url> [ref]` | Add or replace a repository |
 | `/repo-remove` | `/repo-remove <alias>` | Remove a repository (also `/repo remove <alias>`) |
 | `/repos` | `/repos` | List all configured repositories |
@@ -283,7 +283,7 @@ Environment variable `CURSOR_ORCH_CONSOLIDATE_PRS` overrides `target.consolidate
 
 ### MCP Servers
 
-`mcp_servers` mirrors the `mcpServers` option on the `@cursor/february` SDK. Each entry is keyed by an MCP name and takes one of two shapes:
+`mcp_servers` mirrors the `mcpServers` option from the `@cursor/sdk` package. Each entry is keyed by an MCP name and takes one of two shapes:
 
 - **HTTP / SSE**: `type: http` (or `sse`), `url`, optional `headers`, optional `auth { CLIENT_ID, CLIENT_SECRET?, scopes? }`.
 - **Stdio**: `type: stdio`, `command`, optional `args`, `env`, `cwd`. On cloud agents the server runs inside the cloud VM and `env` values are passed into that VM.
@@ -361,9 +361,9 @@ User Terminal                     GitHub                          Cursor Cloud
 
 1. **Local CLI** -- Runs in your terminal. Provides the interactive REPL, creates config, provisions the bootstrap repo, creates a per-run branch with runtime files, and launches the orchestrator agent via the Cursor TypeScript SDK. Exits once the orchestrator is running; the cloud agent continues independently.
 
-2. **Bootstrap Repo** -- A minimal private repo in your GitHub account (`cursor-orch-bootstrap`). Contains Cursor rules and a pinned runtime snapshot (`dist/orchestrator-runtime.cjs` + `package.json`) on a `runtime/<sha>` ref. The orchestrator agent first runs `npm install --no-save @cursor/february@<pinned>` to pull the SDK into the cloud VM, then starts `node dist/orchestrator-runtime.cjs`.
+2. **Bootstrap Repo** -- A minimal private repo in your GitHub account (`cursor-orch-bootstrap`). Contains Cursor rules and a pinned runtime snapshot (`dist/orchestrator-runtime.cjs` + `package.json`) on a `runtime/<sha>` ref. The orchestrator agent first runs `npm install --no-save @cursor/sdk@<pinned>` to pull the SDK into the cloud VM, then starts `node dist/orchestrator-runtime.cjs`.
 
-3. **Cloud Agents** -- The orchestrator agent drives the task graph using `@cursor/february` -- every worker launch is `Agent.create({ cloud: { repos, branchName, autoCreatePR } })` followed by `run.stream()` and `run.wait()`. Worker results arrive as workspace artifacts (`cursor-orch-output.json`, read via `agent.listArtifacts()` + `agent.downloadArtifact()`), with the same JSON also included as a fenced ```json block in the final assistant message as a fallback.
+3. **Cloud Agents** -- The orchestrator agent drives the task graph using `@cursor/sdk` -- every worker launch is `Agent.create({ cloud: { repos, branchName, autoCreatePR } })` followed by `run.stream()` and `run.wait()`. Worker results arrive as workspace artifacts (`cursor-orch-output.json`, read via `agent.listArtifacts()` + `agent.downloadArtifact()`), with the same JSON also included as a fenced ```json block in the final assistant message as a fallback.
 
 ### Per-Run Branch
 

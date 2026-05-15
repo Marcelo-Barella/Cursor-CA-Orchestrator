@@ -28,7 +28,7 @@ describe("config", () => {
   it("toYaml includes create_repo", () => {
     const config: OrchestratorConfig = {
       name: "test",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: {},
       tasks: [
@@ -132,7 +132,7 @@ target:
   it("validateConfig rejects unresolvable repository url (typo in url field)", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "goal",
       repositories: {
         "https://github.com/o/bergamota.git": { url: "bergamta", ref: "main" },
@@ -147,7 +147,7 @@ target:
   it("canonicalizeOrchestratorConfig rewrites repositories and tasks to canonical GitHub URLs", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [
@@ -173,7 +173,7 @@ target:
   it("canonicalizeOrchestratorConfig preserves __bootstrap__ entry", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "m",
+      model: { id: "m" },
       prompt: "p",
       repositories: {
         svc: { url: "https://github.com/o/r", ref: "main" },
@@ -249,7 +249,7 @@ target:
   it("validateConfig rejects delegation_map unknown task reference", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [
@@ -276,7 +276,7 @@ target:
   it("validateConfig rejects task repeated in multiple delegation groups", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [
@@ -321,7 +321,7 @@ target:
   it("validateConfig rejects delegation_map that does not assign all tasks", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [
@@ -358,7 +358,7 @@ target:
   it("validateConfig returns early without delegation checks when prompt is set and tasks is empty", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "planning only",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [],
@@ -374,7 +374,7 @@ target:
   it("validateConfig rejects impossible cross-phase dependency ordering", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [
@@ -414,7 +414,7 @@ target:
   it("validateConfig accepts same-phase dependency on an earlier group", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [
@@ -459,7 +459,7 @@ target:
   it("validateConfig rejects impossible same-phase dependency on a later group", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [
@@ -504,7 +504,7 @@ target:
   it("validateConfig requires delegation_map when multiple tasks hit the same repo under consolidated consolidate_prs", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [
@@ -538,7 +538,7 @@ target:
   it("validateConfig rejects same-repo tasks in the same parallel group for run-line workflow", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "",
       repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
       tasks: [
@@ -703,7 +703,7 @@ target:
     } as unknown as OrchestratorConfig["target"];
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "x",
       repositories: {},
       tasks: [],
@@ -800,7 +800,7 @@ mcp_servers:
   it("toYaml round-trips mcp_servers", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "p",
       repositories: {},
       tasks: [],
@@ -841,7 +841,7 @@ mcp_servers:
   it("validateConfig rejects mcp_servers with invalid name", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "p",
       repositories: {},
       tasks: [],
@@ -857,7 +857,7 @@ mcp_servers:
   it("validateConfig rejects stdio server with empty command", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "p",
       repositories: {},
       tasks: [],
@@ -873,7 +873,7 @@ mcp_servers:
   it("toYaml omits mcp_servers when empty", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "composer-2",
+      model: { id: "composer-2" },
       prompt: "p",
       repositories: {},
       tasks: [],
@@ -1017,7 +1017,7 @@ inventory:
   it("toYaml round-trips inventory", () => {
     const config: OrchestratorConfig = {
       name: "t",
-      model: "m",
+      model: { id: "m" },
       prompt: "p",
       repositories: {},
       tasks: [],

@@ -5,6 +5,13 @@ export interface RepoConfig {
   ref: string;
 }
 
+export type ModelParameterConfig = { id: string; value: string };
+
+export type ModelSelectionConfig = {
+  id: string;
+  params?: ModelParameterConfig[];
+};
+
 export interface TaskConfig {
   id: string;
   repo: string;
@@ -87,7 +94,7 @@ export type McpServerConfig = McpStdioConfig | McpHttpConfig;
 
 export interface OrchestratorConfig {
   name: string;
-  model: string;
+  model: ModelSelectionConfig;
   prompt: string;
   repositories: Record<string, RepoConfig>;
   tasks: TaskConfig[];
