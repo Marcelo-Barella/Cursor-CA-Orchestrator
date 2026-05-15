@@ -1,5 +1,4 @@
 export { type OrchestratorConfig } from "./config/types.js";
 
-export async function launchOrchestrationRun(): Promise<{ orchestrationRunId: string }> {
-  throw new Error("launchOrchestrationRun not wired");
-}
+export { launchOrchestrationRun } from "./engine/launch-orchestration-run.js";
+export type { LaunchOrchestrationRunDeps } from "./engine/launch-orchestration-run.js";
