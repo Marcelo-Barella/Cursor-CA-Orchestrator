@@ -17,6 +17,7 @@ import { renderLive } from "../../dashboard.js";
 import { randomUUID } from "node:crypto";
 import { withOrchestratorLaunchProgress } from "../../tui/progress.js";
 import { severityStyle } from "../../tui/style.js";
+import { launchOrchestrationRun } from "../../engine/launch-orchestration-run.js";
 
 const MAX_RUN_ID_ATTEMPTS = 5;
 
@@ -252,7 +253,7 @@ export async function runOrchestrationCli(
   cursorApiKey: string,
   ghToken: string,
   bootstrapRepo: string | undefined,
-): Promise<void> {
+): Promise<{ orchestrationRunId: string }> {
   const repoName = resolveBootstrapName(bootstrapRepo, config);
   const repoInfo = await ensureBootstrapRepo(ghToken, repoName);
   const runtimeRef = repoInfo.runtime_ref;
@@ -317,6 +318,8 @@ export async function runOrchestrationCli(
   await syncToRepo(repoStore, orchestrationId, initialState);
 
   await renderLive(repoStore, orchestrationId, config);
+
+  return { orchestrationRunId: orchestrationId };
 }
 
 export async function runCommand(opts: {
@@ -343,13 +346,17 @@ export async function runCommand(opts: {
   });
   await validateGithubToken(env.GH_TOKEN!);
   try {
-    await runOrchestrationCli(
-      config,
-      configYaml,
-      env.CURSOR_API_KEY!,
-      env.GH_TOKEN!,
-      opts.bootstrapRepo,
-    );
+    await launchOrchestrationRun({
+      cwd: process.cwd(),
+      runOrchestration: () =>
+        runOrchestrationCli(
+          config,
+          configYaml,
+          env.CURSOR_API_KEY!,
+          env.GH_TOKEN!,
+          opts.bootstrapRepo,
+        ),
+    });
   } catch (error) {
     console.error(error);
     fail({
