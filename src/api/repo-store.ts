@@ -62,7 +62,12 @@ function compute429Delay(attempt: number, retryAfterHeader: string | null): numb
   return d;
 }
 
-export class RepoStoreClient {
+export interface RepoStoreReader {
+  readFile(runId: string, filename: string): Promise<string>;
+  listRunFiles(runId: string): Promise<string[]>;
+}
+
+export class RepoStoreClient implements RepoStoreReader {
   private readonly token: string;
   private readonly owner: string;
   private readonly repo: string;
