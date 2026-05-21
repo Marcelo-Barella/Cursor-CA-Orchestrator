@@ -402,6 +402,29 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(failedEvent?.payload?.payload_source).toBe("none");
   });
 
+  it("stays failed when the SDK run returns status=finished without worker JSON", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), assistantText("done but no structured output"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+        },
+      ],
+      conversationText: "orchestration complete; no json block attached.",
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-finished-no-json", fake, store)).rejects.toThrow();
+    expect(files.get("agent-t1.json")).toBeUndefined();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const failedEvent = events.find((e) => e.event_type === "task_failed" && e.task_id === "t1");
+    expect(failedEvent?.payload?.payload_source).toBe("none");
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
+  });
+
   it("writes a per-worker transcript from streamed SDK events", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
