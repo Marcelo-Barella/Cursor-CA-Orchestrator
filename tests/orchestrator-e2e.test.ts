@@ -402,6 +402,26 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(failedEvent?.payload?.payload_source).toBe("none");
   });
 
+  it("stays failed when worker JSON omits a status field (e.g. empty object)", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), assistantText("```json\n{}\n```"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: { "cursor-orch-output.json": "{}" },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-empty-worker-json", fake, store)).rejects.toThrow();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
+  });
+
   it("stays failed when the SDK run returns status=finished without worker JSON", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
