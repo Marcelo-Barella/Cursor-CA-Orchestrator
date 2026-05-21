@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SDKAssistantMessage } from "../src/sdk/agent-client.js";
 import {
   parseAssistantJsonFromMessages,
@@ -43,6 +43,57 @@ describe("parseAssistantJsonFromText", () => {
   it("collects across multiple assistant messages", () => {
     const messages = [makeAssistant("Start"), makeAssistant('```json\n{"ok":true}\n```')];
     expect(parseAssistantJsonFromMessages(messages)).toEqual({ ok: true });
+  });
+});
+
+describe("v1 agent create fetch rewrite", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.resetModules();
+  });
+
+  it("strips branchName and autoGenerateBranch from POST /v1/agents", async () => {
+    let capturedBody: string | undefined;
+    const downstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      capturedBody = typeof init?.body === "string" ? init.body : undefined;
+      return new Response("{}", { status: 200 });
+    });
+    globalThis.fetch = downstream as typeof fetch;
+    const { createDefaultAgentClient } = await import("../src/sdk/agent-client.js");
+    createDefaultAgentClient("test-key");
+    await fetch("https://api.cursor.com/v1/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        branchName: "feature/x",
+        autoGenerateBranch: true,
+        prompt: { text: "hi" },
+      }),
+    });
+    expect(downstream).toHaveBeenCalledOnce();
+    const sent = JSON.parse(capturedBody!) as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("branchName");
+    expect(sent).not.toHaveProperty("autoGenerateBranch");
+    expect(sent.prompt).toEqual({ text: "hi" });
+  });
+
+  it("does not rewrite POST bodies for non-agent endpoints", async () => {
+    let capturedBody: string | undefined;
+    const downstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      capturedBody = typeof init?.body === "string" ? init.body : undefined;
+      return new Response("{}", { status: 200 });
+    });
+    globalThis.fetch = downstream as typeof fetch;
+    const { createDefaultAgentClient } = await import("../src/sdk/agent-client.js");
+    createDefaultAgentClient("test-key");
+    await fetch("https://api.cursor.com/v1/other", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branchName: "keep-me" }),
+    });
+    expect(JSON.parse(capturedBody!).branchName).toBe("keep-me");
   });
 });
 

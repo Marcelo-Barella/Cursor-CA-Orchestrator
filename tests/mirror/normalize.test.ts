@@ -15,4 +15,14 @@ describe("mirrorTasksFromOrchestrationState", () => {
   it("returns empty array for missing tasks", () => {
     expect(mirrorTasksFromOrchestrationState({})).toEqual([]);
   });
+
+  it("uses task fallback name and stringifies missing status", () => {
+    const result = mirrorTasksFromOrchestrationState({
+      tasks: [{ status: "pending" }, { name: "alpha" }],
+    });
+    expect(result).toEqual([
+      { key: "alpha#1", status: "" },
+      { key: "task#0", status: "pending" },
+    ]);
+  });
 });
