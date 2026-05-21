@@ -1037,8 +1037,7 @@ async function runWorkerStream(
       }),
     );
   } else if (payloadStatus === "completed" && !agentFilePersisted) {
-    const summaryLine =
-      payloadSummary ?? `Failed to persist worker output to agent-${taskId}.json on the run branch`;
+    const summaryLine = `Failed to persist worker output to agent-${taskId}.json on the run branch`;
     await handleTaskFailureWithOptionalRetry(
       ctx,
       taskId,
