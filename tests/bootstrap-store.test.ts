@@ -20,4 +20,11 @@ describe("bootstrap store", () => {
     await store.writeSyncedSnapshot({ status: "done" });
     expect(written).toHaveLength(1);
   });
+
+  it("no-ops writeSyncedSnapshot when adapter has no writer", async () => {
+    const store = createBootstrapRepoStore({
+      readStateJson: async () => ({}),
+    });
+    await expect(store.writeSyncedSnapshot({ status: "done" })).resolves.toBeUndefined();
+  });
 });
