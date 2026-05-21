@@ -422,6 +422,40 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
   });
 
+  it("stays failed when persisting agent output to the run branch fails", async () => {
+    const config = singleTaskConfig();
+    const workerPayload = {
+      task_id: "t1",
+      status: "completed",
+      summary: "ok",
+      outputs: { note: "ok" },
+    };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-write-fail/t1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(workerPayload) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      if (filename.startsWith("agent-") && filename.endsWith(".json")) {
+        throw new Error("simulated repo store write failure");
+      }
+      return baseWrite(runId, filename, content);
+    };
+    await expect(runOrchestration("run-write-fail", fake, store)).rejects.toThrow();
+    expect(files.get("agent-t1.json")).toBeUndefined();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
+  });
+
   it("stays failed when the SDK run returns status=finished without worker JSON", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
