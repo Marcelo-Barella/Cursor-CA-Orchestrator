@@ -398,16 +398,19 @@ function shrinkOutputs(outputs: Record<string, unknown>): void {
   }
 }
 
+const WORKER_PAYLOAD_STATUSES = new Set(["completed", "blocked", "failed"]);
+
 function normalizeWorkerPayload(raw: unknown, taskId: string): Record<string, unknown> | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return null;
   }
   const obj = raw as Record<string, unknown>;
+  const status = obj.status;
+  if (typeof status !== "string" || !WORKER_PAYLOAD_STATUSES.has(status)) {
+    return null;
+  }
   if (typeof obj.task_id !== "string") {
     obj.task_id = taskId;
-  }
-  if (typeof obj.status !== "string") {
-    obj.status = "completed";
   }
   if (typeof obj.summary !== "string" && obj.summary !== null) {
     obj.summary = null;
