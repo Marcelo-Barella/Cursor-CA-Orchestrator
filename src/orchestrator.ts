@@ -1050,19 +1050,20 @@ async function runWorkerStream(
       { finishedAt: finalizedAt, summary: summaryLine },
     );
   } else if (result.status === "finished") {
-    agent.status = "finished";
-    agent.finished_at = finalizedAt;
-    agent.summary = payloadSummary ?? "Task completed";
-    const phaseId = ctx.state.task_phase_map[taskId];
-    await appendEvent(
-      ctx.repoStore,
-      ctx.runId,
-      makeEvent("task_finished", `Task ${taskId} finished`, taskId, {
-        phase_id: phaseId ?? null,
-        agent_node_id: taskId,
-        agent_kind: "task",
-        payload: { status: agent.status, payload_source: payloadSource },
-      }),
+    const summaryLine =
+      payloadSummary ?? "Worker run finished without valid cursor-orch-output (missing or incomplete worker JSON)";
+    await handleTaskFailureWithOptionalRetry(
+      ctx,
+      taskId,
+      () =>
+        appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed: ${summaryLine}`, taskId, {
+            payload: { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
+          }),
+        ),
+      { finishedAt: finalizedAt, summary: summaryLine },
     );
   } else {
     const summaryLine = payloadSummary ?? `Worker run status=${result.status}`;
