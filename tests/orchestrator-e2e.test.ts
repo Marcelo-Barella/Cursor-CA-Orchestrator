@@ -457,6 +457,65 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
   });
 
+  it("stays failed when worker JSON has summary but no status field", async () => {
+    const config = singleTaskConfig();
+    const payload = JSON.stringify({ task_id: "t1", summary: "looks done", outputs: {} });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: { "cursor-orch-output.json": payload },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-no-status-field", fake, store)).rejects.toThrow();
+    expect(files.get("agent-t1.json")).toBeUndefined();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
+  });
+
+  it("stays failed when worker JSON uses a non-canonical status string", async () => {
+    const config = singleTaskConfig();
+    const payload = JSON.stringify({ task_id: "t1", status: "success", summary: "done", outputs: {} });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: { "cursor-orch-output.json": payload },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-bad-status", fake, store)).rejects.toThrow();
+    expect(files.get("agent-t1.json")).toBeUndefined();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+  });
+
+  it("stays failed when worker JSON is a non-object (array payload)", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: { "cursor-orch-output.json": JSON.stringify([{ status: "completed" }]) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-array-worker-json", fake, store)).rejects.toThrow();
+    expect(files.get("agent-t1.json")).toBeUndefined();
+    expect(JSON.parse(files.get("state.json")!).agents.t1.status).toBe("failed");
+  });
+
   it("stays failed when the SDK run returns status=finished without worker JSON", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
