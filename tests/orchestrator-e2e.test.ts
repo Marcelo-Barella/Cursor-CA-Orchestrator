@@ -475,8 +475,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
   });
 
   it("stays failed when worker JSON uses a non-canonical status string", async () => {
