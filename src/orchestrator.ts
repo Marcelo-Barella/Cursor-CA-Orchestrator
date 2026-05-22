@@ -429,7 +429,7 @@ async function readWorkerOutputFromRepo(repoStore: RepoStoreClient, runId: strin
   if (!content) return null;
   try {
     const data = JSON.parse(content) as Record<string, unknown>;
-    return truncateOutput(data, taskId);
+    return normalizeWorkerPayload(data, taskId);
   } catch {
     return null;
   }
@@ -952,9 +952,11 @@ async function runWorkerStream(
   }
   const payload = normalizeWorkerPayload(payloadRaw, taskId);
 
+  let agentFilePersisted = false;
   if (payload) {
     try {
       await ctx.repoStore.writeFile(ctx.runId, `agent-${taskId}.json`, JSON.stringify(payload, null, 2));
+      agentFilePersisted = true;
     } catch (err) {
       console.warn(`Failed to write agent-${taskId}.json: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1019,7 +1021,7 @@ async function runWorkerStream(
       ctx.runId,
       makeEvent("task_stopped", `Task ${taskId} stopped`, taskId),
     );
-  } else if (payloadStatus === "completed") {
+  } else if (payloadStatus === "completed" && agentFilePersisted) {
     agent.status = "finished";
     agent.finished_at = finalizedAt;
     agent.summary = payloadSummary ?? "Task completed";
@@ -1033,6 +1035,21 @@ async function runWorkerStream(
         agent_kind: "task",
         payload: { status: agent.status, payload_source: payloadSource },
       }),
+    );
+  } else if (payloadStatus === "completed" && !agentFilePersisted) {
+    const summaryLine = `Failed to persist worker output to agent-${taskId}.json on the run branch`;
+    await handleTaskFailureWithOptionalRetry(
+      ctx,
+      taskId,
+      () =>
+        appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed: ${summaryLine}`, taskId, {
+            payload: { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
+          }),
+        ),
+      { finishedAt: finalizedAt, summary: summaryLine },
     );
   } else if (result.status === "error" || payloadStatus === "failed" || streamError) {
     const errText = streamError instanceof Error ? streamError.message : streamError !== null ? String(streamError) : null;
