@@ -258,7 +258,25 @@ function isTerminalStatus(status: string): boolean {
 }
 
 function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
-  return group.task_ids.every((taskId) => isTerminalStatus(state.agents[taskId]?.status ?? "finished"));
+  return group.task_ids.every((taskId) => {
+    const agent = state.agents[taskId];
+    return agent !== undefined && isTerminalStatus(agent.status);
+  });
+}
+
+function findFirstNonTerminalDelegationPosition(
+  state: OrchestrationState,
+  phases: DelegationPhase[],
+): { phaseIndex: number; groupIndex: number } | null {
+  for (let pi = 0; pi < phases.length; pi += 1) {
+    const groups = phases[pi]!.groups;
+    for (let gi = 0; gi < groups.length; gi += 1) {
+      if (!groupIsTerminal(state, groups[gi]!)) {
+        return { phaseIndex: pi, groupIndex: gi };
+      }
+    }
+  }
+  return null;
 }
 
 function normalizeDelegationCursors(state: OrchestrationState, phases: DelegationPhase[]): { phaseIndex: number; groupIndex: number } {
@@ -266,6 +284,13 @@ function normalizeDelegationCursors(state: OrchestrationState, phases: Delegatio
   let g = state.delegation_group_index ?? 0;
   if (p < 0) p = 0;
   if (g < 0) g = 0;
+  if (p >= phases.length) {
+    const repair = findFirstNonTerminalDelegationPosition(state, phases);
+    if (repair) {
+      return repair;
+    }
+    return { phaseIndex: phases.length, groupIndex: 0 };
+  }
   while (p < phases.length) {
     const phase = phases[p]!;
     const groups = phase.groups;
@@ -1002,6 +1027,12 @@ async function runWorkerStream(
 
   const finalizedAt = nowIso();
 
+  if (ctx.stopRequested.value) {
+    ctx.activeWorkers.delete(taskId);
+    await safeDisposeAgent(sdkAgent);
+    return;
+  }
+
   if (payloadStatus === "blocked") {
     agent.status = "blocked";
     agent.blocked_reason = payloadBlockedReason ?? "Worker reported blocked without reason";
@@ -1696,6 +1727,16 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
 
   try {
     while (true) {
+      if (!ctx.stopRequested.value) {
+        try {
+          const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+          if (stopContent) {
+            ctx.stopRequested.value = true;
+          }
+        } catch {
+          /* poller will retry */
+        }
+      }
       if (ctx.stopRequested.value) {
         await checkStopRequested(ctx);
         return;
@@ -1767,10 +1808,21 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   validateConfig(config);
 
   let state: OrchestrationState;
+  let stateContent = "";
   try {
-    state = await syncFromRepo(repoStore, runId);
-  } catch {
+    stateContent = await repoStore.readFile(runId, "state.json");
+  } catch (readErr) {
+    throw readErr instanceof Error ? readErr : new Error(String(readErr));
+  }
+  if (!stateContent.trim()) {
     state = createInitialState(config, runId);
+  } else {
+    try {
+      state = deserialize(stateContent);
+    } catch (parseErr) {
+      const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
+    }
   }
 
   reconcileAgentsFromConfig(state, config);

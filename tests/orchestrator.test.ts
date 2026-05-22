@@ -234,6 +234,20 @@ describe("orchestrator launch eligibility", () => {
     expect(eligible).toEqual(["u"]);
   });
 
+  it("repairs delegation cursor past end when mapped tasks are still pending", () => {
+    const config = createConfig(["a", "b"]);
+    config.delegation_map = {
+      phases: [{ id: "phase-1", groups: [{ id: "g1", task_ids: ["a", "b"] }] }],
+    };
+    const state = createInitialState(config, "run1");
+    state.delegation_phase_index = 5;
+    state.delegation_group_index = 0;
+    const eligible = filterEligibleReadyTasks(state, config, ["a", "b"]);
+    expect(eligible).toEqual(["a", "b"]);
+    expect(state.delegation_phase_index).toBe(0);
+    expect(state.delegation_group_index).toBe(0);
+  });
+
   it("repairs negative delegation cursor indices", () => {
     const config = createConfig(["a", "b", "c"], {
       deps: { b: ["a"] },
@@ -312,6 +326,22 @@ describe("buildRepoCreationPrompt consolidated run line", () => {
 });
 
 describe("runOrchestration validation gate", () => {
+  it("rejects corrupt state.json instead of resetting orchestration progress", async () => {
+    const config = createConfig(["a"]);
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") return "{not valid json";
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
+    await expect(runOrchestration("run-corrupt-state", agentClient, repoStore)).rejects.toThrow(/Invalid state\.json/);
+  });
+
   it("aborts before repo writes when delegation_map fails validateConfig", async () => {
     const bad: OrchestratorConfig = {
       name: "n",
