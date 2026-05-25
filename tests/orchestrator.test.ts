@@ -254,6 +254,23 @@ describe("orchestrator launch eligibility", () => {
     expect(state.delegation_group_index).toBe(0);
   });
 
+  it("repairs delegation_phase_index past end when config has fewer phases than state", () => {
+    const config = createConfig(["a", "b"], { deps: { b: ["a"] } });
+    config.delegation_map = {
+      phases: [
+        { id: "phase-1", groups: [{ id: "g1", task_ids: ["a"] }] },
+        { id: "phase-2", groups: [{ id: "g1", task_ids: ["b"] }] },
+      ],
+    };
+    const state = createInitialState(config, "run1");
+    state.delegation_phase_index = 99;
+    state.delegation_group_index = 0;
+    const eligible = filterEligibleReadyTasks(state, config, ["a"]);
+    expect(eligible).toEqual(["a"]);
+    expect(state.delegation_phase_index).toBe(0);
+    expect(state.delegation_group_index).toBe(0);
+  });
+
   it("preserves eligibility after deserialize when delegation cursors were set", () => {
     const config = createConfig(["a", "b", "c"], {
       deps: { b: ["a"] },
