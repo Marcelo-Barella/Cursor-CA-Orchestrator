@@ -596,6 +596,75 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(fake.launches[0]!.opts.mcpServers).toBeUndefined();
   });
 
+  it("marks a task blocked when worker JSON reports blocked status", async () => {
+    const config = singleTaskConfig();
+    const blockedPayload = {
+      task_id: "t1",
+      status: "blocked",
+      summary: "needs credentials",
+      blocked_reason: "missing API key",
+      outputs: {},
+    };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-blocked/t1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(blockedPayload) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        await baseWrite(
+          runId,
+          "stop-requested.json",
+          JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
+        );
+      }
+    };
+    await runOrchestration("run-blocked", fake, store);
+    const agentPayload = JSON.parse(files.get("agent-t1.json")!);
+    expect(agentPayload.status).toBe("blocked");
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.agents.t1.status).toBe("blocked");
+    expect(state.agents.t1.blocked_reason).toBe("missing API key");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_blocked" && e.task_id === "t1")).toBe(true);
+    expect(state.status).toBe("stopped");
+  }, 20_000);
+
+  it("marks a task failed when worker JSON reports failed status", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-worker-failed/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({
+              task_id: "t1",
+              status: "failed",
+              summary: "worker could not finish",
+              outputs: {},
+            }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-worker-failed", fake, store)).rejects.toThrow();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    expect(state.agents.t1.summary).toBe("worker could not finish");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_failed" && e.task_id === "t1")).toBe(true);
+  });
+
   it("writes the stop sentinel leads to state.status=stopped", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
