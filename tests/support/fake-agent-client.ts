@@ -171,6 +171,7 @@ export interface FakeAgentClientOptions {
 export class FakeAgentClient implements AgentClient {
   readonly launches: FakeLaunch[] = [];
   readonly conversationCalls: string[] = [];
+  readonly sentPrompts: string[] = [];
   maxConcurrentSends = 0;
   private _activeSends = 0;
   private readonly sendPreDelayMs: number;
@@ -212,7 +213,10 @@ export class FakeAgentClient implements AgentClient {
     const agent = new FakeSdkAgent(agentId, modelConfigToSelection(opts.model), [...scripts]);
     this.launches.push({ opts, agent, run: null as unknown as FakeSdkRun });
     const originalSend = agent.send.bind(agent);
-    agent.send = async () => {
+    agent.send = async (prompt?: string) => {
+      if (typeof prompt === "string") {
+        this.sentPrompts.push(prompt);
+      }
       this._activeSends += 1;
       this.maxConcurrentSends = Math.max(this.maxConcurrentSends, this._activeSends);
       try {
