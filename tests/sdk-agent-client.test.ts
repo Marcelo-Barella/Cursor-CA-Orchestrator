@@ -1,9 +1,11 @@
+import { UnsupportedRunOperationError } from "@cursor/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SDKAssistantMessage } from "../src/sdk/agent-client.js";
+import type { SDKAssistantMessage, SdkAgent } from "../src/sdk/agent-client.js";
 import {
   parseAssistantJsonFromMessages,
   parseAssistantJsonFromText,
   streamToCallbacks,
+  tryDownloadJsonArtifact,
 } from "../src/sdk/agent-client.js";
 
 function makeAssistant(text: string): SDKAssistantMessage {
@@ -94,6 +96,63 @@ describe("v1 agent create fetch rewrite", () => {
       body: JSON.stringify({ branchName: "keep-me" }),
     });
     expect(JSON.parse(capturedBody!).branchName).toBe("keep-me");
+  });
+});
+
+describe("tryDownloadJsonArtifact", () => {
+  function mockAgent(overrides: Partial<SdkAgent>): SdkAgent {
+    return {
+      listArtifacts: async () => [],
+      downloadArtifact: async () => Buffer.from("{}"),
+      ...overrides,
+    } as SdkAgent;
+  }
+
+  it("returns parsed JSON when the artifact exists", async () => {
+    const agent = mockAgent({
+      listArtifacts: async () => [{ path: "cursor-orch-output.json", sizeBytes: 2, updatedAt: "" }],
+      downloadArtifact: async () => Buffer.from('{"status":"completed"}', "utf8"),
+    });
+    const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
+    expect(result).toEqual({ value: { status: "completed" }, error: null });
+  });
+
+  it("returns not found when the artifact path is absent", async () => {
+    const agent = mockAgent({
+      listArtifacts: async () => [{ path: "other.json", sizeBytes: 1, updatedAt: "" }],
+    });
+    const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
+    expect(result).toEqual({ value: null, error: "not found" });
+  });
+
+  it("returns an error when artifact bytes are empty or not JSON", async () => {
+    const agent = mockAgent({
+      listArtifacts: async () => [{ path: "cursor-orch-output.json", sizeBytes: 0, updatedAt: "" }],
+      downloadArtifact: async () => Buffer.from("   ", "utf8"),
+    });
+    const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
+    expect(result).toEqual({ value: null, error: "artifact was not valid JSON" });
+  });
+
+  it("surfaces download errors from the agent", async () => {
+    const agent = mockAgent({
+      listArtifacts: async () => [{ path: "cursor-orch-output.json", sizeBytes: 1, updatedAt: "" }],
+      downloadArtifact: async () => {
+        throw new Error("network down");
+      },
+    });
+    const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
+    expect(result).toEqual({ value: null, error: "network down" });
+  });
+
+  it("returns artifacts unsupported when listArtifacts is unsupported", async () => {
+    const agent = mockAgent({
+      listArtifacts: async () => {
+        throw new UnsupportedRunOperationError("listArtifacts");
+      },
+    });
+    const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
+    expect(result).toEqual({ value: null, error: "artifacts unsupported" });
   });
 });
 
