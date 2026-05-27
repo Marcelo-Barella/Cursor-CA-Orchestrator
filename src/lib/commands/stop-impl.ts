@@ -100,21 +100,37 @@ function makeRepoStore(ghToken: string): RepoStoreClient {
   return new RepoStoreClient(ghToken, owner, repo);
 }
 
-export async function runStopCommand(opts: StopOptions): Promise<void> {
-  const env = requireEnv(["GH_TOKEN"], {
-    code: "STOP-001",
-    severity: "FATAL",
-    title: "Missing credentials for stop operation",
-    what_happened: "stop requires GH_TOKEN to write the stop sentinel to the bootstrap repo.",
-    next_step: "Set GH_TOKEN and retry stop.",
-    alternative: "Provide env vars inline for one-shot stop.",
-    example: "GH_TOKEN=... cursor-orch stop --run <run_id>",
-    exitCode: 1,
-  });
-  const repoStore = makeRepoStore(env.GH_TOKEN);
+export async function runStopCommand(
+  opts: StopOptions,
+  deps: {
+    finish?: (code: number) => never;
+    repoStore?: RepoStoreClient;
+  } = {},
+): Promise<void> {
+  const finish = deps.finish ?? ((code: number): never => process.exit(code));
+  const failWithFinish = (failOpts: FailOptions): never => {
+    renderFeedback(failOpts);
+    return finish(failOpts.exitCode);
+  };
+  let repoStore: RepoStoreClient;
+  if (deps.repoStore) {
+    repoStore = deps.repoStore;
+  } else {
+    const env = requireEnv(["GH_TOKEN"], {
+      code: "STOP-001",
+      severity: "FATAL",
+      title: "Missing credentials for stop operation",
+      what_happened: "stop requires GH_TOKEN to write the stop sentinel to the bootstrap repo.",
+      next_step: "Set GH_TOKEN and retry stop.",
+      alternative: "Provide env vars inline for one-shot stop.",
+      example: "GH_TOKEN=... cursor-orch stop --run <run_id>",
+      exitCode: 1,
+    });
+    repoStore = makeRepoStore(env.GH_TOKEN);
+  }
   const content = await repoStore.readFile(opts.run, "state.json");
   if (!content) {
-    fail({
+    failWithFinish({
       code: "STOP-002",
       severity: "ERROR",
       title: "Cannot resolve run state for stop",
