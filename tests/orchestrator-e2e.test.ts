@@ -252,6 +252,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
     expect(state.agents.t1.retry_count).toBe(1);
+    expect(fake.launches).toHaveLength(2);
     expect(fake.launches[1]!.opts.startingRef).toBe("cursor-orch/run-retry-ok/t1-retry-1");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.some((e: { event_type: string }) => e.event_type === "task_retried")).toBe(true);
@@ -682,5 +683,16 @@ describe("runOrchestration with SDK (happy path)", () => {
     await runOrchestration("run-5", fake, store);
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("stopped");
+  });
+
+  it("rejects resume when state.json is corrupt", async () => {
+    const config = singleTaskConfig();
+    const { store } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": "{not-json",
+    });
+    await expect(runOrchestration("run-corrupt-state", new FakeAgentClient(), store)).rejects.toThrow(
+      /state\.json exists but is invalid/,
+    );
   });
 });
