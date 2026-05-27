@@ -20,6 +20,7 @@ function baseAgent(over: Partial<AgentState>): AgentState {
     blocked_reason: null,
     blocked_since: null,
     retry_count: 0,
+    blocked_retry_count: 0,
     cascade_source_task_id: null,
     ...over,
   };
