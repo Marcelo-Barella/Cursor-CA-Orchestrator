@@ -572,6 +572,7 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
         blocked_reason: null,
         blocked_since: null,
         retry_count: 0,
+        blocked_retry_count: 0,
         cascade_source_task_id: null,
       };
     }
@@ -1102,7 +1103,9 @@ async function runWorkerStream(
     );
   }
 
-  ctx.activeWorkers.delete(taskId);
+  if (ctx.activeWorkers.get(taskId) === handle) {
+    ctx.activeWorkers.delete(taskId);
+  }
   await safeDisposeAgent(sdkAgent);
   markStateDirty(ctx);
 }
@@ -1110,7 +1113,7 @@ async function runWorkerStream(
 async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<void> {
   const handle = ctx.activeWorkers.get(agent.task_id);
   if (!handle) {
-    agent.retry_count += 1;
+    agent.blocked_retry_count += 1;
     agent.status = "pending";
     agent.blocked_reason = null;
     agent.blocked_since = null;
@@ -1133,7 +1136,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
     markStateDirty(ctx);
     return;
   }
-  agent.retry_count += 1;
+  agent.blocked_retry_count += 1;
   agent.status = "running";
   agent.blocked_reason = null;
   agent.blocked_since = null;
@@ -1186,7 +1189,7 @@ async function handleBlockedTasks(ctx: LoopContext): Promise<void> {
     const blockedAt = new Date(agent.blocked_since);
     const elapsed = (now.getTime() - blockedAt.getTime()) / 1000;
     if (elapsed <= BLOCKED_TIMEOUT_SECONDS) continue;
-    if (agent.retry_count < MAX_RETRY_COUNT && agent.agent_id) {
+    if (agent.blocked_retry_count < MAX_RETRY_COUNT && agent.agent_id) {
       await retryBlockedAgent(ctx, agent);
       continue;
     }
@@ -1208,7 +1211,9 @@ async function launchReadyTasks(ctx: LoopContext): Promise<void> {
   const taskMap = Object.fromEntries(ctx.config.tasks.map((t) => [t.id, t]));
   for (;;) {
     const readyTasks = getReadyTasks(ctx.graph, ctx.state.agents);
-    const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks);
+    const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks).filter(
+      (taskId) => !ctx.activeWorkers.has(taskId),
+    );
     if (eligible.length === 0) return;
     await Promise.all(
       eligible.map(async (taskId) => {
@@ -1769,8 +1774,19 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   let state: OrchestrationState;
   try {
     state = await syncFromRepo(repoStore, runId);
-  } catch {
-    state = createInitialState(config, runId);
+  } catch (err) {
+    let stateContent = "";
+    try {
+      stateContent = await repoStore.readFile(runId, "state.json");
+    } catch {
+      /* treat as missing */
+    }
+    if (!stateContent.trim()) {
+      state = createInitialState(config, runId);
+    } else {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`Cannot resume run ${runId}: state.json exists but is invalid (${detail})`);
+    }
   }
 
   reconcileAgentsFromConfig(state, config);
