@@ -34,6 +34,7 @@ export interface FakeLaunch {
   opts: CreateCloudAgentOpts;
   agent: FakeSdkAgent;
   run: FakeSdkRun;
+  prompt?: string;
 }
 
 let counter = 0;
@@ -120,7 +121,7 @@ class FakeSdkAgent implements SdkAgent {
     this.artifacts = { ...(scripts[0]?.artifacts ?? {}) };
   }
 
-  async send(): Promise<SdkRun> {
+  async send(_message?: string): Promise<SdkRun> {
     const script = this.scripts.shift();
     if (!script) {
       throw new Error(`FakeSdkAgent(${this.agentId}) received more send() calls than scripted`);
@@ -212,7 +213,10 @@ export class FakeAgentClient implements AgentClient {
     const agent = new FakeSdkAgent(agentId, modelConfigToSelection(opts.model), [...scripts]);
     this.launches.push({ opts, agent, run: null as unknown as FakeSdkRun });
     const originalSend = agent.send.bind(agent);
-    agent.send = async () => {
+    agent.send = async (message?: string) => {
+      if (typeof message === "string") {
+        this.launches[this.launches.length - 1]!.prompt = message;
+      }
       this._activeSends += 1;
       this.maxConcurrentSends = Math.max(this.maxConcurrentSends, this._activeSends);
       try {
