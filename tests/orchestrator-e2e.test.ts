@@ -717,6 +717,40 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("stopped");
   });
 
+  it("cascades terminal upstream failure to dependent pending tasks without launching them", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-cascade-fail/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({
+              task_id: "t1",
+              status: "failed",
+              summary: "upstream broke",
+              outputs: {},
+            }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-cascade-fail", fake, store)).rejects.toThrow();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    expect(state.agents.t1.summary).toBe("upstream broke");
+    expect(state.agents.t2.status).toBe("failed");
+    expect(state.agents.t2.cascade_source_task_id).toBe("t1");
+    expect(state.agents.t2.summary).toBe("Upstream task t1 failed");
+    expect(fake.launches).toHaveLength(1);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t2")).toBe(
+      true,
+    );
+  });
+
   it("passes persisted upstream outputs into the dependent worker launch prompt", async () => {
     const config = twoTaskChainConfig();
     const upstreamMarker = "upstream-marker-7f3a";
