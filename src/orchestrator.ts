@@ -266,6 +266,10 @@ function normalizeDelegationCursors(state: OrchestrationState, phases: Delegatio
   let g = state.delegation_group_index ?? 0;
   if (p < 0) p = 0;
   if (g < 0) g = 0;
+  if (p > phases.length) {
+    p = 0;
+    g = 0;
+  }
   while (p < phases.length) {
     const phase = phases[p]!;
     const groups = phase.groups;
