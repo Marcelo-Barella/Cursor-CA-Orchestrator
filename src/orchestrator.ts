@@ -1611,7 +1611,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
   const { Agent } = await import("@cursor/sdk");
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
     if (!agent.agent_id) continue;
-    if (agent.status !== "launching" && agent.status !== "running" && agent.status !== "blocked") continue;
+    if (agent.status !== "launching" && agent.status !== "running") continue;
     if (ctx.activeWorkers.has(taskId)) continue;
     try {
       const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
