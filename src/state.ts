@@ -16,6 +16,7 @@ export interface AgentState {
   blocked_reason: string | null;
   blocked_since: string | null;
   retry_count: number;
+  blocked_retry_count: number;
   cascade_source_task_id: string | null;
 }
 
@@ -128,6 +129,7 @@ export function createInitialState(config: OrchestratorConfig, runId: string): O
       blocked_reason: null,
       blocked_since: null,
       retry_count: 0,
+      blocked_retry_count: 0,
       cascade_source_task_id: null,
     };
   }
@@ -280,6 +282,7 @@ export function deserialize(jsonStr: string): OrchestrationState {
       blocked_reason: (a.blocked_reason as string) ?? null,
       blocked_since: (a.blocked_since as string) ?? null,
       retry_count: typeof a.retry_count === "number" ? a.retry_count : 0,
+      blocked_retry_count: typeof a.blocked_retry_count === "number" ? a.blocked_retry_count : 0,
       cascade_source_task_id:
         typeof a.cascade_source_task_id === "string" && a.cascade_source_task_id.trim() !== ""
           ? a.cascade_source_task_id.trim()

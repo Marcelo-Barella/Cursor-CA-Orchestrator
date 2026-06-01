@@ -15,10 +15,10 @@ import {
   appendEvent,
   assignTaskPhase,
   createInitialState,
+  deserialize,
   ensureLifecycleAgents,
   seedMainAgent,
   setPhaseStatus,
-  syncFromRepo,
   syncToRepo,
 } from "./state.js";
 import {
@@ -258,7 +258,25 @@ function isTerminalStatus(status: string): boolean {
 }
 
 function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
-  return group.task_ids.every((taskId) => isTerminalStatus(state.agents[taskId]?.status ?? "finished"));
+  return group.task_ids.every((taskId) => {
+    const agent = state.agents[taskId];
+    return agent !== undefined && isTerminalStatus(agent.status);
+  });
+}
+
+function findFirstNonTerminalDelegationPosition(
+  state: OrchestrationState,
+  phases: DelegationPhase[],
+): { phaseIndex: number; groupIndex: number } | null {
+  for (let pi = 0; pi < phases.length; pi += 1) {
+    const groups = phases[pi]!.groups;
+    for (let gi = 0; gi < groups.length; gi += 1) {
+      if (!groupIsTerminal(state, groups[gi]!)) {
+        return { phaseIndex: pi, groupIndex: gi };
+      }
+    }
+  }
+  return null;
 }
 
 function normalizeDelegationCursors(state: OrchestrationState, phases: DelegationPhase[]): { phaseIndex: number; groupIndex: number } {
@@ -266,6 +284,13 @@ function normalizeDelegationCursors(state: OrchestrationState, phases: Delegatio
   let g = state.delegation_group_index ?? 0;
   if (p < 0) p = 0;
   if (g < 0) g = 0;
+  if (p >= phases.length) {
+    const repair = findFirstNonTerminalDelegationPosition(state, phases);
+    if (repair) {
+      return repair;
+    }
+    return { phaseIndex: phases.length, groupIndex: 0 };
+  }
   while (p < phases.length) {
     const phase = phases[p]!;
     const groups = phase.groups;
@@ -400,7 +425,7 @@ function shrinkOutputs(outputs: Record<string, unknown>): void {
 
 const WORKER_PAYLOAD_STATUSES = new Set(["completed", "blocked", "failed"]);
 
-function normalizeWorkerPayload(raw: unknown, taskId: string): Record<string, unknown> | null {
+export function normalizeWorkerPayload(raw: unknown, taskId: string): Record<string, unknown> | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return null;
   }
@@ -572,6 +597,7 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
         blocked_reason: null,
         blocked_since: null,
         retry_count: 0,
+        blocked_retry_count: 0,
         cascade_source_task_id: null,
       };
     }
@@ -1002,6 +1028,14 @@ async function runWorkerStream(
 
   const finalizedAt = nowIso();
 
+  if (ctx.stopRequested.value) {
+    agent.status = "stopped";
+    agent.finished_at = finalizedAt;
+    ctx.activeWorkers.delete(taskId);
+    await safeDisposeAgent(sdkAgent);
+    return;
+  }
+
   if (payloadStatus === "blocked") {
     agent.status = "blocked";
     agent.blocked_reason = payloadBlockedReason ?? "Worker reported blocked without reason";
@@ -1102,7 +1136,9 @@ async function runWorkerStream(
     );
   }
 
-  ctx.activeWorkers.delete(taskId);
+  if (ctx.activeWorkers.get(taskId) === handle) {
+    ctx.activeWorkers.delete(taskId);
+  }
   await safeDisposeAgent(sdkAgent);
   markStateDirty(ctx);
 }
@@ -1110,7 +1146,7 @@ async function runWorkerStream(
 async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<void> {
   const handle = ctx.activeWorkers.get(agent.task_id);
   if (!handle) {
-    agent.retry_count += 1;
+    agent.blocked_retry_count += 1;
     agent.status = "pending";
     agent.blocked_reason = null;
     agent.blocked_since = null;
@@ -1133,7 +1169,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
     markStateDirty(ctx);
     return;
   }
-  agent.retry_count += 1;
+  agent.blocked_retry_count += 1;
   agent.status = "running";
   agent.blocked_reason = null;
   agent.blocked_since = null;
@@ -1186,7 +1222,7 @@ async function handleBlockedTasks(ctx: LoopContext): Promise<void> {
     const blockedAt = new Date(agent.blocked_since);
     const elapsed = (now.getTime() - blockedAt.getTime()) / 1000;
     if (elapsed <= BLOCKED_TIMEOUT_SECONDS) continue;
-    if (agent.retry_count < MAX_RETRY_COUNT && agent.agent_id) {
+    if (agent.blocked_retry_count < MAX_RETRY_COUNT && agent.agent_id) {
       await retryBlockedAgent(ctx, agent);
       continue;
     }
@@ -1208,7 +1244,9 @@ async function launchReadyTasks(ctx: LoopContext): Promise<void> {
   const taskMap = Object.fromEntries(ctx.config.tasks.map((t) => [t.id, t]));
   for (;;) {
     const readyTasks = getReadyTasks(ctx.graph, ctx.state.agents);
-    const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks);
+    const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks).filter(
+      (taskId) => !ctx.activeWorkers.has(taskId),
+    );
     if (eligible.length === 0) return;
     await Promise.all(
       eligible.map(async (taskId) => {
@@ -1606,7 +1644,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
   const { Agent } = await import("@cursor/sdk");
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
     if (!agent.agent_id) continue;
-    if (agent.status !== "launching" && agent.status !== "running" && agent.status !== "blocked") continue;
+    if (agent.status !== "launching" && agent.status !== "running") continue;
     if (ctx.activeWorkers.has(taskId)) continue;
     try {
       const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
@@ -1696,6 +1734,16 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
 
   try {
     while (true) {
+      if (!ctx.stopRequested.value) {
+        try {
+          const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+          if (stopContent) {
+            ctx.stopRequested.value = true;
+          }
+        } catch {
+          /* poller will retry */
+        }
+      }
       if (ctx.stopRequested.value) {
         await checkStopRequested(ctx);
         return;
@@ -1767,10 +1815,21 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   validateConfig(config);
 
   let state: OrchestrationState;
+  let stateContent = "";
   try {
-    state = await syncFromRepo(repoStore, runId);
-  } catch {
+    stateContent = await repoStore.readFile(runId, "state.json");
+  } catch (readErr) {
+    throw readErr instanceof Error ? readErr : new Error(String(readErr));
+  }
+  if (!stateContent.trim()) {
     state = createInitialState(config, runId);
+  } else {
+    try {
+      state = deserialize(stateContent);
+    } catch (parseErr) {
+      const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
+    }
   }
 
   reconcileAgentsFromConfig(state, config);
