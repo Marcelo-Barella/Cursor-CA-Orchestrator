@@ -114,6 +114,25 @@ describe("runStatusCommand", () => {
     expect(text).toContain("t1");
   });
 
+  it("exits 2 when config.yaml cannot be parsed", async () => {
+    const cfg = baseConfig();
+    const state = createInitialState(cfg, "run-bad-cfg");
+    state.status = "completed";
+    const finish = vi.fn((code: number): never => {
+      throw new Error(`exit:${code}`);
+    });
+    const store = mockRepoStore({
+      "state.json": serialize(state),
+      "config.yaml": "name: [\ninvalid yaml",
+      "events.jsonl": "",
+    });
+    await expect(
+      runStatusCommand({ run: "run-bad-cfg", watch: false }, { finish, repoStore: store }),
+    ).rejects.toThrow("exit:2");
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("STATUS-004");
+  });
+
   it("exits 0 for completed runs", async () => {
     const cfg = baseConfig();
     const state = createInitialState(cfg, "run-ok");
