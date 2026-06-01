@@ -400,7 +400,7 @@ function shrinkOutputs(outputs: Record<string, unknown>): void {
 
 const WORKER_PAYLOAD_STATUSES = new Set(["completed", "blocked", "failed"]);
 
-function normalizeWorkerPayload(raw: unknown, taskId: string): Record<string, unknown> | null {
+export function normalizeWorkerPayload(raw: unknown, taskId: string): Record<string, unknown> | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return null;
   }
