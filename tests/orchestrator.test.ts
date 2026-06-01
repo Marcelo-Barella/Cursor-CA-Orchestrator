@@ -5,7 +5,15 @@ import type { OrchestratorConfig } from "../src/config/types.js";
 import { toYaml } from "../src/config/parse.js";
 import type { TaskConfig } from "../src/config/types.js";
 import { buildRepoCreationPrompt } from "../src/prompt-builder.js";
-import { extractDelegationPhases, filterEligibleReadyTasks, planRefForConsolidatedRunLine, runOrchestration } from "../src/orchestrator.js";
+import {
+  extractDelegationPhases,
+  filterEligibleReadyTasks,
+  getBlockedTasks,
+  getReadyTasks,
+  planRefForConsolidatedRunLine,
+  runOrchestration,
+} from "../src/orchestrator.js";
+import type { AgentState } from "../src/state.js";
 import { createInitialState, deserialize, serialize } from "../src/state.js";
 
 function createConfig(
@@ -36,6 +44,65 @@ function createConfig(
     bootstrap_repo_name: "b",
   };
 }
+
+describe("getBlockedTasks", () => {
+  it("returns only agents in blocked status", () => {
+    const agent = (taskId: string, status: string): AgentState => ({
+      task_id: taskId,
+      agent_id: null,
+      status,
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: status === "blocked" ? "stuck" : null,
+      blocked_since: status === "blocked" ? "2026-05-28T00:00:00.000Z" : null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    });
+    const blocked = getBlockedTasks({
+      a: agent("a", "blocked"),
+      b: agent("b", "running"),
+      c: agent("c", "pending"),
+    });
+    expect(blocked.map((a) => a.task_id)).toEqual(["a"]);
+  });
+});
+
+describe("getReadyTasks", () => {
+  it("exposes a dependent task only after upstream tasks are finished", () => {
+    const graph = { t1: new Set<string>(), t2: new Set(["t1"]) };
+    const agent = (taskId: string, status: string): AgentState => ({
+      task_id: taskId,
+      agent_id: null,
+      status,
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    });
+    expect(
+      getReadyTasks(graph, {
+        t1: agent("t1", "pending"),
+        t2: agent("t2", "pending"),
+      }),
+    ).toEqual(["t1"]);
+    expect(
+      getReadyTasks(graph, {
+        t1: agent("t1", "finished"),
+        t2: agent("t2", "pending"),
+      }),
+    ).toEqual(["t2"]);
+  });
+});
 
 describe("orchestrator launch eligibility", () => {
   it("keeps current behavior when delegation map is absent", () => {
@@ -234,6 +301,20 @@ describe("orchestrator launch eligibility", () => {
     expect(eligible).toEqual(["u"]);
   });
 
+  it("repairs delegation cursor past end when mapped tasks are still pending", () => {
+    const config = createConfig(["a", "b"]);
+    config.delegation_map = {
+      phases: [{ id: "phase-1", groups: [{ id: "g1", task_ids: ["a", "b"] }] }],
+    };
+    const state = createInitialState(config, "run1");
+    state.delegation_phase_index = 5;
+    state.delegation_group_index = 0;
+    const eligible = filterEligibleReadyTasks(state, config, ["a", "b"]);
+    expect(eligible).toEqual(["a", "b"]);
+    expect(state.delegation_phase_index).toBe(0);
+    expect(state.delegation_group_index).toBe(0);
+  });
+
   it("repairs negative delegation cursor indices", () => {
     const config = createConfig(["a", "b", "c"], {
       deps: { b: ["a"] },
@@ -248,6 +329,23 @@ describe("orchestrator launch eligibility", () => {
     const state = createInitialState(config, "run1");
     state.delegation_phase_index = -3;
     state.delegation_group_index = -1;
+    const eligible = filterEligibleReadyTasks(state, config, ["a"]);
+    expect(eligible).toEqual(["a"]);
+    expect(state.delegation_phase_index).toBe(0);
+    expect(state.delegation_group_index).toBe(0);
+  });
+
+  it("repairs delegation_phase_index past end when config has fewer phases than state", () => {
+    const config = createConfig(["a", "b"], { deps: { b: ["a"] } });
+    config.delegation_map = {
+      phases: [
+        { id: "phase-1", groups: [{ id: "g1", task_ids: ["a"] }] },
+        { id: "phase-2", groups: [{ id: "g1", task_ids: ["b"] }] },
+      ],
+    };
+    const state = createInitialState(config, "run1");
+    state.delegation_phase_index = 99;
+    state.delegation_group_index = 0;
     const eligible = filterEligibleReadyTasks(state, config, ["a"]);
     expect(eligible).toEqual(["a"]);
     expect(state.delegation_phase_index).toBe(0);
@@ -312,6 +410,22 @@ describe("buildRepoCreationPrompt consolidated run line", () => {
 });
 
 describe("runOrchestration validation gate", () => {
+  it("rejects corrupt state.json instead of resetting orchestration progress", async () => {
+    const config = createConfig(["a"]);
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") return "{not valid json";
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
+    await expect(runOrchestration("run-corrupt-state", agentClient, repoStore)).rejects.toThrow(/Invalid state\.json/);
+  });
+
   it("aborts before repo writes when delegation_map fails validateConfig", async () => {
     const bad: OrchestratorConfig = {
       name: "n",
