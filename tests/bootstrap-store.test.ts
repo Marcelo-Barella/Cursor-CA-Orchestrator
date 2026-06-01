@@ -21,7 +21,7 @@ describe("bootstrap store", () => {
     expect(written).toHaveLength(1);
   });
 
-  it("no-ops writeSyncedSnapshot when adapter has no writer", async () => {
+  it("no-ops writeSyncedSnapshot when writer is not configured", async () => {
     const store = createBootstrapRepoStore({
       readStateJson: async () => ({}),
     });
