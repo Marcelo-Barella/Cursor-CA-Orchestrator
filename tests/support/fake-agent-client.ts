@@ -39,7 +39,7 @@ export interface FakeLaunch {
 
 let counter = 0;
 
-class FakeSdkRun implements SdkRun {
+export class FakeSdkRun implements SdkRun {
   readonly id: string;
   readonly agentId: string;
   readonly createdAt?: number;
