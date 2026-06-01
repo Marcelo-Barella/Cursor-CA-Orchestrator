@@ -287,6 +287,88 @@ describe("runOrchestration with SDK (happy path)", () => {
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.some((e: { event_type: string }) => e.event_type === "task_retried")).toBe(true);
     expect(events.filter((e: { event_type: string }) => e.event_type === "task_failed").length).toBeGreaterThanOrEqual(1);
+    expect(events.filter((e: { event_type: string }) => e.event_type === "task_launched").length).toBe(2);
+  });
+
+  it("failure retry clears agent output and resets schedulable fields before relaunch", async () => {
+    process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "1";
+    const config = singleTaskConfig();
+    const okPayload = { task_id: "t1", status: "completed", summary: "ok", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("ERROR")],
+          result: { id: "r1", status: "error" },
+          artifacts: { "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "failed", summary: "x", outputs: {} }) },
+        },
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r2", status: "finished", git: runGit("cursor-orch/run-retry-reset/t1-retry-1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(okPayload) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const deletedAgentFiles: string[] = [];
+    const baseDelete = store.deleteFile.bind(store);
+    store.deleteFile = async (runId, filename) => {
+      if (filename.startsWith("agent-")) {
+        deletedAgentFiles.push(filename);
+      }
+      return baseDelete(runId, filename);
+    };
+    await runOrchestration("run-retry-reset", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.agents.t1.status).toBe("finished");
+    expect(state.agents.t1.retry_count).toBe(1);
+    expect(state.agents.t1.agent_id).toBeTruthy();
+    expect(deletedAgentFiles).toContain("agent-t1.json");
+    expect(fake.launches).toHaveLength(2);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.filter((e: { event_type: string }) => e.event_type === "task_launched").length).toBe(2);
+  });
+
+  it("retries after agent output persistence failure when failure retries allowed", async () => {
+    process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "1";
+    const config = singleTaskConfig();
+    const okPayload = { task_id: "t1", status: "completed", summary: "ok", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-persist-retry/t1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(okPayload) },
+        },
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r2", status: "finished", git: runGit("cursor-orch/run-persist-retry/t1-retry-1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(okPayload) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    let agentWriteAttempts = 0;
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      if (filename === "agent-t1.json") {
+        agentWriteAttempts += 1;
+        if (agentWriteAttempts === 1) {
+          throw new Error("simulated repo store write failure");
+        }
+      }
+      return baseWrite(runId, filename, content);
+    };
+    await runOrchestration("run-persist-retry", fake, store);
+    expect(agentWriteAttempts).toBe(2);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.agents.t1.status).toBe("finished");
+    expect(state.agents.t1.retry_count).toBe(1);
+    expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(okPayload);
+    expect(fake.launches).toHaveLength(2);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_retried")).toBe(true);
   });
 
   it("stays failed after repeated run errors when failure retries are exhausted", async () => {

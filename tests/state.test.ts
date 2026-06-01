@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrchestratorConfig } from "../src/config/types.js";
-import { appendEvent, createInitialState, deserialize, serialize } from "../src/state.js";
+import { appendEvent, createInitialState, deserialize, MAX_EVENTS_BYTES, readEvents, serialize } from "../src/state.js";
 
 describe("state", () => {
   it("roundtrip serialize", () => {
@@ -175,5 +175,75 @@ describe("state", () => {
 
     expect(files["run1/events.jsonl"]!.trim().split("\n")).toHaveLength(2);
     expect(files["run1/events.jsonl"]).toContain('"event_type":"task_finished"');
+  });
+
+  it("rotates events.jsonl when append would exceed MAX_EVENTS_BYTES", async () => {
+    const filler = "x".repeat(512);
+    const mkLine = (n: number) =>
+      `${JSON.stringify({
+        timestamp: "2026-03-27T00:00:00.000Z",
+        event_type: "worker_status",
+        task_id: "a",
+        phase_id: null,
+        agent_node_id: "a",
+        agent_kind: "task",
+        detail: `event-${n}-${filler}`,
+        payload: {},
+      })}\n`;
+    let content = "";
+    while (Buffer.byteLength(content, "utf8") < MAX_EVENTS_BYTES - 1024) {
+      content += mkLine(content.length);
+    }
+    const files: Record<string, string> = { "run1/events.jsonl": content };
+    const repoStore = {
+      async updateFile(runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
+        const key = `${runId}/${filename}`;
+        files[key] = await updater(files[key] ?? "");
+      },
+      async readFile(runId: string, filename: string): Promise<string> {
+        return files[`${runId}/${filename}`] ?? "";
+      },
+    };
+
+    await appendEvent(repoStore as never, "run1", {
+      timestamp: "2026-03-27T00:00:01.000Z",
+      event_type: "task_finished",
+      task_id: "a",
+      phase_id: "execution",
+      agent_node_id: "a",
+      agent_kind: "task",
+      detail: "done",
+      payload: {},
+    });
+
+    const rotated = files["run1/events.jsonl"]!;
+    expect(Buffer.byteLength(rotated, "utf8")).toBeLessThanOrEqual(MAX_EVENTS_BYTES);
+    expect(rotated).toContain('"event_type":"task_finished"');
+    const lines = rotated.trim().split("\n");
+    expect(lines.length).toBeGreaterThan(0);
+    expect(() => JSON.parse(lines[lines.length - 1]!)).not.toThrow();
+  });
+
+  it("readEvents skips corrupt jsonl lines and parses valid ones", async () => {
+    const valid = {
+      timestamp: "2026-03-27T00:00:00.000Z",
+      event_type: "task_finished",
+      task_id: "a",
+      phase_id: null,
+      agent_node_id: "a",
+      agent_kind: "task",
+      detail: "done",
+      payload: {},
+    };
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename !== "events.jsonl") return "";
+        return `${JSON.stringify(valid)}\n{not-json\n${JSON.stringify({ ...valid, task_id: "b", detail: "also ok" })}\n`;
+      },
+    };
+    const events = await readEvents(repoStore as never, "run1");
+    expect(events).toHaveLength(2);
+    expect(events[0]!.task_id).toBe("a");
+    expect(events[1]!.task_id).toBe("b");
   });
 });
