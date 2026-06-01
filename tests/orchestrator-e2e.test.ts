@@ -823,7 +823,7 @@ describe("runOrchestration with SDK (happy path)", () => {
       "state.json": "{not-json",
     });
     await expect(runOrchestration("run-corrupt-state", new FakeAgentClient(), store)).rejects.toThrow(
-      /state\.json exists but is invalid/,
+      /Invalid state\.json/,
     );
   });
 });
