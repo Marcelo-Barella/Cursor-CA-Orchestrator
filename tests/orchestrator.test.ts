@@ -5,7 +5,15 @@ import type { OrchestratorConfig } from "../src/config/types.js";
 import { toYaml } from "../src/config/parse.js";
 import type { TaskConfig } from "../src/config/types.js";
 import { buildRepoCreationPrompt } from "../src/prompt-builder.js";
-import { extractDelegationPhases, filterEligibleReadyTasks, planRefForConsolidatedRunLine, runOrchestration } from "../src/orchestrator.js";
+import {
+  extractDelegationPhases,
+  filterEligibleReadyTasks,
+  getBlockedTasks,
+  getReadyTasks,
+  planRefForConsolidatedRunLine,
+  runOrchestration,
+} from "../src/orchestrator.js";
+import type { AgentState } from "../src/state.js";
 import { createInitialState, deserialize, serialize } from "../src/state.js";
 
 function createConfig(
@@ -36,6 +44,65 @@ function createConfig(
     bootstrap_repo_name: "b",
   };
 }
+
+describe("getBlockedTasks", () => {
+  it("returns only agents in blocked status", () => {
+    const agent = (taskId: string, status: string): AgentState => ({
+      task_id: taskId,
+      agent_id: null,
+      status,
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: status === "blocked" ? "stuck" : null,
+      blocked_since: status === "blocked" ? "2026-05-28T00:00:00.000Z" : null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    });
+    const blocked = getBlockedTasks({
+      a: agent("a", "blocked"),
+      b: agent("b", "running"),
+      c: agent("c", "pending"),
+    });
+    expect(blocked.map((a) => a.task_id)).toEqual(["a"]);
+  });
+});
+
+describe("getReadyTasks", () => {
+  it("exposes a dependent task only after upstream tasks are finished", () => {
+    const graph = { t1: new Set<string>(), t2: new Set(["t1"]) };
+    const agent = (taskId: string, status: string): AgentState => ({
+      task_id: taskId,
+      agent_id: null,
+      status,
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    });
+    expect(
+      getReadyTasks(graph, {
+        t1: agent("t1", "pending"),
+        t2: agent("t2", "pending"),
+      }),
+    ).toEqual(["t1"]);
+    expect(
+      getReadyTasks(graph, {
+        t1: agent("t1", "finished"),
+        t2: agent("t2", "pending"),
+      }),
+    ).toEqual(["t2"]);
+  });
+});
 
 describe("orchestrator launch eligibility", () => {
   it("keeps current behavior when delegation map is absent", () => {

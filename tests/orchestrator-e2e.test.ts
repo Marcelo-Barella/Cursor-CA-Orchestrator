@@ -98,6 +98,35 @@ function installGithubBranchPrepMock(): void {
   }) as typeof fetch;
 }
 
+function twoTaskChainConfig(): OrchestratorConfig {
+  const base = singleTaskConfig();
+  return {
+    ...base,
+    tasks: [
+      {
+        id: "t1",
+        repo: "svc",
+        prompt: "Produce upstream output.",
+        model: null,
+        depends_on: [],
+        timeout_minutes: 30,
+        create_repo: false,
+        repo_config: null,
+      },
+      {
+        id: "t2",
+        repo: "svc",
+        prompt: "Consume upstream output.",
+        model: null,
+        depends_on: ["t1"],
+        timeout_minutes: 30,
+        create_repo: false,
+        repo_config: null,
+      },
+    ],
+  };
+}
+
 function twoRepoParallelTaskConfig(): OrchestratorConfig {
   const mk = (id: string, repo: "svc" | "svc2") => ({
     id,
@@ -252,6 +281,8 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
     expect(state.agents.t1.retry_count).toBe(1);
+    expect(state.agents.t1.blocked_retry_count).toBe(0);
+    expect(fake.launches).toHaveLength(2);
     expect(fake.launches[1]!.opts.startingRef).toBe("cursor-orch/run-retry-ok/t1-retry-1");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.some((e: { event_type: string }) => e.event_type === "task_retried")).toBe(true);
@@ -596,6 +627,77 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(fake.launches[0]!.opts.mcpServers).toBeUndefined();
   });
 
+  it("marks a task blocked when worker JSON reports blocked status", async () => {
+    const config = singleTaskConfig();
+    const blockedPayload = {
+      task_id: "t1",
+      status: "blocked",
+      summary: "needs credentials",
+      blocked_reason: "missing API key",
+      outputs: {},
+    };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-blocked/t1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(blockedPayload) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        await baseWrite(
+          runId,
+          "stop-requested.json",
+          JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
+        );
+      }
+    };
+    await runOrchestration("run-blocked", fake, store);
+    const agentPayload = JSON.parse(files.get("agent-t1.json")!);
+    expect(agentPayload.status).toBe("blocked");
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.agents.t1.status).toBe("blocked");
+    expect(state.agents.t1.blocked_reason).toBe("missing API key");
+    expect(state.agents.t1.blocked_retry_count).toBe(0);
+    expect(state.agents.t1.retry_count).toBe(0);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_blocked" && e.task_id === "t1")).toBe(true);
+    expect(state.status).toBe("stopped");
+  }, 20_000);
+
+  it("marks a task failed when worker JSON reports failed status", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-worker-failed/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({
+              task_id: "t1",
+              status: "failed",
+              summary: "worker could not finish",
+              outputs: {},
+            }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-worker-failed", fake, store)).rejects.toThrow();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    expect(state.agents.t1.summary).toBe("worker could not finish");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_failed" && e.task_id === "t1")).toBe(true);
+  });
+
   it("writes the stop sentinel leads to state.status=stopped", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
@@ -613,5 +715,90 @@ describe("runOrchestration with SDK (happy path)", () => {
     await runOrchestration("run-5", fake, store);
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("stopped");
+  });
+
+  it("cascades terminal upstream failure to dependent pending tasks without launching them", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-cascade-fail/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({
+              task_id: "t1",
+              status: "failed",
+              summary: "upstream broke",
+              outputs: {},
+            }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-cascade-fail", fake, store)).rejects.toThrow();
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    expect(state.agents.t1.summary).toBe("upstream broke");
+    expect(state.agents.t2.status).toBe("failed");
+    expect(state.agents.t2.cascade_source_task_id).toBe("t1");
+    expect(state.agents.t2.summary).toBe("Upstream task t1 failed");
+    expect(fake.launches).toHaveLength(1);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t2")).toBe(
+      true,
+    );
+  });
+
+  it("passes persisted upstream outputs into the dependent worker launch prompt", async () => {
+    const config = twoTaskChainConfig();
+    const upstreamMarker = "upstream-marker-7f3a";
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-dep-chain/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({
+              task_id: "t1",
+              status: "completed",
+              summary: "t1 done",
+              outputs: { marker: upstreamMarker },
+            }),
+          },
+        },
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r2", status: "finished", git: runGit("cursor-orch/run-dep-chain/t2") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({
+              task_id: "t2",
+              status: "completed",
+              summary: "t2 done",
+              outputs: {},
+            }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-dep-chain", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    expect(fake.launches[0]!.prompt).not.toContain(upstreamMarker);
+    expect(fake.launches[1]!.prompt).toContain("CONTEXT FROM UPSTREAM TASKS");
+    expect(fake.launches[1]!.prompt).toContain(upstreamMarker);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("rejects resume when state.json is corrupt", async () => {
+    const config = singleTaskConfig();
+    const { store } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": "{not-json",
+    });
+    await expect(runOrchestration("run-corrupt-state", new FakeAgentClient(), store)).rejects.toThrow(
+      /state\.json exists but is invalid/,
+    );
   });
 });
