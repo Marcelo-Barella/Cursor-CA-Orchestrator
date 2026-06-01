@@ -172,6 +172,7 @@ export interface FakeAgentClientOptions {
 export class FakeAgentClient implements AgentClient {
   readonly launches: FakeLaunch[] = [];
   readonly conversationCalls: string[] = [];
+  readonly sentPrompts: string[] = [];
   maxConcurrentSends = 0;
   private _activeSends = 0;
   private readonly sendPreDelayMs: number;
@@ -215,6 +216,7 @@ export class FakeAgentClient implements AgentClient {
     const originalSend = agent.send.bind(agent);
     agent.send = async (message?: string) => {
       if (typeof message === "string") {
+        this.sentPrompts.push(message);
         this.launches[this.launches.length - 1]!.prompt = message;
       }
       this._activeSends += 1;

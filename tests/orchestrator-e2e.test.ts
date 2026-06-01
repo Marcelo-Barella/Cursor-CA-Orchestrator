@@ -6,6 +6,7 @@ import { toYaml } from "../src/config/parse.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import {
   FakeAgentClient,
+  type FakeRunScript,
   assistantText,
   statusMessage,
 } from "./support/fake-agent-client.js";
@@ -62,6 +63,50 @@ function singleTaskConfig(): OrchestratorConfig {
     ],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
+  };
+}
+
+function twoTaskChainConfig(): OrchestratorConfig {
+  const base = singleTaskConfig();
+  return {
+    ...base,
+    tasks: [
+      {
+        id: "t1",
+        repo: "svc",
+        prompt: "Produce upstream outputs.",
+        model: null,
+        depends_on: [],
+        timeout_minutes: 30,
+        create_repo: false,
+        repo_config: null,
+      },
+      {
+        id: "t2",
+        repo: "svc",
+        prompt: "Consume upstream outputs.",
+        model: null,
+        depends_on: ["t1"],
+        timeout_minutes: 30,
+        create_repo: false,
+        repo_config: null,
+      },
+    ],
+  };
+}
+
+function completedWorkerScript(taskId: string, runId: string, outputs: Record<string, unknown> = {}): FakeRunScript {
+  return {
+    events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+    result: { id: `r-${taskId}`, status: "finished", git: runGit(`cursor-orch/${runId}/${taskId}`) },
+    artifacts: {
+      "cursor-orch-output.json": JSON.stringify({
+        task_id: taskId,
+        status: "completed",
+        summary: "ok",
+        outputs,
+      }),
+    },
   };
 }
 
@@ -593,6 +638,9 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.summary).toBe("Failed to persist worker output to agent-t1.json on the run branch");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
+    const failedEvent = events.find((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t1");
+    expect(failedEvent?.detail).toContain("Failed to persist worker output");
+    expect(failedEvent?.detail).not.toBe("Task t1 failed: ok");
   });
 
   it("stays failed when worker JSON has summary but no status field", async () => {
@@ -803,6 +851,82 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.summary).toBe("worker could not finish");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.some((e: { event_type: string }) => e.event_type === "task_failed" && e.task_id === "t1")).toBe(true);
+  });
+
+  it("runs dependent tasks sequentially and injects upstream outputs into the worker prompt", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        completedWorkerScript("t1", "run-dep-chain", { upstream_token: "from-t1" }),
+        completedWorkerScript("t2", "run-dep-chain"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-dep-chain", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    expect(fake.sentPrompts).toHaveLength(2);
+    expect(fake.sentPrompts[1]).toContain("from-t1");
+    expect(fake.sentPrompts[1]).toContain('Output from task "t1"');
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.agents.t1.status).toBe("finished");
+    expect(state.agents.t2.status).toBe("finished");
+  });
+
+  it("ignores non-canonical agent files when gathering dependency outputs", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        completedWorkerScript("t1", "run-dep-invalid", { upstream_token: "canonical-t1" }),
+        completedWorkerScript("t2", "run-dep-invalid"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        await baseWrite(
+          runId,
+          filename,
+          JSON.stringify({
+            task_id: "t1",
+            status: "bogus",
+            outputs: { poison: "do-not-inject" },
+          }),
+        );
+      }
+    };
+    await runOrchestration("run-dep-invalid", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    expect(fake.sentPrompts).toHaveLength(2);
+    const t2Prompt = fake.sentPrompts[1]!;
+    expect(t2Prompt).not.toContain("do-not-inject");
+    expect(t2Prompt).not.toContain("canonical-t1");
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("cascades failure to dependent tasks without launching them", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("ERROR")],
+          result: { id: "r-t1", status: "error" },
+        },
+        completedWorkerScript("t2", "run-dep-cascade"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-dep-cascade", fake, store)).rejects.toThrow();
+    expect(fake.launches).toHaveLength(1);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.agents.t1.status).toBe("failed");
+    expect(state.agents.t2.status).toBe("failed");
+    expect(state.agents.t2.cascade_source_task_id).toBe("t1");
+    expect(state.agents.t2.summary).toContain("Upstream task t1 failed");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t2")).toBe(true);
   });
 
   it("writes the stop sentinel leads to state.status=stopped", async () => {
