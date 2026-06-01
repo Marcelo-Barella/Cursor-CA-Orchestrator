@@ -166,21 +166,37 @@ function parseTranscriptLine(line: string): SDKMessage | null {
   return null;
 }
 
-export async function runLogsCommand(opts: LogsOptions): Promise<void> {
-  const env = requireEnv(["GH_TOKEN"], {
-    code: "LOGS-001",
-    severity: "FATAL",
-    title: "Missing credentials for logs retrieval",
-    what_happened: "logs needs GH_TOKEN to read run artifacts.",
-    next_step: "Set GH_TOKEN and retry logs.",
-    alternative: "Pass env vars inline in scripts.",
-    example: "GH_TOKEN=... cursor-orch logs --run <run_id>",
-    exitCode: 1,
-  });
-  const repoStore = makeRepoStore(env.GH_TOKEN);
+export async function runLogsCommand(
+  opts: LogsOptions,
+  deps: {
+    finish?: (code: number) => never;
+    repoStore?: RepoStoreClient;
+  } = {},
+): Promise<void> {
+  const finish = deps.finish ?? ((code: number): never => process.exit(code));
+  const failWithFinish = (failOpts: FailOptions): never => {
+    renderFeedback(failOpts);
+    return finish(failOpts.exitCode);
+  };
+  let repoStore: RepoStoreClient;
+  if (deps.repoStore) {
+    repoStore = deps.repoStore;
+  } else {
+    const env = requireEnv(["GH_TOKEN"], {
+      code: "LOGS-001",
+      severity: "FATAL",
+      title: "Missing credentials for logs retrieval",
+      what_happened: "logs needs GH_TOKEN to read run artifacts.",
+      next_step: "Set GH_TOKEN and retry logs.",
+      alternative: "Pass env vars inline in scripts.",
+      example: "GH_TOKEN=... cursor-orch logs --run <run_id>",
+      exitCode: 1,
+    });
+    repoStore = makeRepoStore(env.GH_TOKEN);
+  }
   const content = await repoStore.readFile(opts.run, "state.json");
   if (!content) {
-    fail({
+    failWithFinish({
       code: "LOGS-002",
       severity: "ERROR",
       title: "Cannot load run state for logs",
@@ -197,7 +213,7 @@ export async function runLogsCommand(opts: LogsOptions): Promise<void> {
   if (opts.task) {
     const agent = state.agents[opts.task];
     if (!agent) {
-      fail({
+      failWithFinish({
         code: "LOGS-003",
         severity: "ERROR",
         title: "Task not found in orchestration state",
