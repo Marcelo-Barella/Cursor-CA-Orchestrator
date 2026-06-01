@@ -143,35 +143,6 @@ function installGithubBranchPrepMock(): void {
   }) as typeof fetch;
 }
 
-function twoTaskChainConfig(): OrchestratorConfig {
-  const base = singleTaskConfig();
-  return {
-    ...base,
-    tasks: [
-      {
-        id: "t1",
-        repo: "svc",
-        prompt: "Produce upstream output.",
-        model: null,
-        depends_on: [],
-        timeout_minutes: 30,
-        create_repo: false,
-        repo_config: null,
-      },
-      {
-        id: "t2",
-        repo: "svc",
-        prompt: "Consume upstream output.",
-        model: null,
-        depends_on: ["t1"],
-        timeout_minutes: 30,
-        create_repo: false,
-        repo_config: null,
-      },
-    ],
-  };
-}
-
 function twoRepoParallelTaskConfig(): OrchestratorConfig {
   const mk = (id: string, repo: "svc" | "svc2") => ({
     id,
@@ -1030,6 +1001,23 @@ describe("runOrchestration with SDK (happy path)", () => {
     });
     await expect(runOrchestration("run-corrupt-state", new FakeAgentClient(), store)).rejects.toThrow(
       /Invalid state\.json/,
+    );
+  });
+
+  it("rejects resume when state.json is empty but events.jsonl exists", async () => {
+    const config = singleTaskConfig();
+    const { store } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": "",
+      "events.jsonl": `${JSON.stringify({
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "orchestration_started",
+        task_id: null,
+        detail: "Orchestration started",
+      })}\n`,
+    });
+    await expect(runOrchestration("run-empty-state", new FakeAgentClient(), store)).rejects.toThrow(
+      /refusing to reset orchestration progress/,
     );
   });
 });

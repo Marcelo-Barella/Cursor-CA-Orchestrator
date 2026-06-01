@@ -1822,6 +1822,17 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     throw readErr instanceof Error ? readErr : new Error(String(readErr));
   }
   if (!stateContent.trim()) {
+    let eventsContent = "";
+    try {
+      eventsContent = await repoStore.readFile(runId, "events.jsonl");
+    } catch {
+      /* treat as no prior events */
+    }
+    if (eventsContent.trim()) {
+      throw new Error(
+        `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
+      );
+    }
     state = createInitialState(config, runId);
   } else {
     try {
