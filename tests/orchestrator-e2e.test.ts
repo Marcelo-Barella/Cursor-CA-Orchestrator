@@ -220,6 +220,31 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(fake.launches[0]!.opts.startingRef).toBe("cursor-orch/run-1/t1");
   });
 
+  it("persists truncated agent output when worker JSON exceeds size limits", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-truncate/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({
+              status: "completed",
+              summary: "a".repeat(5000),
+              outputs: { blob: "z".repeat(300_000) },
+            }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-truncate", fake, store);
+    const agent = JSON.parse(files.get("agent-t1.json")!);
+    expect(agent.summary).toContain("[TRUNCATED]");
+    expect(agent.truncated).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).agents.t1.status).toBe("finished");
+  });
+
   it("falls back to assistant JSON when the artifact is absent", async () => {
     const config = singleTaskConfig();
     const workerJson = { task_id: "t1", status: "completed", summary: "from assistant", outputs: {} };
