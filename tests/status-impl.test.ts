@@ -133,6 +133,26 @@ describe("runStatusCommand", () => {
     expect(text).toContain("STATUS-004");
   });
 
+  it("resolves without calling finish when run status is stopped", async () => {
+    const cfg = baseConfig();
+    const state = createInitialState(cfg, "run-stopped");
+    state.status = "stopped";
+    state.agents.t1.status = "stopped";
+    state.agents.t1.finished_at = "2026-01-01T00:00:00.000Z";
+    const finish = vi.fn((code: number): never => {
+      throw new Error(`exit:${code}`);
+    });
+    const store = mockRepoStore({
+      "state.json": serialize(state),
+      "config.yaml": toYaml(cfg),
+      "events.jsonl": "",
+    });
+    await expect(
+      runStatusCommand({ run: "run-stopped", watch: false }, { finish, repoStore: store }),
+    ).resolves.toBeUndefined();
+    expect(finish).not.toHaveBeenCalled();
+  });
+
   it("exits 0 for completed runs", async () => {
     const cfg = baseConfig();
     const state = createInitialState(cfg, "run-ok");

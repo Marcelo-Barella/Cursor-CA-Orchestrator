@@ -143,35 +143,6 @@ function installGithubBranchPrepMock(): void {
   }) as typeof fetch;
 }
 
-function twoTaskChainConfig(): OrchestratorConfig {
-  const base = singleTaskConfig();
-  return {
-    ...base,
-    tasks: [
-      {
-        id: "t1",
-        repo: "svc",
-        prompt: "Produce upstream output.",
-        model: null,
-        depends_on: [],
-        timeout_minutes: 30,
-        create_repo: false,
-        repo_config: null,
-      },
-      {
-        id: "t2",
-        repo: "svc",
-        prompt: "Consume upstream output.",
-        model: null,
-        depends_on: ["t1"],
-        timeout_minutes: 30,
-        create_repo: false,
-        repo_config: null,
-      },
-    ],
-  };
-}
-
 function twoRepoParallelTaskConfig(): OrchestratorConfig {
   const mk = (id: string, repo: "svc" | "svc2") => ({
     id,
