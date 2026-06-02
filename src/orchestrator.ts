@@ -114,7 +114,7 @@ async function handleTaskFailureWithOptionalRetry(
   return "terminal";
 }
 
-function readWorkerArtifactErrorRetryPlan(): { maxRetries: number; delayMs: number } {
+export function readWorkerArtifactErrorRetryPlan(): { maxRetries: number; delayMs: number } {
   let maxRetries = WORKER_ARTIFACT_ERROR_RETRIES_DEFAULT;
   const retriesRaw = process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES;
   if (retriesRaw !== undefined && retriesRaw !== "") {
