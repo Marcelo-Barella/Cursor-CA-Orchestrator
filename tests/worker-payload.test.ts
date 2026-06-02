@@ -38,6 +38,11 @@ describe("normalizeWorkerPayload", () => {
     expect(normalizeWorkerPayload({ status: "" }, "t1")).toBeNull();
   });
 
+  it("rejects payloads that omit status (empty object or summary-only)", () => {
+    expect(normalizeWorkerPayload({}, "t1")).toBeNull();
+    expect(normalizeWorkerPayload({ summary: "looks done", outputs: {} }, "t1")).toBeNull();
+  });
+
   it("coerces non-string summary to null", () => {
     const out = normalizeWorkerPayload({ status: "completed", summary: 42, outputs: {} }, "t1");
     expect(out?.summary).toBeNull();

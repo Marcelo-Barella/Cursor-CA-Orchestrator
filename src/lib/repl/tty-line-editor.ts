@@ -346,7 +346,7 @@ function appendHistoryLine(historyPath: string, line: string): void {
   } catch {}
 }
 
-function lineWrapPhysicalRows(text: string, columns: number): number {
+export function lineWrapPhysicalRows(text: string, columns: number): number {
   if (columns <= 0) {
     return 1;
   }
@@ -358,7 +358,7 @@ function editLinePrefix(editIndex: number): string {
   return editIndex === 0 ? "> " : ". ";
 }
 
-function totalEditPhysicalRows(lines: string[], columns: number): number {
+export function totalEditPhysicalRows(lines: string[], columns: number): number {
   let t = 0;
   for (let i = 0; i < lines.length; i++) {
     t += lineWrapPhysicalRows(editLinePrefix(i) + lines[i]!, columns);
@@ -366,7 +366,7 @@ function totalEditPhysicalRows(lines: string[], columns: number): number {
   return t;
 }
 
-function totalSuggestionPhysicalRows(sugLines: string[], columns: number): number {
+export function totalSuggestionPhysicalRows(sugLines: string[], columns: number): number {
   let t = 0;
   for (const s of sugLines) {
     t += lineWrapPhysicalRows(s, columns);
@@ -374,7 +374,7 @@ function totalSuggestionPhysicalRows(sugLines: string[], columns: number): numbe
   return t;
 }
 
-function editCursorPhysicalOffsetUp(
+export function editCursorPhysicalOffsetUp(
   lines: string[],
   row: number,
   col: number,
@@ -391,7 +391,11 @@ function editCursorPhysicalOffsetUp(
   return up;
 }
 
-function totalEditPhysicalRowsFromLineIndex(lines: string[], startIdx: number, columns: number): number {
+export function totalEditPhysicalRowsFromLineIndex(
+  lines: string[],
+  startIdx: number,
+  columns: number,
+): number {
   let t = 0;
   for (let i = startIdx; i < lines.length; i++) {
     t += lineWrapPhysicalRows(editLinePrefix(i) + lines[i]!, columns);
