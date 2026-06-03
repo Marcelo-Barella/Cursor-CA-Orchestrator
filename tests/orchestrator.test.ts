@@ -301,6 +301,20 @@ describe("orchestrator launch eligibility", () => {
     expect(eligible).toEqual(["u"]);
   });
 
+  it("does not treat a delegation group as terminal when a mapped task has no agent entry", () => {
+    const config = createConfig(["a", "b"]);
+    config.delegation_map = {
+      phases: [{ id: "phase-1", groups: [{ id: "g1", task_ids: ["a", "b"] }] }],
+    };
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "finished";
+    delete state.agents.b;
+    const eligible = filterEligibleReadyTasks(state, config, ["b"]);
+    expect(eligible).toEqual(["b"]);
+    expect(state.delegation_phase_index).toBe(0);
+    expect(state.delegation_group_index).toBe(0);
+  });
+
   it("repairs delegation cursor past end when mapped tasks are still pending", () => {
     const config = createConfig(["a", "b"]);
     config.delegation_map = {
