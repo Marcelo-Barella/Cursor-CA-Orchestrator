@@ -2,6 +2,8 @@ import { UnsupportedRunOperationError } from "@cursor/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SDKAssistantMessage, SdkAgent } from "../src/sdk/agent-client.js";
 import {
+  buildCloudAgentOptions,
+  fetchAgentConversationTextFromApi,
   parseAssistantJsonFromMessages,
   parseAssistantJsonFromText,
   streamToCallbacks,
@@ -16,6 +18,84 @@ function makeAssistant(text: string): SDKAssistantMessage {
     message: { role: "assistant", content: [{ type: "text", text }] },
   };
 }
+
+const baseCloudOpts = {
+  apiKey: "test-key",
+  model: { id: "composer-2" as const },
+  repoUrl: "https://github.com/acme/svc",
+  startingRef: "main",
+  autoCreatePR: false,
+};
+
+describe("buildCloudAgentOptions", () => {
+  it("maps cloud repo fields and defaults skipReviewerRequest to true", () => {
+    const opts = buildCloudAgentOptions({ ...baseCloudOpts, autoCreatePR: true });
+    expect(opts.apiKey).toBe("test-key");
+    expect(opts.cloud?.repos).toEqual([{ url: baseCloudOpts.repoUrl, startingRef: "main" }]);
+    expect(opts.cloud?.autoCreatePR).toBe(true);
+    expect(opts.cloud?.skipReviewerRequest).toBe(true);
+  });
+
+  it("includes mcpServers only when the map is non-empty", () => {
+    const withMcp = buildCloudAgentOptions({
+      ...baseCloudOpts,
+      mcpServers: { local: { type: "http", url: "https://mcp.example" } },
+    });
+    expect(withMcp.mcpServers).toEqual({ local: { type: "http", url: "https://mcp.example" } });
+    const without = buildCloudAgentOptions({ ...baseCloudOpts, mcpServers: {} });
+    expect(without.mcpServers).toBeUndefined();
+  });
+});
+
+describe("fetchAgentConversationTextFromApi", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("returns null when fetch throws", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error("network down");
+    }) as typeof fetch;
+    await expect(fetchAgentConversationTextFromApi("agent-1", "key")).resolves.toBeNull();
+  });
+
+  it("returns null for non-OK HTTP responses", async () => {
+    globalThis.fetch = vi.fn(async () => new Response("err", { status: 503 })) as typeof fetch;
+    await expect(fetchAgentConversationTextFromApi("agent-1", "key")).resolves.toBeNull();
+  });
+
+  it("returns null when the payload has no assistant_message entries", async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ messages: [{ type: "user_message", text: "hi" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ) as typeof fetch;
+    await expect(fetchAgentConversationTextFromApi("agent-1", "key")).resolves.toBeNull();
+  });
+
+  it("joins assistant_message text and URL-encodes the agent id", async () => {
+    let requestedUrl = "";
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      requestedUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      return new Response(
+        JSON.stringify({
+          messages: [
+            { type: "assistant_message", text: "line one\n" },
+            { type: "assistant_message", text: "line two" },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+    const text = await fetchAgentConversationTextFromApi("agent/with space", "secret");
+    expect(requestedUrl).toBe("https://api.cursor.com/v0/agents/agent%2Fwith%20space/conversation");
+    expect(text).toBe("line one\nline two");
+  });
+});
 
 describe("parseAssistantJsonFromText", () => {
   it("parses fenced json blocks", () => {
