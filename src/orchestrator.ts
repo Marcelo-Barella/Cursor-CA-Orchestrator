@@ -1701,6 +1701,10 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
 }
 
 async function orchestrationLoop(ctx: LoopContext): Promise<void> {
+  if (ctx.state.status === "stopped") {
+    console.info(`Run ${ctx.runId} is already stopped; skipping orchestration loop`);
+    return;
+  }
   ctx.wakeup = createWakeup();
   try {
     const existing = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
