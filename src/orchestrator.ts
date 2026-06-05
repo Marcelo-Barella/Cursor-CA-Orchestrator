@@ -1640,6 +1640,46 @@ async function persistUnexpectedFailure(state: OrchestrationState, repoStore: Re
   }
 }
 
+async function tryReadPersistedState(repoStore: RepoStoreClient, runId: string): Promise<OrchestrationState | null> {
+  let stateContent = "";
+  try {
+    stateContent = await repoStore.readFile(runId, "state.json");
+  } catch {
+    return null;
+  }
+  if (!stateContent.trim()) {
+    return null;
+  }
+  try {
+    return deserialize(stateContent);
+  } catch {
+    return null;
+  }
+}
+
+async function refuseResumeWithMissingState(repoStore: RepoStoreClient, runId: string): Promise<void> {
+  let stateContent = "";
+  try {
+    stateContent = await repoStore.readFile(runId, "state.json");
+  } catch {
+    return;
+  }
+  if (stateContent.trim()) {
+    return;
+  }
+  let eventsContent = "";
+  try {
+    eventsContent = await repoStore.readFile(runId, "events.jsonl");
+  } catch {
+    return;
+  }
+  if (eventsContent.trim()) {
+    throw new Error(
+      `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
+    );
+  }
+}
+
 async function reattachWorkers(ctx: LoopContext): Promise<void> {
   const { Agent } = await import("@cursor/sdk");
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
@@ -1780,6 +1820,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   const apiKey = process.env.CURSOR_API_KEY ?? "";
   const ghToken = process.env.GH_TOKEN ?? "";
+
+  await refuseResumeWithMissingState(repoStore, runId);
+  const persistedState = await tryReadPersistedState(repoStore, runId);
+  if (persistedState?.status === "stopped") {
+    console.info(`Run ${runId} is already stopped; skipping orchestration`);
+    return;
+  }
 
   let planningRan = false;
   let planningOk = false;
