@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
+import { createInitialState, serialize } from "../src/state.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import {
   FakeAgentClient,
@@ -751,6 +752,30 @@ describe("runOrchestration with SDK (happy path)", () => {
     const { store } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
     await runOrchestration("run-no-mcp", fake, store);
     expect(fake.launches[0]!.opts.mcpServers).toBeUndefined();
+  });
+
+  it("does not relaunch work when resuming a run already marked stopped", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, "run-stopped-resume");
+    stoppedState.status = "stopped";
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(stoppedState),
+    });
+    await runOrchestration("run-stopped-resume", fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
   it("marks a task blocked when worker JSON reports blocked status", async () => {
