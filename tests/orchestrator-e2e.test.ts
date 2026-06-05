@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
+import { createInitialState, serialize } from "../src/state.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import {
   FakeAgentClient,
@@ -61,6 +62,20 @@ function singleTaskConfig(): OrchestratorConfig {
         repo_config: null,
       },
     ],
+    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
+    bootstrap_repo_name: "cursor-orch-bootstrap",
+  };
+}
+
+function promptOnlyConfig(): OrchestratorConfig {
+  return {
+    name: "plan-demo",
+    model: { id: "composer-2" },
+    prompt: "Ship the feature across repos.",
+    repositories: {
+      svc: { url: "https://github.com/acme/svc", ref: "main" },
+    },
+    tasks: [],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
   };
@@ -136,6 +151,12 @@ function installGithubBranchPrepMock(): void {
     if (url.includes("/git/refs") && init?.method === "POST") {
       return new Response(JSON.stringify({ ref: "refs/heads/x" }), {
         status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "https://api.github.com/user") {
+      return new Response(JSON.stringify({ login: "acme-user" }), {
+        status: 200,
         headers: { "Content-Type": "application/json" },
       });
     }
@@ -801,6 +822,51 @@ describe("runOrchestration with SDK (happy path)", () => {
     const { store } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
     await runOrchestration("run-no-mcp", fake, store);
     expect(fake.launches[0]!.opts.mcpServers).toBeUndefined();
+  });
+
+  it("does not relaunch work when resuming a run already marked stopped", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, "run-stopped-resume");
+    stoppedState.status = "stopped";
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(stoppedState),
+    });
+    await runOrchestration("run-stopped-resume", fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
+  it("does not launch planning when resuming a stopped prompt-only run", async () => {
+    const config = promptOnlyConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, "run-stopped-plan");
+    stoppedState.status = "stopped";
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(stoppedState),
+    });
+    await runOrchestration("run-stopped-plan", fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
   it("marks a task blocked when worker JSON reports blocked status", async () => {
