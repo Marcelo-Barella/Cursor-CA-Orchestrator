@@ -282,6 +282,32 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
+  it("falls back to assistant JSON when the artifact is valid JSON but missing a worker status", async () => {
+    const config = singleTaskConfig();
+    const workerJson = { task_id: "t1", status: "completed", summary: "from assistant after incomplete artifact", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [
+            statusMessage("RUNNING"),
+            assistantText(`\`\`\`json\n${JSON.stringify(workerJson)}\n\`\`\``),
+            statusMessage("FINISHED"),
+          ],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", summary: "incomplete artifact", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-incomplete-artifact-fallback", fake, store);
+    expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
+    expect(finishedEvent?.payload?.payload_source).toBe("assistant");
+  });
+
   it("falls back to assistant JSON when the artifact exists but is not valid JSON", async () => {
     const config = singleTaskConfig();
     const workerJson = { task_id: "t1", status: "completed", summary: "from assistant after bad artifact", outputs: {} };
