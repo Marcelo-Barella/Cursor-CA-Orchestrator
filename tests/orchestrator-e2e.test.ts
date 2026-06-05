@@ -67,6 +67,20 @@ function singleTaskConfig(): OrchestratorConfig {
   };
 }
 
+function promptOnlyConfig(): OrchestratorConfig {
+  return {
+    name: "plan-demo",
+    model: { id: "composer-2" },
+    prompt: "Ship the feature across repos.",
+    repositories: {
+      svc: { url: "https://github.com/acme/svc", ref: "main" },
+    },
+    tasks: [],
+    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
+    bootstrap_repo_name: "cursor-orch-bootstrap",
+  };
+}
+
 function twoTaskChainConfig(): OrchestratorConfig {
   const base = singleTaskConfig();
   return {
@@ -137,6 +151,12 @@ function installGithubBranchPrepMock(): void {
     if (url.includes("/git/refs") && init?.method === "POST") {
       return new Response(JSON.stringify({ ref: "refs/heads/x" }), {
         status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "https://api.github.com/user") {
+      return new Response(JSON.stringify({ login: "acme-user" }), {
+        status: 200,
         headers: { "Content-Type": "application/json" },
       });
     }
@@ -774,6 +794,27 @@ describe("runOrchestration with SDK (happy path)", () => {
       "state.json": serialize(stoppedState),
     });
     await runOrchestration("run-stopped-resume", fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
+  it("does not launch planning when resuming a stopped prompt-only run", async () => {
+    const config = promptOnlyConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, "run-stopped-plan");
+    stoppedState.status = "stopped";
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(stoppedState),
+    });
+    await runOrchestration("run-stopped-plan", fake, store);
     expect(fake.launches).toHaveLength(0);
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
