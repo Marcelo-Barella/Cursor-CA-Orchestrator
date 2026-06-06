@@ -247,6 +247,38 @@ describe("orchestrator launch eligibility", () => {
     expect(extractDelegationPhases(config, new Set())).toBeNull();
   });
 
+  it("extractDelegationPhases parses legacy delegationMap waves and parallel_groups", () => {
+    const config = createConfig(["a", "b", "c"]) as OrchestratorConfig & {
+      delegationMap?: unknown;
+    };
+    config.delegationMap = {
+      waves: [
+        {
+          phase_id: "wave-1",
+          parallel_groups: [{ tasks: ["a", "b"] }],
+        },
+        {
+          name: "wave-2",
+          parallelGroups: [{ taskIds: ["c"] }],
+        },
+      ],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b", "c"]));
+    expect(phases).toEqual([
+      { id: "wave-1", groups: [{ id: "group-1", task_ids: ["a", "b"] }] },
+      { id: "wave-2", groups: [{ id: "group-1", task_ids: ["c"] }] },
+    ]);
+  });
+
+  it("extractDelegationPhases legacy path drops unknown task ids", () => {
+    const config = createConfig(["a"]) as OrchestratorConfig & { delegationMap?: unknown };
+    config.delegationMap = {
+      waves: [{ tasks: ["a", "ghost"] }],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).toEqual([{ id: "phase-1", groups: [{ id: "group-1", task_ids: ["a"] }] }]);
+  });
+
   it("eligibles multiple tasks in the same parallel group when both are ready", () => {
     const config = createConfig(["a", "b", "c"]);
     config.delegation_map = {

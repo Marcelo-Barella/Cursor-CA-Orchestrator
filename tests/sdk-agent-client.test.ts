@@ -1,8 +1,10 @@
 import { UnsupportedRunOperationError } from "@cursor/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SDKAssistantMessage, SdkAgent } from "../src/sdk/agent-client.js";
+import type { SdkRun } from "../src/sdk/agent-client.js";
 import {
   buildCloudAgentOptions,
+  captureAssistantJson,
   fetchAgentConversationTextFromApi,
   parseAssistantJsonFromMessages,
   parseAssistantJsonFromText,
@@ -77,6 +79,11 @@ describe("fetchAgentConversationTextFromApi", () => {
     await expect(fetchAgentConversationTextFromApi("agent-1", "key")).resolves.toBeNull();
   });
 
+  it("returns null when the response body is not valid JSON", async () => {
+    globalThis.fetch = vi.fn(async () => new Response("not json", { status: 200 })) as typeof fetch;
+    await expect(fetchAgentConversationTextFromApi("agent-1", "key")).resolves.toBeNull();
+  });
+
   it("joins assistant_message text and URL-encodes the agent id", async () => {
     let requestedUrl = "";
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -94,6 +101,28 @@ describe("fetchAgentConversationTextFromApi", () => {
     const text = await fetchAgentConversationTextFromApi("agent/with space", "secret");
     expect(requestedUrl).toBe("https://api.cursor.com/v0/agents/agent%2Fwith%20space/conversation");
     expect(text).toBe("line one\nline two");
+  });
+});
+
+describe("captureAssistantJson", () => {
+  it("falls back to run.result when the stream has no assistant messages", async () => {
+    const run = {
+      async *stream() {},
+      result: '{"status":"completed","task_id":"t1","outputs":{}}',
+    } as unknown as SdkRun;
+    await expect(captureAssistantJson(run)).resolves.toEqual({
+      status: "completed",
+      task_id: "t1",
+      outputs: {},
+    });
+  });
+
+  it("returns null when stream and run.result are both empty", async () => {
+    const run = {
+      async *stream() {},
+      result: "",
+    } as unknown as SdkRun;
+    await expect(captureAssistantJson(run)).resolves.toBeNull();
   });
 });
 
@@ -233,6 +262,17 @@ describe("tryDownloadJsonArtifact", () => {
     });
     const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
     expect(result).toEqual({ value: null, error: "artifacts unsupported" });
+  });
+
+  it("returns download unsupported when downloadArtifact is unsupported", async () => {
+    const agent = mockAgent({
+      listArtifacts: async () => [{ path: "cursor-orch-output.json", sizeBytes: 1, updatedAt: "" }],
+      downloadArtifact: async () => {
+        throw new UnsupportedRunOperationError("downloadArtifact");
+      },
+    });
+    const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
+    expect(result).toEqual({ value: null, error: "download unsupported" });
   });
 });
 
