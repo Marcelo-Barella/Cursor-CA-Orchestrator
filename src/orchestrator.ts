@@ -55,7 +55,7 @@ const WORKER_ARTIFACT_ERROR_RETRY_MS_DEFAULT = 2_000;
 const TASK_FAILURE_MAX_RETRIES_DEFAULT = 0;
 const TASK_FAILURE_MAX_RETRIES_CAP = 32;
 
-function readTaskFailureRetryCap(): number {
+export function readTaskFailureRetryCap(): number {
   const raw = process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES;
   if (raw !== undefined && raw !== "") {
     const n = Number(raw);

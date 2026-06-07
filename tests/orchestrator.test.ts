@@ -247,6 +247,27 @@ describe("orchestrator launch eligibility", () => {
     expect(extractDelegationPhases(config, new Set())).toBeNull();
   });
 
+  it("extractDelegationPhases parses loose waves format with camelCase keys", () => {
+    const config = createConfig(["a", "b"]) as OrchestratorConfig & {
+      delegationMap?: unknown;
+    };
+    config.delegation_map = undefined;
+    config.delegationMap = {
+      waves: [
+        {
+          phase_id: "wave-1",
+          parallelGroups: [{ taskIds: ["a"] }, { tasks: ["b"] }],
+        },
+      ],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).not.toBeNull();
+    expect(phases).toHaveLength(1);
+    expect(phases![0]!.id).toBe("wave-1");
+    expect(phases![0]!.groups).toHaveLength(1);
+    expect(phases![0]!.groups[0]!.task_ids).toEqual(["a", "b"]);
+  });
+
   it("eligibles multiple tasks in the same parallel group when both are ready", () => {
     const config = createConfig(["a", "b", "c"]);
     config.delegation_map = {
@@ -281,6 +302,26 @@ describe("orchestrator launch eligibility", () => {
     };
     const state = createInitialState(config, "run1");
     state.agents.a!.status = "failed";
+    const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
+    expect(eligible).toEqual(["b", "c"]);
+    expect(state.delegation_group_index).toBe(1);
+  });
+
+  it("treats a stopped task in the prior group as terminal for wave advancement", () => {
+    const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
+    config.delegation_map = {
+      phases: [
+        {
+          id: "phase-1",
+          groups: [
+            { id: "g1", task_ids: ["a"] },
+            { id: "g2", task_ids: ["b", "c"] },
+          ],
+        },
+      ],
+    };
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "stopped";
     const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
     expect(eligible).toEqual(["b", "c"]);
     expect(state.delegation_group_index).toBe(1);
