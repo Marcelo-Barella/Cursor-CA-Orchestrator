@@ -31,7 +31,11 @@ function fail(opts: FailOptions): never {
   process.exit(opts.exitCode);
 }
 
-function requireEnv(names: string[], opts: FailOptions): Record<string, string> {
+function requireEnv(
+  names: string[],
+  opts: FailOptions,
+  failFn: (opts: FailOptions) => never = fail,
+): Record<string, string> {
   const values: Record<string, string> = {};
   const missing: string[] = [];
   for (const name of names) {
@@ -43,7 +47,7 @@ function requireEnv(names: string[], opts: FailOptions): Record<string, string> 
     }
   }
   if (missing.length) {
-    fail({
+    failFn({
       ...opts,
       what_happened: `${opts.what_happened} Missing or empty: ${missing.join(", ")}.`,
     });
@@ -63,41 +67,75 @@ function getEnv(name: string, failOpts: FailOptions): string {
   return value.trim();
 }
 
-export async function runCleanupCommand(opts: {
-  olderThan: string;
-  dryRun?: boolean;
-}): Promise<void> {
-  const env = requireEnv(["GH_TOKEN"], {
-    code: "CLEANUP-001",
-    severity: "FATAL",
-    title: "Missing GH_TOKEN",
-    what_happened: "cleanup requires GitHub access.",
-    next_step: "Set GH_TOKEN and rerun.",
-    alternative: "Export GH_TOKEN inline.",
-    example: "GH_TOKEN=... BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
-    exitCode: 1,
-  });
-  const owner = getEnv("BOOTSTRAP_OWNER", {
-    code: "ENV-001",
-    severity: "FATAL",
-    title: "BOOTSTRAP_OWNER",
-    what_happened: "cleanup requires BOOTSTRAP_OWNER.",
-    next_step: "Set BOOTSTRAP_OWNER.",
-    alternative: "Export inline.",
-    example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
-    exitCode: 1,
-  });
-  const repo = getEnv("BOOTSTRAP_REPO", {
-    code: "ENV-001",
-    severity: "FATAL",
-    title: "BOOTSTRAP_REPO",
-    what_happened: "cleanup requires BOOTSTRAP_REPO.",
-    next_step: "Set BOOTSTRAP_REPO.",
-    alternative: "Export inline.",
-    example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
-    exitCode: 1,
-  });
-  const repoStore = new RepoStoreClient(env.GH_TOKEN, owner, repo);
+export async function runCleanupCommand(
+  opts: {
+    olderThan: string;
+    dryRun?: boolean;
+  },
+  deps: {
+    finish?: (code: number) => never;
+    repoStore?: RepoStoreClient;
+  } = {},
+): Promise<void> {
+  const finish = deps.finish ?? ((code: number): never => process.exit(code));
+  const failWithFinish = (failOpts: FailOptions): never => {
+    renderFeedback(failOpts);
+    return finish(failOpts.exitCode);
+  };
+  const env = requireEnv(
+    ["GH_TOKEN"],
+    {
+      code: "CLEANUP-001",
+      severity: "FATAL",
+      title: "Missing GH_TOKEN",
+      what_happened: "cleanup requires GitHub access.",
+      next_step: "Set GH_TOKEN and rerun.",
+      alternative: "Export GH_TOKEN inline.",
+      example: "GH_TOKEN=... BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
+      exitCode: 1,
+    },
+    failWithFinish,
+  );
+  const owner = (() => {
+    const value = process.env.BOOTSTRAP_OWNER;
+    if (value === undefined || !value.trim()) {
+      const actual = value === undefined ? "missing" : "empty";
+      failWithFinish({
+        code: "ENV-001",
+        severity: "FATAL",
+        title: "BOOTSTRAP_OWNER",
+        what_happened: `cleanup requires BOOTSTRAP_OWNER. BOOTSTRAP_OWNER is ${actual}.`,
+        next_step: "Set BOOTSTRAP_OWNER.",
+        alternative: "Export inline.",
+        example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
+        exitCode: 1,
+      });
+    }
+    return value.trim();
+  })();
+  const repo = (() => {
+    const value = process.env.BOOTSTRAP_REPO;
+    if (value === undefined || !value.trim()) {
+      const actual = value === undefined ? "missing" : "empty";
+      failWithFinish({
+        code: "ENV-001",
+        severity: "FATAL",
+        title: "BOOTSTRAP_REPO",
+        what_happened: `cleanup requires BOOTSTRAP_REPO. BOOTSTRAP_REPO is ${actual}.`,
+        next_step: "Set BOOTSTRAP_REPO.",
+        alternative: "Export inline.",
+        example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
+        exitCode: 1,
+      });
+    }
+    return value.trim();
+  })();
+  let repoStore: RepoStoreClient;
+  if (deps.repoStore) {
+    repoStore = deps.repoStore;
+  } else {
+    repoStore = new RepoStoreClient(env.GH_TOKEN, owner, repo);
+  }
   const branches = await repoStore.listRunBranches();
   if (!branches.length) {
     console.log("No run branches found.");
