@@ -1,7 +1,6 @@
 import { UnsupportedRunOperationError } from "@cursor/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SDKAssistantMessage, SdkAgent } from "../src/sdk/agent-client.js";
-import type { SdkRun } from "../src/sdk/agent-client.js";
+import type { SDKAssistantMessage, SdkAgent, SdkRun } from "../src/sdk/agent-client.js";
 import {
   buildCloudAgentOptions,
   captureAssistantJson,
