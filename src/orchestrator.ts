@@ -1658,17 +1658,6 @@ async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): 
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-function tryDeserializeState(stateContent: string): OrchestrationState | null {
-  if (!stateContent.trim()) {
-    return null;
-  }
-  try {
-    return deserialize(stateContent);
-  } catch {
-    return null;
-  }
-}
-
 async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
   if (stateContent.trim()) {
     return;
@@ -1827,15 +1816,18 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const apiKey = process.env.CURSOR_API_KEY ?? "";
   const ghToken = process.env.GH_TOKEN ?? "";
 
-  let stateContent = "";
-  try {
-    stateContent = await readStateJsonContent(repoStore, runId);
-  } catch (readErr) {
-    throw readErr instanceof Error ? readErr : new Error(String(readErr));
-  }
+  const stateContent = await readStateJsonContent(repoStore, runId);
   await refuseResumeWithEmptyState(repoStore, runId, stateContent);
-  const persistedState = tryDeserializeState(stateContent);
-  if (persistedState?.status === "stopped") {
+  let parsedState: OrchestrationState | null = null;
+  let stateParseDetail: string | null = null;
+  if (stateContent.trim()) {
+    try {
+      parsedState = deserialize(stateContent);
+    } catch (parseErr) {
+      stateParseDetail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    }
+  }
+  if (parsedState?.status === "stopped") {
     console.info(`Run ${runId} is already stopped; skipping orchestration`);
     return;
   }
@@ -1880,13 +1872,10 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
     state = createInitialState(config, runId);
+  } else if (parsedState) {
+    state = parsedState;
   } else {
-    try {
-      state = deserialize(stateContent);
-    } catch (parseErr) {
-      const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
-      throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
-    }
+    throw new Error(`Invalid state.json for run ${runId}: ${stateParseDetail ?? "parse failed"}`);
   }
 
   reconcileAgentsFromConfig(state, config);

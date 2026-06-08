@@ -42,6 +42,27 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
   return { store, files };
 }
 
+function createTransientStateReadStore(
+  initial: Record<string, string>,
+  failCount = 2,
+): { store: RepoStoreClient; files: FileStore } {
+  const { store: baseStore, files } = createInMemoryRepoStore(initial);
+  let stateReadCount = 0;
+  const store = {
+    ...baseStore,
+    async readFile(runId: string, filename: string): Promise<string> {
+      if (filename === "state.json") {
+        stateReadCount += 1;
+        if (stateReadCount <= failCount) {
+          throw new Error("transient repo read failure");
+        }
+      }
+      return baseStore.readFile(runId, filename);
+    },
+  } as unknown as RepoStoreClient;
+  return { store, files };
+}
+
 function singleTaskConfig(): OrchestratorConfig {
   return {
     name: "demo",
@@ -798,93 +819,26 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
-  it("skips orchestration loop when stopped state loads after transient read failures", async () => {
-    const config = singleTaskConfig();
+  it.each([
+    { label: "task run", config: singleTaskConfig, runId: "run-stopped-transient" },
+    { label: "prompt-only run", config: promptOnlyConfig, runId: "run-stopped-transient-plan" },
+  ])("skips work when stopped state loads after transient read failures ($label)", async ({ config: configFn, runId }) => {
+    const config = configFn();
     const fake = new FakeAgentClient({
       defaultScripts: [
         {
           events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r1", status: "finished" },
-          artifacts: {
-            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
-          },
+          result: { id: "r1", status: "finished", result: "" },
         },
       ],
     });
-    const stoppedState = createInitialState(config, "run-stopped-transient");
+    const stoppedState = createInitialState(config, runId);
     stoppedState.status = "stopped";
-    const stateJson = serialize(stoppedState);
-    let stateReadCount = 0;
-    const files: FileStore = new Map([["config.yaml", toYaml(config)], ["state.json", stateJson]]);
-    const store = {
-      rateLimitRemaining: null,
-      rateLimitLimit: null,
-      async readFile(_runId: string, filename: string): Promise<string> {
-        if (filename === "state.json") {
-          stateReadCount += 1;
-          if (stateReadCount <= 2) {
-            throw new Error("transient repo read failure");
-          }
-          return files.get(filename) ?? "";
-        }
-        return files.get(filename) ?? "";
-      },
-      async writeFile(_runId: string, filename: string, content: string): Promise<void> {
-        files.set(filename, content);
-      },
-      async updateFile(_runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
-        const current = files.get(filename) ?? "";
-        files.set(filename, await updater(current));
-      },
-      async deleteFile(_runId: string, filename: string): Promise<void> {
-        files.delete(filename);
-      },
-    } as unknown as RepoStoreClient;
-    await runOrchestration("run-stopped-transient", fake, store);
-    expect(fake.launches).toHaveLength(0);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
-  });
-
-  it("does not launch planning when stopped prompt-only run hits transient state read failures", async () => {
-    const config = promptOnlyConfig();
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r-plan", status: "finished", result: "" },
-        },
-      ],
+    const { store, files } = createTransientStateReadStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(stoppedState),
     });
-    const stoppedState = createInitialState(config, "run-stopped-transient-plan");
-    stoppedState.status = "stopped";
-    const stateJson = serialize(stoppedState);
-    let stateReadCount = 0;
-    const files: FileStore = new Map([["config.yaml", toYaml(config)], ["state.json", stateJson]]);
-    const store = {
-      rateLimitRemaining: null,
-      rateLimitLimit: null,
-      async readFile(_runId: string, filename: string): Promise<string> {
-        if (filename === "state.json") {
-          stateReadCount += 1;
-          if (stateReadCount <= 2) {
-            throw new Error("transient repo read failure");
-          }
-          return files.get(filename) ?? "";
-        }
-        return files.get(filename) ?? "";
-      },
-      async writeFile(_runId: string, filename: string, content: string): Promise<void> {
-        files.set(filename, content);
-      },
-      async updateFile(_runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
-        const current = files.get(filename) ?? "";
-        files.set(filename, await updater(current));
-      },
-      async deleteFile(_runId: string, filename: string): Promise<void> {
-        files.delete(filename);
-      },
-    } as unknown as RepoStoreClient;
-    await runOrchestration("run-stopped-transient-plan", fake, store);
+    await runOrchestration(runId, fake, store);
     expect(fake.launches).toHaveLength(0);
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
