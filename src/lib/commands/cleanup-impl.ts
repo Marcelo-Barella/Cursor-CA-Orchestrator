@@ -55,11 +55,15 @@ function requireEnv(
   return values;
 }
 
-function getEnv(name: string, failOpts: FailOptions): string {
+function getEnv(
+  name: string,
+  failOpts: FailOptions,
+  failFn: (opts: FailOptions) => never = fail,
+): string {
   const value = process.env[name];
   if (value === undefined || !value.trim()) {
     const actual = value === undefined ? "missing" : "empty";
-    fail({
+    failFn({
       ...failOpts,
       what_happened: `${failOpts.what_happened} ${name} is ${actual}.`,
     });
@@ -96,40 +100,34 @@ export async function runCleanupCommand(
     },
     failWithFinish,
   );
-  const owner = (() => {
-    const value = process.env.BOOTSTRAP_OWNER;
-    if (value === undefined || !value.trim()) {
-      const actual = value === undefined ? "missing" : "empty";
-      failWithFinish({
-        code: "ENV-001",
-        severity: "FATAL",
-        title: "BOOTSTRAP_OWNER",
-        what_happened: `cleanup requires BOOTSTRAP_OWNER. BOOTSTRAP_OWNER is ${actual}.`,
-        next_step: "Set BOOTSTRAP_OWNER.",
-        alternative: "Export inline.",
-        example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
-        exitCode: 1,
-      });
-    }
-    return value.trim();
-  })();
-  const repo = (() => {
-    const value = process.env.BOOTSTRAP_REPO;
-    if (value === undefined || !value.trim()) {
-      const actual = value === undefined ? "missing" : "empty";
-      failWithFinish({
-        code: "ENV-001",
-        severity: "FATAL",
-        title: "BOOTSTRAP_REPO",
-        what_happened: `cleanup requires BOOTSTRAP_REPO. BOOTSTRAP_REPO is ${actual}.`,
-        next_step: "Set BOOTSTRAP_REPO.",
-        alternative: "Export inline.",
-        example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
-        exitCode: 1,
-      });
-    }
-    return value.trim();
-  })();
+  const owner = getEnv(
+    "BOOTSTRAP_OWNER",
+    {
+      code: "ENV-001",
+      severity: "FATAL",
+      title: "BOOTSTRAP_OWNER",
+      what_happened: "cleanup requires BOOTSTRAP_OWNER.",
+      next_step: "Set BOOTSTRAP_OWNER.",
+      alternative: "Export inline.",
+      example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
+      exitCode: 1,
+    },
+    failWithFinish,
+  );
+  const repo = getEnv(
+    "BOOTSTRAP_REPO",
+    {
+      code: "ENV-001",
+      severity: "FATAL",
+      title: "BOOTSTRAP_REPO",
+      what_happened: "cleanup requires BOOTSTRAP_REPO.",
+      next_step: "Set BOOTSTRAP_REPO.",
+      alternative: "Export inline.",
+      example: "BOOTSTRAP_OWNER=owner BOOTSTRAP_REPO=repo cursor-orch cleanup",
+      exitCode: 1,
+    },
+    failWithFinish,
+  );
   let repoStore: RepoStoreClient;
   if (deps.repoStore) {
     repoStore = deps.repoStore;
