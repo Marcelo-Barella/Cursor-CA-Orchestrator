@@ -512,6 +512,7 @@ describe("runOrchestration validation gate", () => {
     const repoStore = {
       async readFile(_runId: string, filePath: string): Promise<string> {
         if (filePath === "config.yaml") return yaml;
+        if (filePath === "state.json") return "";
         throw new Error(`unexpected read: ${filePath}`);
       },
       async writeFile(): Promise<void> {

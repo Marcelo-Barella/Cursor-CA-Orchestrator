@@ -1640,13 +1640,25 @@ async function persistUnexpectedFailure(state: OrchestrationState, repoStore: Re
   }
 }
 
-async function tryReadPersistedState(repoStore: RepoStoreClient, runId: string): Promise<OrchestrationState | null> {
-  let stateContent = "";
-  try {
-    stateContent = await repoStore.readFile(runId, "state.json");
-  } catch {
-    return null;
+const PERSISTED_STATE_READ_ATTEMPTS = 3;
+const PERSISTED_STATE_READ_RETRY_MS = 250;
+
+async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < PERSISTED_STATE_READ_ATTEMPTS; attempt++) {
+    try {
+      return await repoStore.readFile(runId, "state.json");
+    } catch (err) {
+      lastErr = err;
+      if (attempt + 1 < PERSISTED_STATE_READ_ATTEMPTS) {
+        await delay(PERSISTED_STATE_READ_RETRY_MS);
+      }
+    }
   }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+function tryDeserializeState(stateContent: string): OrchestrationState | null {
   if (!stateContent.trim()) {
     return null;
   }
@@ -1657,13 +1669,7 @@ async function tryReadPersistedState(repoStore: RepoStoreClient, runId: string):
   }
 }
 
-async function refuseResumeWithMissingState(repoStore: RepoStoreClient, runId: string): Promise<void> {
-  let stateContent = "";
-  try {
-    stateContent = await repoStore.readFile(runId, "state.json");
-  } catch {
-    return;
-  }
+async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
   if (stateContent.trim()) {
     return;
   }
@@ -1821,8 +1827,14 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const apiKey = process.env.CURSOR_API_KEY ?? "";
   const ghToken = process.env.GH_TOKEN ?? "";
 
-  await refuseResumeWithMissingState(repoStore, runId);
-  const persistedState = await tryReadPersistedState(repoStore, runId);
+  let stateContent = "";
+  try {
+    stateContent = await readStateJsonContent(repoStore, runId);
+  } catch (readErr) {
+    throw readErr instanceof Error ? readErr : new Error(String(readErr));
+  }
+  await refuseResumeWithEmptyState(repoStore, runId, stateContent);
+  const persistedState = tryDeserializeState(stateContent);
   if (persistedState?.status === "stopped") {
     console.info(`Run ${runId} is already stopped; skipping orchestration`);
     return;
@@ -1866,24 +1878,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   validateConfig(config);
 
   let state: OrchestrationState;
-  let stateContent = "";
-  try {
-    stateContent = await repoStore.readFile(runId, "state.json");
-  } catch (readErr) {
-    throw readErr instanceof Error ? readErr : new Error(String(readErr));
-  }
   if (!stateContent.trim()) {
-    let eventsContent = "";
-    try {
-      eventsContent = await repoStore.readFile(runId, "events.jsonl");
-    } catch {
-      /* treat as no prior events */
-    }
-    if (eventsContent.trim()) {
-      throw new Error(
-        `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
-      );
-    }
     state = createInitialState(config, runId);
   } else {
     try {
