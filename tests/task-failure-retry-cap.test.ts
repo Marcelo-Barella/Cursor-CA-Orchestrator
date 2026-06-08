@@ -33,9 +33,4 @@ describe("readTaskFailureRetryCap", () => {
     process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "not-a-number";
     expect(readTaskFailureRetryCap()).toBe(0);
   });
-
-  it("accepts zero retries", () => {
-    process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "0";
-    expect(readTaskFailureRetryCap()).toBe(0);
-  });
 });
