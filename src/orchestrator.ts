@@ -260,7 +260,7 @@ function isTerminalStatus(status: string): boolean {
 
 const IN_FLIGHT_LAUNCH_TERMINAL_EVENTS = new Set(["task_finished", "task_failed", "task_stopped"]);
 
-export function pickResumeRun(runs: SdkRun[]): SdkRun | null {
+export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   if (runs.length === 0) return null;
   const running = runs.find((run) => run.status === "running");
   if (running) return running;
@@ -1756,8 +1756,8 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       }
       const sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
-      const latest = pickResumeRun(runs.items);
-      if (!latest) {
+      const reattachRun = pickReattachRun(runs.items);
+      if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
@@ -1766,7 +1766,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const handle: WorkerHandle = {
         taskId,
         sdkAgent,
-        run: latest,
+        run: reattachRun,
         assistantMessages: [],
         transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId }),
         done: Promise.resolve(),

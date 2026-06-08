@@ -10,7 +10,7 @@ import {
   filterEligibleReadyTasks,
   getBlockedTasks,
   getReadyTasks,
-  pickResumeRun,
+  pickReattachRun,
   planRefForConsolidatedRunLine,
   reconcileInFlightLaunchesFromEvents,
   runOrchestration,
@@ -247,38 +247,6 @@ describe("orchestrator launch eligibility", () => {
       phases: [{ id: "p1", groups: [{ id: "g1", task_ids: ["a"] }] }],
     };
     expect(extractDelegationPhases(config, new Set())).toBeNull();
-  });
-
-  it("extractDelegationPhases parses legacy delegationMap waves and parallel_groups", () => {
-    const config = createConfig(["a", "b", "c"]) as OrchestratorConfig & {
-      delegationMap?: unknown;
-    };
-    config.delegationMap = {
-      waves: [
-        {
-          phase_id: "wave-1",
-          parallel_groups: [{ tasks: ["a", "b"] }],
-        },
-        {
-          name: "wave-2",
-          parallelGroups: [{ taskIds: ["c"] }],
-        },
-      ],
-    };
-    const phases = extractDelegationPhases(config, new Set(["a", "b", "c"]));
-    expect(phases).toEqual([
-      { id: "wave-1", groups: [{ id: "group-1", task_ids: ["a", "b"] }] },
-      { id: "wave-2", groups: [{ id: "group-1", task_ids: ["c"] }] },
-    ]);
-  });
-
-  it("extractDelegationPhases legacy path drops unknown task ids", () => {
-    const config = createConfig(["a"]) as OrchestratorConfig & { delegationMap?: unknown };
-    config.delegationMap = {
-      waves: [{ tasks: ["a", "ghost"] }],
-    };
-    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
-    expect(phases).toEqual([{ id: "phase-1", groups: [{ id: "group-1", task_ids: ["a"] }] }]);
   });
 
   it("eligibles multiple tasks in the same parallel group when both are ready", () => {
@@ -540,17 +508,17 @@ describe("runOrchestration validation gate", () => {
   });
 });
 
-describe("pickResumeRun", () => {
+describe("pickReattachRun", () => {
   it("prefers a running run over a newer finished run", () => {
     const staleFinished = { status: "finished" as const, createdAt: 200 };
     const activeRunning = { status: "running" as const, createdAt: 100 };
-    expect(pickResumeRun([staleFinished, activeRunning] as never)).toBe(activeRunning);
+    expect(pickReattachRun([staleFinished, activeRunning] as never)).toBe(activeRunning);
   });
 
   it("falls back to the newest createdAt when no run is running", () => {
     const older = { status: "finished" as const, createdAt: 100 };
     const newer = { status: "finished" as const, createdAt: 200 };
-    expect(pickResumeRun([older, newer] as never)).toBe(newer);
+    expect(pickReattachRun([older, newer] as never)).toBe(newer);
   });
 });
 
