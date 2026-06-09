@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   buildFailureDiagnosisLines,
+  hasAnyFailedAgent,
   inferCascadeSourceTaskId,
   isFailedDueToCascade,
   partitionFailedAgents,
+  stateNeedsFailureNarration,
 } from "../src/lib/failure-diagnostics.js";
 import type { AgentState, OrchestrationState } from "../src/state.js";
 
@@ -82,5 +84,21 @@ describe("failure-diagnostics", () => {
     expect(lines!.some((l) => l.includes("Root task(s)") && l.includes("a"))).toBe(true);
     expect(lines!.some((l) => l.includes("Cascaded") && l.includes("b"))).toBe(true);
     expect(lines!.some((l) => l.includes("cursor-orch logs --run run-z --task a"))).toBe(true);
+  });
+
+  it("stateNeedsFailureNarration is true for failed run status or any failed agent", () => {
+    const failedAgent = baseAgent({ task_id: "a", status: "failed", summary: "boom" });
+    expect(stateNeedsFailureNarration(shellState({ a: failedAgent }))).toBe(true);
+    const runningWithFailure = shellState({
+      a: baseAgent({ task_id: "a", status: "running" }),
+      b: failedAgent,
+    });
+    runningWithFailure.status = "running";
+    expect(stateNeedsFailureNarration(runningWithFailure)).toBe(true);
+    const clean = shellState({ a: baseAgent({ task_id: "a", status: "finished" }) });
+    clean.status = "completed";
+    expect(stateNeedsFailureNarration(clean)).toBe(false);
+    expect(hasAnyFailedAgent(clean.agents)).toBe(false);
+    expect(hasAnyFailedAgent(runningWithFailure.agents)).toBe(true);
   });
 });

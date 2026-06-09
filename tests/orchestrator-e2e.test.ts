@@ -960,6 +960,30 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t2.status).toBe("finished");
   });
 
+  it("does not inject dependency outputs from agent files with empty JSON objects", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        completedWorkerScript("t1", "run-dep-empty-json", { upstream_token: "canonical-t1" }),
+        completedWorkerScript("t2", "run-dep-empty-json"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        await baseWrite(runId, filename, "{}");
+      }
+    };
+    await runOrchestration("run-dep-empty-json", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    const t2Prompt = fake.sentPrompts[1]!;
+    expect(t2Prompt).not.toContain("canonical-t1");
+    expect(t2Prompt).not.toContain("upstream_token");
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
   it("ignores non-canonical agent files when gathering dependency outputs", async () => {
     const config = twoTaskChainConfig();
     const fake = new FakeAgentClient({
