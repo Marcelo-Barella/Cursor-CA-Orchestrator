@@ -77,6 +77,13 @@ describe("fetchAgentConversationTextFromApi", () => {
     await expect(fetchAgentConversationTextFromApi("agent-1", "key")).resolves.toBeNull();
   });
 
+  it("returns null when the response body is not valid JSON", async () => {
+    globalThis.fetch = vi.fn(
+      async () => new Response("not-json {{{", { status: 200, headers: { "Content-Type": "application/json" } }),
+    ) as typeof fetch;
+    await expect(fetchAgentConversationTextFromApi("agent-1", "key")).resolves.toBeNull();
+  });
+
   it("joins assistant_message text and URL-encodes the agent id", async () => {
     let requestedUrl = "";
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -233,6 +240,17 @@ describe("tryDownloadJsonArtifact", () => {
     });
     const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
     expect(result).toEqual({ value: null, error: "artifacts unsupported" });
+  });
+
+  it("returns download unsupported when downloadArtifact is unsupported", async () => {
+    const agent = mockAgent({
+      listArtifacts: async () => [{ path: "cursor-orch-output.json", sizeBytes: 1, updatedAt: "" }],
+      downloadArtifact: async () => {
+        throw new UnsupportedRunOperationError("downloadArtifact");
+      },
+    });
+    const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
+    expect(result).toEqual({ value: null, error: "download unsupported" });
   });
 });
 
