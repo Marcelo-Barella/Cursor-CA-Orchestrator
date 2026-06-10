@@ -1824,8 +1824,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningRan = false;
   let planningOk = false;
-  let planningCompletedMessage: string | null = null;
-  let planningUsedFullPhase = false;
+  let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
@@ -1841,17 +1840,20 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         config.tasks = canonReuse.tasks;
         config.delegation_map = canonReuse.delegation_map;
         await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-        planningCompletedMessage = `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`;
+        planningEvents = {
+          emitStarted: false,
+          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
+        };
         planningOk = true;
-      } catch {
-        /* try full planning */
-      }
+      } catch {}
     }
     if (!planningOk) {
-      planningUsedFullPhase = true;
       planningOk = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningOk) {
-        planningCompletedMessage = `Planning completed: ${config.tasks.length} tasks`;
+        planningEvents = {
+          emitStarted: true,
+          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
+        };
       }
     }
   }
@@ -1902,21 +1904,19 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
-    if (planningOk) {
-      if (planningUsedFullPhase) {
+    if (planningOk && planningEvents) {
+      if (planningEvents.emitStarted) {
         await appendEvent(
           repoStore,
           runId,
           makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
         );
       }
-      if (planningCompletedMessage) {
-        await appendEvent(
-          repoStore,
-          runId,
-          makeEvent("planning_completed", planningCompletedMessage, null, { phase_id: "planning", agent_kind: "phase" }),
-        );
-      }
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+      );
     }
     await syncToRepo(repoStore, runId, state);
   }
