@@ -1667,12 +1667,7 @@ async function refuseResumeWithMissingState(repoStore: RepoStoreClient, runId: s
   if (stateContent.trim()) {
     return;
   }
-  let eventsContent = "";
-  try {
-    eventsContent = await repoStore.readFile(runId, "events.jsonl");
-  } catch {
-    return;
-  }
+  const eventsContent = await repoStore.readFile(runId, "events.jsonl");
   if (eventsContent.trim()) {
     throw new Error(
       `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
@@ -1873,12 +1868,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     throw readErr instanceof Error ? readErr : new Error(String(readErr));
   }
   if (!stateContent.trim()) {
-    let eventsContent = "";
-    try {
-      eventsContent = await repoStore.readFile(runId, "events.jsonl");
-    } catch {
-      /* treat as no prior events */
-    }
+    const eventsContent = await repoStore.readFile(runId, "events.jsonl");
     if (eventsContent.trim()) {
       throw new Error(
         `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
