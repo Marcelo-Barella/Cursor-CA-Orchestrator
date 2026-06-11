@@ -1907,9 +1907,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
           completedDetail: `Planning completed: ${taskCount} tasks (reused existing plan)`,
         };
         planningOk = true;
-      } catch {
-        /* stale or invalid task-plan.json — fall through to full planning */
-      }
+      } catch {}
     }
     if (!planningOk) {
       try {

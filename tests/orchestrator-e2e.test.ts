@@ -11,6 +11,7 @@ import {
   assistantText,
   statusMessage,
 } from "./support/fake-agent-client.js";
+import { promptOnlyConfig } from "./support/reattach-fixtures.js";
 
 type FileStore = Map<string, string>;
 
@@ -83,20 +84,6 @@ function singleTaskConfig(): OrchestratorConfig {
         repo_config: null,
       },
     ],
-    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-    bootstrap_repo_name: "cursor-orch-bootstrap",
-  };
-}
-
-function promptOnlyConfig(): OrchestratorConfig {
-  return {
-    name: "plan-demo",
-    model: { id: "composer-2" },
-    prompt: "Ship the feature across repos.",
-    repositories: {
-      svc: { url: "https://github.com/acme/svc", ref: "main" },
-    },
-    tasks: [],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
   };
