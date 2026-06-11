@@ -1890,9 +1890,9 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningRan = false;
   let planningOk = false;
-  let ranFullPlanningPhase = false;
+  let planningUsedFullPhase = false;
   let planningFailedDetail: string | null = null;
-  let planningCompletedDetail: string | null = null;
+  let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
@@ -1908,18 +1908,22 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         config.tasks = canonReuse.tasks;
         config.delegation_map = canonReuse.delegation_map;
         await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-        planningCompletedDetail = `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`;
+        planningEvents = {
+          emitStarted: false,
+          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
+        };
         planningOk = true;
-      } catch {
-        planningOk = false;
-      }
+      } catch {}
     }
     if (!planningOk) {
-      ranFullPlanningPhase = true;
+      planningUsedFullPhase = true;
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
         planningOk = true;
-        planningCompletedDetail = `Planning completed: ${config.tasks.length} tasks`;
+        planningEvents = {
+          emitStarted: true,
+          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
+        };
       } else {
         planningFailedDetail = planningResult.error;
       }
@@ -1956,20 +1960,27 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
-    if (ranFullPlanningPhase) {
+    if (planningOk && planningEvents) {
+      if (planningEvents.emitStarted) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
       await appendEvent(
         repoStore,
         runId,
-        makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
-      );
-    }
-    if (planningOk && planningCompletedDetail) {
-      await appendEvent(
-        repoStore,
-        runId,
-        makeEvent("planning_completed", planningCompletedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+        makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
     } else if (!planningOk && planningFailedDetail !== null) {
+      if (planningUsedFullPhase) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
       await appendEvent(
         repoStore,
         runId,
