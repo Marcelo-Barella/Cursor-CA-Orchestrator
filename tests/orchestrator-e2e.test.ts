@@ -1048,6 +1048,44 @@ describe("runOrchestration with SDK (happy path)", () => {
     );
   });
 
+  it("does not persist task agents when config.yaml write fails during planning", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const { store: baseStore, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    const store = {
+      ...baseStore,
+      async writeFile(runId: string, filename: string, content: string): Promise<void> {
+        if (filename === "config.yaml") {
+          throw new Error("config write failed");
+        }
+        await baseStore.writeFile(runId, filename, content);
+      },
+    } as unknown as RepoStoreClient;
+    const fake = new FakeAgentClient({
+      defaultScripts: [{ sendThrows: new Error("planner fallback failed") }],
+    });
+
+    await expect(runOrchestration("run-config-write-fail", fake, store)).rejects.toThrow(/planner fallback failed/);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(Object.keys(state.agents)).toEqual([]);
+    expect(files.get("config.yaml")).not.toContain("t1");
+  });
+
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
     const taskPlan = JSON.stringify({

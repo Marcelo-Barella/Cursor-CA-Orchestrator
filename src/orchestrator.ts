@@ -1647,8 +1647,12 @@ async function runPlanningPhase(
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
     }
-    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-    const parsedTasks = parseTaskPlan(planContent, config);
+    const bootstrapEntry = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+    const draftConfig: OrchestratorConfig = {
+      ...config,
+      repositories: { ...config.repositories, __bootstrap__: bootstrapEntry },
+    };
+    const parsedTasks = parseTaskPlan(planContent, draftConfig);
     const constraints = extractConstraintsFromPrompt(config.prompt);
     if (constraints.length > 0) {
       const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
@@ -1659,12 +1663,11 @@ async function runPlanningPhase(
         throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
       }
     }
-    config.tasks = parsedTasks;
-    const canonPlan = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonPlan.repositories;
-    config.tasks = canonPlan.tasks;
-    config.delegation_map = canonPlan.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+    const plannedConfig = canonicalizeOrchestratorConfig({ ...draftConfig, tasks: parsedTasks });
+    await repoStore.writeFile(runId, "config.yaml", toYaml(plannedConfig));
+    config.repositories = plannedConfig.repositories;
+    config.tasks = plannedConfig.tasks;
+    config.delegation_map = plannedConfig.delegation_map;
     return { ok: true };
   } catch (exc) {
     return { ok: false, error: String(exc) };
@@ -1900,17 +1903,20 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       try {
         const ghUser = await resolveGithubUsername(ghToken);
         const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-        config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-        const parsedTasks = parseTaskPlan(planContent, config);
-        config.tasks = parsedTasks;
-        const canonReuse = canonicalizeOrchestratorConfig(config);
-        config.repositories = canonReuse.repositories;
-        config.tasks = canonReuse.tasks;
-        config.delegation_map = canonReuse.delegation_map;
-        await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+        const bootstrapEntry = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+        const draftConfig: OrchestratorConfig = {
+          ...config,
+          repositories: { ...config.repositories, __bootstrap__: bootstrapEntry },
+        };
+        const parsedTasks = parseTaskPlan(planContent, draftConfig);
+        const plannedConfig = canonicalizeOrchestratorConfig({ ...draftConfig, tasks: parsedTasks });
+        await repoStore.writeFile(runId, "config.yaml", toYaml(plannedConfig));
+        config.repositories = plannedConfig.repositories;
+        config.tasks = plannedConfig.tasks;
+        config.delegation_map = plannedConfig.delegation_map;
         planningEvents = {
           emitStarted: false,
-          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
+          completedDetail: `Planning completed: ${plannedConfig.tasks.length} tasks (reused existing plan)`,
         };
         planningOk = true;
       } catch {}
