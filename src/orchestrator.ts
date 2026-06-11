@@ -80,6 +80,12 @@ function resetAgentToSchedulableForRetry(agent: AgentState): void {
   agent.cascade_source_task_id = null;
 }
 
+function resetAgentForStaleLaunchRelaunch(agent: AgentState): void {
+  agent.agent_id = null;
+  agent.status = "pending";
+  agent.started_at = null;
+}
+
 async function handleTaskFailureWithOptionalRetry(
   ctx: LoopContext,
   taskId: string,
@@ -284,8 +290,8 @@ export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   return best;
 }
 
-export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): boolean {
-  let changed = false;
+export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): string[] {
+  const recoveredTaskIds: string[] = [];
   for (const agent of Object.values(state.agents)) {
     if (agent.agent_id || agent.status !== "pending") continue;
     let lastLaunch: OrchestrationEvent | null = null;
@@ -311,9 +317,9 @@ export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, e
     if (branch && !agent.branch_name) {
       agent.branch_name = branch;
     }
-    changed = true;
+    recoveredTaskIds.push(agent.task_id);
   }
-  return changed;
+  return recoveredTaskIds;
 }
 
 function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
@@ -697,6 +703,7 @@ type LoopContext = {
   apiKey: string;
   ghToken: string;
   activeWorkers: Map<string, WorkerHandle>;
+  eventRecoveredTaskIds: Set<string>;
   dirty: { value: boolean };
   wakeup: { resolve: () => void; promise: Promise<void> };
   stopRequested: { value: boolean };
@@ -1751,6 +1758,11 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
+        if (ctx.eventRecoveredTaskIds.has(taskId)) {
+          resetAgentForStaleLaunchRelaunch(agent);
+          markStateDirty(ctx);
+          continue;
+        }
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
         continue;
@@ -1784,6 +1796,11 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
+      if (ctx.eventRecoveredTaskIds.has(taskId)) {
+        resetAgentForStaleLaunchRelaunch(agent);
+        markStateDirty(ctx);
+        continue;
+      }
       agent.status = "failed";
       agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
       markStateDirty(ctx);
@@ -1934,7 +1951,23 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    state = createInitialState(config, runId);
+    let lateStateContent = stateContent;
+    try {
+      lateStateContent = await repoStore.readFile(runId, "state.json");
+    } catch (readErr) {
+      throw readErr instanceof Error ? readErr : new Error(String(readErr));
+    }
+    await refuseResumeWithEmptyState(repoStore, runId, lateStateContent);
+    if (!lateStateContent.trim()) {
+      state = createInitialState(config, runId);
+    } else {
+      try {
+        state = deserialize(lateStateContent);
+      } catch (parseErr) {
+        const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+        throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
+      }
+    }
   } else if (parsedState) {
     state = parsedState;
   } else {
@@ -1943,7 +1976,8 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   reconcileAgentsFromConfig(state, config);
   const launchEvents = await readEvents(repoStore, runId);
-  if (reconcileInFlightLaunchesFromEvents(state, launchEvents)) {
+  const eventRecoveredTaskIds = reconcileInFlightLaunchesFromEvents(state, launchEvents);
+  if (eventRecoveredTaskIds.length > 0) {
     await syncToRepo(repoStore, runId, state);
   }
 
@@ -2013,6 +2047,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     apiKey,
     ghToken,
     activeWorkers: new Map(),
+    eventRecoveredTaskIds: new Set(eventRecoveredTaskIds),
     dirty: { value: true },
     wakeup: createWakeup(),
     stopRequested: { value: false },
