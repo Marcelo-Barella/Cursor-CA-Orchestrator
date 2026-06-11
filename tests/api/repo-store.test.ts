@@ -217,4 +217,30 @@ describe("RepoStoreClient", () => {
     const client = new RepoStoreClient("ghp-test", owner, repo);
     await expect(client.getRunBranchCommitDate(runId)).resolves.toBeNull();
   });
+
+  it("getRunBranchCommitDate falls back to author date when committer date is absent", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          commit: { commit: { author: { date: "2019-06-15T12:00:00Z" } } },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.getRunBranchCommitDate(runId)).resolves.toEqual(new Date("2019-06-15T12:00:00Z"));
+  });
+
+  it("getRunBranchCommitDate returns null when the payload date is invalid", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          commit: { commit: { committer: { date: "not-a-date" } } },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.getRunBranchCommitDate(runId)).resolves.toBeNull();
+  });
 });
