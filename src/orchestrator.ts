@@ -1736,6 +1736,10 @@ function parseStateJsonContent(stateContent: string): {
   }
 }
 
+async function rereadStateJsonIfEmpty(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<string> {
+  return stateContent.trim() ? stateContent : repoStore.readFile(runId, "state.json");
+}
+
 async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
   if (stateContent.trim()) {
     return;
@@ -1890,9 +1894,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const ghToken = process.env.GH_TOKEN ?? "";
 
   let stateContent = await readStateJsonContent(repoStore, runId);
-  if (!stateContent.trim()) {
-    stateContent = await repoStore.readFile(runId, "state.json");
-  }
+  stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
   await refuseResumeWithEmptyState(repoStore, runId, stateContent);
   let { parsedState, stateParseDetail } = parseStateJsonContent(stateContent);
   if (parsedState?.status === "stopped") {
@@ -1945,7 +1947,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   validateConfig(config);
 
   if (!stateContent.trim()) {
-    stateContent = await repoStore.readFile(runId, "state.json");
+    stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
     await refuseResumeWithEmptyState(repoStore, runId, stateContent);
     ({ parsedState, stateParseDetail } = parseStateJsonContent(stateContent));
   }
