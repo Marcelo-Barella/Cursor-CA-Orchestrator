@@ -197,10 +197,7 @@ describe("reattachWorkers running tasks", () => {
     const config = singleTaskConfig();
     const runId = "run-recover-resume-throw";
     const deadAgentId = "agent-dead-resume-throw";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    const state = runningOrchestrationState(config, runId);
 
     const launchScript = completedResumeScript(runId);
     const fake = new FakeAgentClient({
@@ -210,27 +207,10 @@ describe("reattachWorkers running tasks", () => {
     });
     vi.spyOn(fake, "resumeCloudAgent").mockRejectedValue(new Error("agent gone"));
 
-    const launchEvent = JSON.stringify({
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: `Launched t1 (${deadAgentId})`,
-      payload: {
-        agent_id: deadAgentId,
-        run_id: "run-dead",
-        repository: "https://github.com/acme/svc",
-        ref: "main",
-        branch: `cursor-orch/${runId}/t1`,
-      },
-    });
-
     const { store, files } = createInMemoryRepoStore({
       "config.yaml": toYaml(config),
       "state.json": serialize(state),
-      "events.jsonl": `${launchEvent}\n`,
+      "events.jsonl": `${taskLaunchedEventLine(runId, deadAgentId, { runIdInPayload: "run-dead" })}\n`,
     });
 
     await runOrchestration(runId, fake, store);
