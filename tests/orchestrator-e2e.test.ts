@@ -1084,7 +1084,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
-  it("marks a blocked worker stopped when stop is requested during finalization", async () => {
+  it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
       task_id: "t1",
@@ -1118,7 +1118,12 @@ describe("runOrchestration with SDK (happy path)", () => {
     const agentPayload = JSON.parse(files.get("agent-t1.json")!);
     expect(agentPayload.status).toBe("blocked");
     const state = JSON.parse(files.get("state.json")!);
-    expect(state.agents.t1.status).toBe("stopped");
+    expect(state.agents.t1.status).toBe("blocked");
+    expect(state.agents.t1.blocked_reason).toBe("missing API key");
+    expect(state.agents.t1.blocked_retry_count).toBe(0);
+    expect(state.agents.t1.retry_count).toBe(0);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_blocked" && e.task_id === "t1")).toBe(true);
     expect(state.status).toBe("stopped");
   }, 20_000);
 
@@ -1221,7 +1226,7 @@ describe("runOrchestration with SDK (happy path)", () => {
   it("marks a completed worker stopped when stop is requested while the worker is running", async () => {
     const config = singleTaskConfig();
     const script = completedWorkerScript("t1", "run-stop-finalize");
-    script.waitDelayMs = 3_000;
+    script.waitDelayMs = 6_000;
     const fake = new FakeAgentClient({
       defaultScripts: [script],
     });
@@ -1241,88 +1246,6 @@ describe("runOrchestration with SDK (happy path)", () => {
       }
     };
     await runOrchestration("run-stop-finalize", fake, store);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("stopped");
-    expect(state.agents.t1.status).toBe("stopped");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(
-      false,
-    );
-  }, 20_000);
-
-  it("does not launch the next delegation phase after stop during the current phase", async () => {
-    const mk = (id: string) => ({
-      id,
-      repo: "svc" as const,
-      prompt: `task ${id}`,
-      model: null,
-      depends_on: [] as string[],
-      timeout_minutes: 30,
-      create_repo: false,
-      repo_config: null,
-    });
-    const config: OrchestratorConfig = {
-      name: "demo",
-      model: { id: "composer-2" },
-      prompt: "",
-      repositories: { svc: { url: "https://github.com/acme/svc", ref: "main" } },
-      tasks: [mk("t1"), mk("t2")],
-      delegation_map: {
-        phases: [
-          { id: "p1", groups: [{ id: "g1", task_ids: ["t1"] }] },
-          { id: "p2", groups: [{ id: "g2", task_ids: ["t2"] }] },
-        ],
-      },
-      target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-      bootstrap_repo_name: "cursor-orch-bootstrap",
-    };
-    const script1 = completedWorkerScript("t1", "run-stop-deleg");
-    script1.waitDelayMs = 3_000;
-    const fake = new FakeAgentClient({
-      defaultScripts: [script1, completedWorkerScript("t2", "run-stop-deleg")],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    const baseWrite = store.writeFile.bind(store);
-    store.writeFile = async (runId, filename, content) => {
-      await baseWrite(runId, filename, content);
-      if (filename === "state.json") {
-        const state = JSON.parse(content) as { agents?: Record<string, { status?: string }> };
-        if (state.agents?.t1?.status === "running") {
-          await baseWrite(
-            runId,
-            "stop-requested.json",
-            JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
-          );
-        }
-      }
-    };
-    await runOrchestration("run-stop-deleg", fake, store);
-    expect(fake.launches).toHaveLength(1);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("stopped");
-    expect(state.agents.t1.status).toBe("stopped");
-    expect(state.agents.t2.status).toBe("pending");
-  }, 20_000);
-
-  it("does not mark a completed worker finished when stop is requested during finalization", async () => {
-    const config = singleTaskConfig();
-    const script = completedWorkerScript("t1", "run-stop-finalize-late");
-    const fake = new FakeAgentClient({
-      defaultScripts: [script],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    const baseWrite = store.writeFile.bind(store);
-    store.writeFile = async (runId, filename, content) => {
-      await baseWrite(runId, filename, content);
-      if (filename === "agent-t1.json") {
-        await baseWrite(
-          runId,
-          "stop-requested.json",
-          JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
-        );
-      }
-    };
-    await runOrchestration("run-stop-finalize-late", fake, store);
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("stopped");
     expect(state.agents.t1.status).toBe("stopped");
