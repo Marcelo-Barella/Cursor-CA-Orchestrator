@@ -608,7 +608,7 @@ describe("runOrchestration validation gate", () => {
       },
     } as unknown as AgentClient;
     await runOrchestration("run-reread", agentClient, repoStore);
-    expect(stateReadCount).toBeGreaterThanOrEqual(2);
+    expect(stateReadCount).toBe(2);
     expect(launchCount).toBe(0);
   });
 
