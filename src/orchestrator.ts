@@ -1611,9 +1611,9 @@ async function applyTaskPlanContent(
   const parsedTasks = parseTaskPlan(planContent, config);
   const constraints = extractConstraintsFromPrompt(config.prompt);
   if (constraints.length > 0) {
-    const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-    if (!result.valid) {
-      const detail = result.violations
+    const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+    if (!constraintValidation.valid) {
+      const detail = constraintValidation.violations
         .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
         .join("; ");
       throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
@@ -1921,6 +1921,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         };
       } catch (planningExc) {
         planningFailureCause = planningExc;
+        planningEvents = { emitStarted: true, completedDetail: "" };
       }
     }
   }
@@ -1955,7 +1956,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
-    if (planningOk && planningEvents?.emitStarted) {
+    if (planningEvents?.emitStarted) {
       await appendEvent(
         repoStore,
         runId,
