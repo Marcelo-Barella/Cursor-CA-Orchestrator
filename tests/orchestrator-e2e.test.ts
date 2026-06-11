@@ -1142,6 +1142,46 @@ describe("runOrchestration with SDK (happy path)", () => {
     }
   });
 
+  it("preserves cached task-plan when reuse fails on transient config write", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    let configWrites = 0;
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
+        completedWorkerScript("t1", "run-reuse-transient-write"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    const baseWriteFile = store.writeFile.bind(store);
+    vi.spyOn(store, "writeFile").mockImplementation(async (runId, filename, content) => {
+      if (filename === "config.yaml" && configWrites === 0) {
+        configWrites += 1;
+        throw new Error("transient config write failure");
+      }
+      return baseWriteFile(runId, filename, content);
+    });
+
+    await runOrchestration("run-reuse-transient-write", fake, store);
+
+    expect(files.get("task-plan.json")).toBe(taskPlan);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    expect(fake.launches).toHaveLength(2);
+  });
+
   it("defers planning_failed for constraint violations during full planning and allows retry", async () => {
     const config = {
       ...promptOnlyConfig(),

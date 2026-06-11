@@ -1602,6 +1602,8 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
+const PLAN_CONSTRAINT_VALIDATION_FAILED = "Plan constraint validation failed";
+
 function assertPlanMeetsPromptConstraints(parsedTasks: { id: string; prompt: string }[], prompt: string | undefined): void {
   const constraints = extractConstraintsFromPrompt(prompt ?? "");
   if (constraints.length === 0) return;
@@ -1610,7 +1612,21 @@ function assertPlanMeetsPromptConstraints(parsedTasks: { id: string; prompt: str
     const detail = result.violations
       .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
       .join("; ");
-    throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+    throw new Error(`${PLAN_CONSTRAINT_VALIDATION_FAILED}: ${detail}. Re-plan with full constraint coverage.`);
+  }
+}
+
+function shouldInvalidateCachedTaskPlan(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.message.includes(PLAN_CONSTRAINT_VALIDATION_FAILED)) return true;
+  return error.message.startsWith("Task plan must") || error.message.startsWith("Task missing required field");
+}
+
+async function deleteCachedTaskPlan(repoStore: RepoStoreClient, runId: string): Promise<void> {
+  try {
+    await repoStore.deleteFile(runId, "task-plan.json");
+  } catch {
+    /* advisory */
   }
 }
 
@@ -1622,11 +1638,6 @@ async function runPlanningPhase(
   apiKey: string,
 ): Promise<PlanningPhaseResult> {
   try {
-    try {
-      await repoStore.deleteFile(runId, "task-plan.json");
-    } catch {
-      /* advisory */
-    }
     const ghToken = process.env.GH_TOKEN!;
     const ghUser = await resolveGithubUsername(ghToken);
     const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
@@ -1922,11 +1933,9 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
           completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
         };
         planningOk = true;
-      } catch {
-        try {
-          await repoStore.deleteFile(runId, "task-plan.json");
-        } catch {
-          /* advisory */
+      } catch (error) {
+        if (shouldInvalidateCachedTaskPlan(error)) {
+          await deleteCachedTaskPlan(repoStore, runId);
         }
       }
     }
