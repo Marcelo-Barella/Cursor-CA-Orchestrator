@@ -193,6 +193,32 @@ describe("reattachWorkers running tasks", () => {
     expect(fake.launches).toHaveLength(0);
   });
 
+  it("marks failed when event-recovered agent resumes but listRuns throws", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-recover-listruns-throw";
+    const liveAgentId = "agent-live-listruns";
+    const state = runningOrchestrationState(config, runId);
+
+    const fake = new FakeAgentClient({
+      runsByAgent: { [liveAgentId]: [] },
+      conversationText: null,
+    });
+    listRunsMock.mockRejectedValue(new Error("listRuns transient failure"));
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+      "events.jsonl": `${taskLaunchedEventLine(runId, liveAgentId)}\n`,
+    });
+
+    await expect(runOrchestration(runId, fake, store)).rejects.toThrow(/Failed tasks: t1/);
+
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.agents.t1.status).toBe("failed");
+    expect(final.agents.t1.summary).toBe("Resume failed: listRuns transient failure");
+    expect(fake.launches).toHaveLength(0);
+  });
+
   it("relaunches when event-recovered agent resumeCloudAgent throws", async () => {
     const config = singleTaskConfig();
     const runId = "run-recover-resume-throw";
