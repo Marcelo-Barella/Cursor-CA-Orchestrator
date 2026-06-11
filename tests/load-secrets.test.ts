@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadSecretsFromRepo } from "../src/orchestrator.js";
 
 const execSyncMock = vi.hoisted(() => vi.fn());
@@ -10,10 +10,6 @@ vi.mock("node:child_process", () => ({
 describe("loadSecretsFromRepo", () => {
   beforeEach(() => {
     execSyncMock.mockReset();
-  });
-
-  afterEach(() => {
-    vi.clearAllMocks();
   });
 
   it("returns GH_TOKEN and CURSOR_API_KEY from secrets.json", () => {
@@ -66,14 +62,16 @@ describe("loadSecretsFromRepo", () => {
     expect(() => loadSecretsFromRepo("run-1")).toThrow(/must be a JSON object/);
   });
 
-  it("throws when GH_TOKEN or CURSOR_API_KEY is missing or empty", () => {
+  it("throws when GH_TOKEN is missing or empty", () => {
     execSyncMock.mockImplementation((cmd: string) => {
       if (cmd.includes("git fetch")) return "";
       if (cmd.includes("secrets.json")) return JSON.stringify({ GH_TOKEN: "", CURSOR_API_KEY: "sk_x" });
       throw new Error(`unexpected: ${cmd}`);
     });
     expect(() => loadSecretsFromRepo("run-1")).toThrow(/missing or empty GH_TOKEN/);
+  });
 
+  it("throws when CURSOR_API_KEY is missing or empty", () => {
     execSyncMock.mockImplementation((cmd: string) => {
       if (cmd.includes("git fetch")) return "";
       if (cmd.includes("secrets.json")) return JSON.stringify({ GH_TOKEN: "ghp_x" });
