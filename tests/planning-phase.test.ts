@@ -103,6 +103,19 @@ describe("planning phase", () => {
     expect(events.some((e) => e.event_type === "planning_failed")).toBe(true);
   });
 
+  it("reports planning timeout when listRuns returns no usable planner results", async () => {
+    const config = promptOnlyConfig();
+    waitForPlanMock.mockResolvedValue(null);
+    listRunsMock.mockResolvedValue({ items: [{ result: null }, { result: "   " }] });
+    const fake = new FakeAgentClient({
+      defaultScripts: [{ events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } }],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-listruns-empty", fake, store)).rejects.toThrow(/Timed out waiting for task plan/);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.phase_agents.planning.status).toBe("failed");
+  });
+
   it("records planning_failed for invalid reused task-plan without launching planner", async () => {
     const config = promptOnlyConfig();
     const fake = new FakeAgentClient({
@@ -146,6 +159,85 @@ describe("planning phase", () => {
     const reuseEvents = parseEvents(reuse.files);
     expect(reuseEvents.some((e) => e.event_type === "planning_started")).toBe(false);
     expect(waitForPlanMock).not.toHaveBeenCalled();
+  });
+
+  it("defers planning events until after orchestration_started", async () => {
+    const config = promptOnlyConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [{ sendThrows: new Error("planner send failed") }],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-plan-event-order", fake, store)).rejects.toThrow(/planner send failed/);
+    const events = parseEvents(files);
+    const startedIdx = events.findIndex((e) => e.event_type === "orchestration_started");
+    const failedIdx = events.findIndex((e) => e.event_type === "planning_failed");
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(failedIdx).toBeGreaterThan(startedIdx);
+  });
+
+  it("orders fresh planning events as orchestration_started, planning_started, planning_completed", async () => {
+    const config = promptOnlyConfig();
+    waitForPlanMock.mockResolvedValue(validTaskPlanJson());
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
+        completedWorkerScript("t1", "run-fresh-order"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-fresh-order", fake, store);
+    const events = parseEvents(files);
+    const types = events.map((e) => e.event_type);
+    const orchIdx = types.indexOf("orchestration_started");
+    const planStartIdx = types.indexOf("planning_started");
+    const planDoneIdx = types.indexOf("planning_completed");
+    expect(orchIdx).toBeLessThan(planStartIdx);
+    expect(planStartIdx).toBeLessThan(planDoneIdx);
+    expect(events[planDoneIdx]!.detail).toContain("Planning completed: 1 tasks");
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.phase_agents.planning.status).toBe("finished");
+  });
+
+  it("marks planning phase finished when reusing a valid task-plan.json", async () => {
+    const config = promptOnlyConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", "run-reuse-phase")],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": validTaskPlanJson(),
+    });
+    await runOrchestration("run-reuse-phase", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.phase_agents.planning.status).toBe("finished");
+    expect(fake.launches).toHaveLength(1);
+  });
+
+  it("fails fresh planning when planner output violates prompt constraints", async () => {
+    const config = {
+      ...promptOnlyConfig(),
+      prompt: "Every route must use your translation method.",
+    };
+    const badPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Do unrelated work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    waitForPlanMock.mockResolvedValue(badPlan);
+    const fake = new FakeAgentClient({
+      defaultScripts: [{ events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } }],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-constraint-fresh", fake, store)).rejects.toThrow(/Plan constraint validation failed/);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.phase_agents.planning.status).toBe("failed");
+    expect(parseEvents(files).some((e) => e.event_type === "planning_failed")).toBe(true);
   });
 
   it("fails planning when reused plan violates prompt constraints", async () => {
