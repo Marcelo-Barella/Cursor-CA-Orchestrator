@@ -933,9 +933,15 @@ describe("runOrchestration with SDK (happy path)", () => {
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
 
     await expect(runOrchestration("run-plan-retry", failFake, store)).rejects.toThrow(/planner boom/);
-    expect(files.get("state.json")).toBeTruthy();
+    const stateAfterFailure = JSON.parse(files.get("state.json")!);
+    expect(stateAfterFailure.status).toBe("running");
+    expect(stateAfterFailure.phase_agents.planning.status).toBe("failed");
     const eventsAfterFailure = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(eventsAfterFailure.some((e: { event_type: string }) => e.event_type === "planning_failed")).toBe(true);
+    const startedIdx = eventsAfterFailure.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
+    const failedIdx = eventsAfterFailure.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(failedIdx).toBeGreaterThan(startedIdx);
+    expect(eventsAfterFailure[failedIdx]!.detail).toContain("planner boom");
 
     files.set("task-plan.json", taskPlan);
     const okFake = new FakeAgentClient({
