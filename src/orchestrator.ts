@@ -604,17 +604,9 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
   }
 }
 
-function agentsSatisfy(state: OrchestrationState, match: (status: string) => boolean): boolean {
-  const agents = Object.values(state.agents);
-  return agents.length > 0 && agents.every((a) => match(a.status));
-}
-
-function checkAllFinished(state: OrchestrationState): boolean {
-  return agentsSatisfy(state, (status) => status === "finished");
-}
-
 export function allAgentsTerminal(state: OrchestrationState): boolean {
-  return agentsSatisfy(state, isTerminalStatus);
+  const agents = Object.values(state.agents);
+  return agents.length > 0 && agents.every((a) => isTerminalStatus(a.status));
 }
 
 function checkTerminalFailure(state: OrchestrationState): boolean {
@@ -1506,8 +1498,9 @@ async function maybeFinalizePullRequests(
 async function checkCompletion(ctx: LoopContext): Promise<boolean> {
   if (ctx.activeWorkers.size > 0) return false;
   if (!allAgentsTerminal(ctx.state)) return false;
-  if (!checkAllFinished(ctx.state)) {
-    const hasFailed = Object.values(ctx.state.agents).some((a) => a.status === "failed");
+  const agents = Object.values(ctx.state.agents);
+  if (!agents.every((a) => a.status === "finished")) {
+    const hasFailed = agents.some((a) => a.status === "failed");
     if (hasFailed) return false;
     ctx.state.status = "stopped";
     await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
