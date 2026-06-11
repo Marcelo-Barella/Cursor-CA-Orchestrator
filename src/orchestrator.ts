@@ -1607,6 +1607,20 @@ type PlanningOutcome =
   | { kind: "ok"; emitStarted: boolean; completedDetail: string }
   | { kind: "failed"; emitStarted: boolean; error: string };
 
+async function persistPlanTasks(
+  config: OrchestratorConfig,
+  runId: string,
+  repoStore: RepoStoreClient,
+  parsedTasks: TaskConfig[],
+): Promise<void> {
+  config.tasks = parsedTasks;
+  const canon = canonicalizeOrchestratorConfig(config);
+  config.repositories = canon.repositories;
+  config.tasks = canon.tasks;
+  config.delegation_map = canon.delegation_map;
+  await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+}
+
 async function tryReuseExistingPlan(
   config: OrchestratorConfig,
   runId: string,
@@ -1622,12 +1636,7 @@ async function tryReuseExistingPlan(
     const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
     config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
     const parsedTasks = parseTaskPlan(planContent, config);
-    config.tasks = parsedTasks;
-    const canonReuse = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonReuse.repositories;
-    config.tasks = canonReuse.tasks;
-    config.delegation_map = canonReuse.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+    await persistPlanTasks(config, runId, repoStore, parsedTasks);
     return `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`;
   } catch {
     return null;
@@ -1721,12 +1730,7 @@ async function runPlanningPhase(
         throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
       }
     }
-    config.tasks = parsedTasks;
-    const canonPlan = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonPlan.repositories;
-    config.tasks = canonPlan.tasks;
-    config.delegation_map = canonPlan.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+    await persistPlanTasks(config, runId, repoStore, parsedTasks);
     return { ok: true };
   } catch (exc) {
     return { ok: false, error: String(exc) };
@@ -2002,15 +2006,14 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   if (planningOutcome.kind === "failed") {
-    const failureMessage = planningOutcome.error;
     state.status = "failed";
-    state.error = failureMessage;
+    state.error = planningOutcome.error;
     if (state.main_agent) {
       state.main_agent.status = "failed";
       state.main_agent.finished_at = nowIso();
     }
     await syncToRepo(repoStore, runId, state);
-    throw new Error(failureMessage);
+    throw new Error(planningOutcome.error);
   }
 
   const graph = buildDependencyGraph(config.tasks);
