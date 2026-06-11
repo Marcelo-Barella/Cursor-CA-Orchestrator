@@ -584,6 +584,14 @@ async function resolveGithubUsername(ghToken: string): Promise<string> {
   return data.login;
 }
 
+async function resolveBootstrapContext(
+  ghToken: string,
+  bootstrapRepoName: string,
+): Promise<{ ghUser: string; bootstrapUrl: string }> {
+  const ghUser = await resolveGithubUsername(ghToken);
+  return { ghUser, bootstrapUrl: `https://github.com/${ghUser}/${bootstrapRepoName}` };
+}
+
 function resolveBootstrapRef(): string {
   const r = process.env.CURSOR_ORCH_RUNTIME_REF;
   if (r?.trim()) {
@@ -608,8 +616,7 @@ async function resolveRepoForTask(
   ghToken: string,
 ): Promise<[string, string]> {
   if (task.create_repo) {
-    const ghUser = await resolveGithubUsername(ghToken);
-    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+    const { bootstrapUrl } = await resolveBootstrapContext(ghToken, config.bootstrap_repo_name);
     return [bootstrapUrl, resolveBootstrapRef()];
   }
   if (task.repo in config.repositories) {
@@ -1628,17 +1635,20 @@ async function applyTaskPlanContent(
   return parsedTasks.length;
 }
 
+type PlanningOutcome =
+  | { status: "finished"; emitStarted: boolean; detail: string }
+  | { status: "failed"; detail: string };
+
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
   agentClient: AgentClient,
   repoStore: RepoStoreClient,
   apiKey: string,
+  ghToken: string,
 ): Promise<void> {
-  const ghToken = process.env.GH_TOKEN!;
-  const ghUser = await resolveGithubUsername(ghToken);
+  const { ghUser, bootstrapUrl } = await resolveBootstrapContext(ghToken, config.bootstrap_repo_name);
   const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
-  const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
   const plannerAgent = await agentClient.createCloudAgent({
     apiKey,
     model: config.model,
@@ -1890,16 +1900,12 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     return;
   }
 
-  type PlanningOutcome =
-    | { status: "finished"; emitStarted: boolean; detail: string }
-    | { status: "failed"; detail: string };
   let planningOutcome: PlanningOutcome | null = null;
   if (config.prompt && !config.tasks.length) {
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
       try {
-        const ghUser = await resolveGithubUsername(ghToken);
-        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+        const { bootstrapUrl } = await resolveBootstrapContext(ghToken, config.bootstrap_repo_name);
         const taskCount = await applyTaskPlanContent(config, runId, repoStore, planContent, bootstrapUrl);
         planningOutcome = {
           status: "finished",
@@ -1912,7 +1918,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     }
     if (!planningOutcome) {
       try {
-        await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
+        await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghToken);
         planningOutcome = {
           status: "finished",
           emitStarted: true,
@@ -1928,12 +1934,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    const eventsContent = await repoStore.readFile(runId, "events.jsonl");
-    if (eventsContent.trim()) {
-      throw new Error(
-        `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
-      );
-    }
     state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
