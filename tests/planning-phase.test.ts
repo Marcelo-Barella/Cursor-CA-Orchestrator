@@ -159,6 +159,20 @@ describe("planning phase", () => {
     expect(failedIdx).toBeGreaterThan(startedIdx);
   });
 
+  it("marks orchestration failed when planning fails after orchestration_started", async () => {
+    const config = promptOnlyConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [{ sendThrows: new Error("planner send failed") }],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-plan-terminal-fail", fake, store)).rejects.toThrow(/planner send failed/);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.error).toContain("planner send failed");
+    expect(state.phase_agents.planning.status).toBe("failed");
+    expect(state.main_agent?.status).toBe("failed");
+  });
+
   it("orders fresh planning events as orchestration_started, planning_started, planning_completed", async () => {
     const config = promptOnlyConfig();
     waitForPlanMock.mockResolvedValue(validTaskPlanJson());

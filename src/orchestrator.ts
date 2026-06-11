@@ -1938,6 +1938,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     }
     await syncToRepo(repoStore, runId, state);
     if (planningOutcome.status === "failed") {
+      state.status = "failed";
+      state.error = planningOutcome.detail;
+      if (state.main_agent) {
+        state.main_agent.status = "failed";
+        state.main_agent.finished_at = nowIso();
+      }
+      await syncToRepo(repoStore, runId, state);
       throw new Error(planningOutcome.detail);
     }
   }
