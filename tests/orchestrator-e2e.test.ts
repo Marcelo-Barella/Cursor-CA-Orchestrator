@@ -1019,6 +1019,73 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.phase_agents.planning.status).toBe("finished");
   });
 
+  it("rejects task-plan.json that violates prompt constraints instead of reusing it", async () => {
+    const config = {
+      ...promptOnlyConfig(),
+      prompt: "Every route must use your translation method.",
+    };
+    const waitSpy = vi
+      .spyOn(planner, "waitForPlan")
+      .mockResolvedValue(promptOnlyTaskPlan("Implement the page. Every route must use your translation method."));
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-constraint-replan"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": promptOnlyTaskPlan("Planned work without the required constraint."),
+    });
+    try {
+      await runOrchestration("run-constraint-replan", fake, store);
+      expect(fake.launches).toHaveLength(2);
+      expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+      const types = eventTypesFromFiles(files);
+      expect(types).toContain("planning_started");
+      expect(types).toContain("planning_completed");
+      const state = JSON.parse(files.get("state.json")!);
+      expect(state.status).toBe("completed");
+      expect(state.error).toBeNull();
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("clears stale planning failure state when planning succeeds on retry", async () => {
+    const config = promptOnlyConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { sendThrows: new Error("planner timeout") },
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-plan-retry-ok"),
+      ],
+    });
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(promptOnlyTaskPlan());
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    try {
+      await expect(runOrchestration("run-plan-retry-ok", fake, store)).rejects.toThrow(/planner timeout/);
+      const failedState = JSON.parse(files.get("state.json")!);
+      expect(failedState.status).toBe("failed");
+      expect(failedState.error).toContain("planner timeout");
+      await runOrchestration("run-plan-retry-ok", fake, store);
+      const state = JSON.parse(files.get("state.json")!);
+      expect(state.status).toBe("completed");
+      expect(state.error).toBeNull();
+      expect(state.main_agent?.status).not.toBe("failed");
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
   it("falls back to full planning when task-plan.json is invalid and emits planning lifecycle events", async () => {
     const config = promptOnlyConfig();
     const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(promptOnlyTaskPlan("Replanned work."));

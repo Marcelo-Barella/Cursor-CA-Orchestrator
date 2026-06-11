@@ -1572,6 +1572,7 @@ async function checkCompletion(ctx: LoopContext): Promise<boolean> {
     await maybeFinalizePullRequests(ctx.state, ctx.config, ctx.graph, ctx.runId, ctx.repoStore);
   }
   ctx.state.status = "completed";
+  ctx.state.error = null;
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
   await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await appendEvent(
@@ -1609,23 +1610,20 @@ async function applyTaskPlanToConfig(
   planContent: string,
   ghUser: string,
   repoStore: RepoStoreClient,
-  validateConstraints: boolean,
 ): Promise<void> {
   config.repositories["__bootstrap__"] = {
     url: bootstrapRepoUrl(ghUser, config.bootstrap_repo_name),
     ref: resolveBootstrapRef(),
   };
   const parsedTasks = parseTaskPlan(planContent, config);
-  if (validateConstraints) {
-    const constraints = extractConstraintsFromPrompt(config.prompt);
-    if (constraints.length > 0) {
-      const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!constraintValidation.valid) {
-        const detail = constraintValidation.violations
-          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-          .join("; ");
-        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-      }
+  const constraints = extractConstraintsFromPrompt(config.prompt);
+  if (constraints.length > 0) {
+    const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+    if (!constraintValidation.valid) {
+      const detail = constraintValidation.violations
+        .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+        .join("; ");
+      throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
     }
   }
   config.tasks = parsedTasks;
@@ -1718,7 +1716,7 @@ async function runPlanningPhase(
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
     }
-    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, true);
+    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore);
     return { ok: true };
   } catch (exc) {
     return { ok: false, detail: String(exc) };
@@ -1953,7 +1951,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       const ghUser = ghUserResult.user;
       const planContent = await repoStore.readFile(runId, "task-plan.json");
       if (planContent) {
-        const reusedOk = await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false)
+        const reusedOk = await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore)
           .then(() => true)
           .catch(() => false);
         if (reusedOk) {
@@ -1961,6 +1959,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         }
       }
       if (!planning.ran || !planning.ok) {
+        if (planContent) {
+          try {
+            await repoStore.deleteFile(runId, "task-plan.json");
+          } catch {
+            /* stale plan may already be absent */
+          }
+        }
         const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
         planning = planningResult.ok
           ? { ran: true, ok: true, source: "fresh" }
@@ -2028,6 +2033,16 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     if (!planning.ok) {
       throw new Error(planning.detail);
     }
+  }
+
+  if (planning.ran && planning.ok && (state.status === "failed" || state.error !== null)) {
+    state.status = "running";
+    state.error = null;
+    if (state.main_agent?.status === "failed") {
+      state.main_agent.status = "running";
+      state.main_agent.finished_at = null;
+    }
+    await syncToRepo(repoStore, runId, state);
   }
 
   const graph = buildDependencyGraph(config.tasks);
