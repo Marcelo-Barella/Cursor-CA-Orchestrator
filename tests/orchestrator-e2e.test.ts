@@ -11,6 +11,7 @@ import {
   assistantText,
   statusMessage,
 } from "./support/fake-agent-client.js";
+import { createTransientStateReadStore } from "./support/reattach-fixtures.js";
 
 type FileStore = Map<string, string>;
 
@@ -37,27 +38,6 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
     },
     async deleteFile(_runId: string, filename: string): Promise<void> {
       files.delete(filename);
-    },
-  } as unknown as RepoStoreClient;
-  return { store, files };
-}
-
-function createTransientStateReadStore(
-  initial: Record<string, string>,
-  failCount = 2,
-): { store: RepoStoreClient; files: FileStore } {
-  const { store: baseStore, files } = createInMemoryRepoStore(initial);
-  let stateReadCount = 0;
-  const store = {
-    ...baseStore,
-    async readFile(runId: string, filename: string): Promise<string> {
-      if (filename === "state.json") {
-        stateReadCount += 1;
-        if (stateReadCount <= failCount) {
-          throw new Error("transient repo read failure");
-        }
-      }
-      return baseStore.readFile(runId, filename);
     },
   } as unknown as RepoStoreClient;
   return { store, files };

@@ -638,12 +638,15 @@ describe("runOrchestration validation gate", () => {
     await expect(runOrchestration("run-whitespace-state", agentClient, repoStore)).rejects.toThrow(/refusing to reset orchestration progress/);
   });
 
-  it("propagates events.jsonl read errors when state.json is empty", async () => {
+  it.each([
+    { stateJson: "", runId: "run-events-read-fail" },
+    { stateJson: "  \n", runId: "run-events-read-fail-whitespace" },
+  ])("propagates events.jsonl read errors when state.json is empty or whitespace ($runId)", async ({ stateJson, runId }) => {
     const config = createConfig(["a"]);
     const repoStore = {
       async readFile(_runId: string, filename: string): Promise<string> {
         if (filename === "config.yaml") return toYaml(config);
-        if (filename === "state.json") return "";
+        if (filename === "state.json") return stateJson;
         if (filename === "events.jsonl") {
           throw new Error("GitHub API rate limited");
         }
@@ -654,30 +657,7 @@ describe("runOrchestration validation gate", () => {
       async deleteFile(): Promise<void> {},
     } as unknown as RepoStoreClient;
     const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
-    await expect(runOrchestration("run-events-read-fail", agentClient, repoStore)).rejects.toThrow(
-      /GitHub API rate limited/,
-    );
-  });
-
-  it("propagates events.jsonl read errors when state.json is whitespace-only", async () => {
-    const config = createConfig(["a"]);
-    const repoStore = {
-      async readFile(_runId: string, filename: string): Promise<string> {
-        if (filename === "config.yaml") return toYaml(config);
-        if (filename === "state.json") return "  \n";
-        if (filename === "events.jsonl") {
-          throw new Error("GitHub API rate limited");
-        }
-        return "";
-      },
-      async writeFile(): Promise<void> {},
-      async updateFile(): Promise<void> {},
-      async deleteFile(): Promise<void> {},
-    } as unknown as RepoStoreClient;
-    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
-    await expect(runOrchestration("run-events-read-fail-whitespace", agentClient, repoStore)).rejects.toThrow(
-      /GitHub API rate limited/,
-    );
+    await expect(runOrchestration(runId, agentClient, repoStore)).rejects.toThrow(/GitHub API rate limited/);
   });
 
   it("propagates state.json read errors after exhausting retry attempts", async () => {
