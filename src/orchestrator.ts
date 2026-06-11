@@ -1932,13 +1932,24 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   validateConfig(config);
 
+  let resumeStateContent = stateContent;
+  if (!resumeStateContent.trim()) {
+    resumeStateContent = await readStateJsonContent(repoStore, runId);
+    await refuseResumeWithEmptyState(repoStore, runId, resumeStateContent);
+  }
+
   let state: OrchestrationState;
-  if (!stateContent.trim()) {
+  if (!resumeStateContent.trim()) {
     state = createInitialState(config, runId);
-  } else if (parsedState) {
+  } else if (resumeStateContent === stateContent && parsedState) {
     state = parsedState;
   } else {
-    throw new Error(`Invalid state.json for run ${runId}: ${stateParseDetail ?? "parse failed"}`);
+    try {
+      state = deserialize(resumeStateContent);
+    } catch (parseErr) {
+      const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
+    }
   }
 
   reconcileAgentsFromConfig(state, config);
