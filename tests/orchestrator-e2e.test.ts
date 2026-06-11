@@ -228,7 +228,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
     await runOrchestration("run-incomplete-artifact-fallback", fake, store);
     expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
     expect(finishedEvent?.payload?.payload_source).toBe("assistant");
   });
@@ -252,7 +252,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
     await runOrchestration("run-bad-artifact-fallback", fake, store);
     expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
     expect(finishedEvent?.payload?.payload_source).toBe("assistant");
   });
@@ -300,7 +300,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.blocked_retry_count).toBe(0);
     expect(fake.launches).toHaveLength(2);
     expect(fake.launches[1]!.opts.startingRef).toBe("cursor-orch/run-retry-ok/t1-retry-1");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.some((e: { event_type: string }) => e.event_type === "task_retried")).toBe(true);
     expect(events.filter((e: { event_type: string }) => e.event_type === "task_failed").length).toBeGreaterThanOrEqual(1);
     expect(events.filter((e: { event_type: string }) => e.event_type === "task_launched").length).toBe(2);
@@ -341,7 +341,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.agent_id).toBeTruthy();
     expect(deletedAgentFiles).toContain("agent-t1.json");
     expect(fake.launches).toHaveLength(2);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.filter((e: { event_type: string }) => e.event_type === "task_launched").length).toBe(2);
   });
 
@@ -383,7 +383,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.retry_count).toBe(1);
     expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(okPayload);
     expect(fake.launches).toHaveLength(2);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.some((e: { event_type: string }) => e.event_type === "task_retried")).toBe(true);
   });
 
@@ -407,7 +407,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.agents.t1.status).toBe("failed");
     expect(state.agents.t1.retry_count).toBe(1);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.filter((e: { event_type: string }) => e.event_type === "task_failed").length).toBe(2);
   });
 
@@ -503,7 +503,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
     expect(finishedEvent?.payload?.payload_source).toBe("conversation");
   });
@@ -526,7 +526,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     const failedEvent = events.find((e) => e.event_type === "task_failed" && e.task_id === "t1");
     expect(failedEvent?.payload?.payload_source).toBe("none");
   });
@@ -547,7 +547,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
   });
 
@@ -582,7 +582,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
     expect(state.agents.t1.summary).toBe("Failed to persist worker output to agent-t1.json on the run branch");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
     const failedEvent = events.find((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t1");
     expect(failedEvent?.detail).toContain("Failed to persist worker output");
@@ -663,7 +663,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     const failedEvent = events.find((e) => e.event_type === "task_failed" && e.task_id === "t1");
     expect(failedEvent?.payload?.payload_source).toBe("none");
     expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
@@ -959,7 +959,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.blocked_reason).toBe("missing API key");
     expect(state.agents.t1.blocked_retry_count).toBe(0);
     expect(state.agents.t1.retry_count).toBe(0);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.some((e: { event_type: string }) => e.event_type === "task_blocked" && e.task_id === "t1")).toBe(true);
     expect(state.status).toBe("stopped");
   }, 20_000);
@@ -988,7 +988,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
     expect(state.agents.t1.summary).toBe("worker could not finish");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.some((e: { event_type: string }) => e.event_type === "task_failed" && e.task_id === "t1")).toBe(true);
   });
 
@@ -1086,7 +1086,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("stopped");
     expect(state.agents.t1.status).toBe("stopped");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(
       false,
     );
@@ -1144,7 +1144,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t2.status).toBe("failed");
     expect(state.agents.t2.cascade_source_task_id).toBe("t1");
     expect(state.agents.t2.summary).toContain("Upstream task t1 failed");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t2")).toBe(true);
   });
 
@@ -1195,7 +1195,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t2.cascade_source_task_id).toBe("t1");
     expect(state.agents.t2.summary).toBe("Upstream task t1 failed");
     expect(fake.launches).toHaveLength(1);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEvents(files);
     expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t2")).toBe(
       true,
     );
