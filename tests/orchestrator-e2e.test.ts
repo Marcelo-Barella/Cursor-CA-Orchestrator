@@ -20,12 +20,10 @@ function runGit(branch: string, repoUrl = "https://github.com/acme/svc"): NonNul
 
 function createInMemoryRepoStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
   const files: FileStore = new Map(Object.entries(initial));
-  const ghCalls: string[] = [];
   const store = {
     rateLimitRemaining: null,
     rateLimitLimit: null,
     async readFile(_runId: string, filename: string): Promise<string> {
-      ghCalls.push(`read ${filename}`);
       return files.get(filename) ?? "";
     },
     async writeFile(_runId: string, filename: string, content: string): Promise<void> {
