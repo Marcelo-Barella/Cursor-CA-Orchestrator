@@ -751,4 +751,75 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
   });
+
+  it("uses the latest task_launched event when a task is relaunched after failure", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-retry");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-first)",
+        payload: { agent_id: "agent-first", run_id: "run-first" },
+      },
+      {
+        timestamp: "2026-06-01T00:01:00.000Z",
+        event_type: "task_failed",
+        task_id: "t1",
+        phase_id: null,
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Task t1 failed",
+        payload: {},
+      },
+      {
+        timestamp: "2026-06-01T00:02:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-retry)",
+        payload: {
+          agent_id: "agent-retry",
+          run_id: "run-retry",
+          branch: "cursor-orch/run-recover-retry/t1-retry-1",
+        },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(state.agents.t1!.agent_id).toBe("agent-retry");
+    expect(state.agents.t1!.status).toBe("launching");
+    expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover-retry/t1-retry-1");
+  });
+
+  it("preserves existing started_at and branch_name when reconciling", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-preserve");
+    state.agents.t1!.started_at = "2026-05-01T00:00:00.000Z";
+    state.agents.t1!.branch_name = "existing-branch";
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-live)",
+        payload: {
+          agent_id: "agent-live",
+          run_id: "run-live",
+          branch: "cursor-orch/run-recover-preserve/t1",
+        },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(state.agents.t1!.started_at).toBe("2026-05-01T00:00:00.000Z");
+    expect(state.agents.t1!.branch_name).toBe("existing-branch");
+  });
 });

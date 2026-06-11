@@ -283,6 +283,11 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
     expect(fake.launches[0]!.opts.startingRef).toBe("cursor-orch/run-1/t1");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const launched = events.find((e: { event_type: string }) => e.event_type === "task_launched");
+    expect(launched?.payload?.agent_id).toBe(fake.launches[0]!.agent.agentId);
+    expect(launched?.payload?.run_id).toBeTruthy();
+    expect(launched?.payload?.branch).toBe("cursor-orch/run-1/t1");
   });
 
   it("persists truncated agent output when worker JSON exceeds size limits", async () => {
