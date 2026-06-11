@@ -109,7 +109,7 @@ async function handleTaskFailureWithOptionalRetry(
   agent.status = "failed";
   agent.finished_at = terminal.finishedAt;
   agent.summary = terminal.summary;
-  await cascadeFailures(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
+  await cascadeDependents(ctx.state, taskId, "failed", ctx.graph, ctx.repoStore, ctx.runId);
   markStateDirty(ctx);
   return "terminal";
 }
@@ -493,51 +493,34 @@ function buildSummaryMd(config: OrchestratorConfig, state: OrchestrationState): 
   return lines.join("\n");
 }
 
-async function cascadeFailures(
+async function cascadeDependents(
   state: OrchestrationState,
-  failedTaskId: string,
+  sourceTaskId: string,
+  kind: "failed" | "stopped",
   graph: Record<string, Set<string>>,
   repoStore: RepoStoreClient,
   runId: string,
 ): Promise<string[]> {
   const cascaded: string[] = [];
+  const finishedAt = kind === "stopped" ? nowIso() : undefined;
+  const eventType = kind === "failed" ? "task_failed" : "task_stopped";
   for (const [taskId, deps] of Object.entries(graph)) {
-    if (!deps.has(failedTaskId)) continue;
+    if (!deps.has(sourceTaskId)) continue;
     const agent = state.agents[taskId];
     if (!agent || (agent.status !== "pending" && agent.status !== "blocked")) continue;
-    agent.status = "failed";
-    agent.cascade_source_task_id = failedTaskId;
-    agent.summary = `Upstream task ${failedTaskId} failed`;
-    cascaded.push(taskId);
-    await appendEvent(repoStore, runId, makeEvent("task_failed", `Task ${taskId} failed: upstream ${failedTaskId} failed`, taskId));
-  }
-  return cascaded;
-}
-
-async function cascadeStopped(
-  state: OrchestrationState,
-  stoppedTaskId: string,
-  graph: Record<string, Set<string>>,
-  repoStore: RepoStoreClient,
-  runId: string,
-): Promise<string[]> {
-  const cascaded: string[] = [];
-  const finishedAt = nowIso();
-  for (const [taskId, deps] of Object.entries(graph)) {
-    if (!deps.has(stoppedTaskId)) continue;
-    const agent = state.agents[taskId];
-    if (!agent || (agent.status !== "pending" && agent.status !== "blocked")) continue;
-    agent.status = "stopped";
-    agent.cascade_source_task_id = stoppedTaskId;
-    agent.summary = `Upstream task ${stoppedTaskId} stopped`;
-    agent.finished_at = finishedAt;
+    agent.status = kind;
+    agent.cascade_source_task_id = sourceTaskId;
+    agent.summary = `Upstream task ${sourceTaskId} ${kind}`;
+    if (finishedAt) agent.finished_at = finishedAt;
     cascaded.push(taskId);
     await appendEvent(
       repoStore,
       runId,
-      makeEvent("task_stopped", `Task ${taskId} stopped: upstream ${stoppedTaskId} stopped`, taskId),
+      makeEvent(eventType, `Task ${taskId} ${kind}: upstream ${sourceTaskId} ${kind}`, taskId),
     );
-    cascaded.push(...(await cascadeStopped(state, taskId, graph, repoStore, runId)));
+    if (kind === "stopped") {
+      cascaded.push(...(await cascadeDependents(state, taskId, kind, graph, repoStore, runId)));
+    }
   }
   return cascaded;
 }
@@ -546,14 +529,10 @@ async function reconcileStoppedCascades(ctx: LoopContext): Promise<void> {
   let changed = false;
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
     if (agent.status !== "stopped") continue;
-    const cascaded = await cascadeStopped(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
-    if (cascaded.length > 0) {
-      changed = true;
-    }
+    const cascaded = await cascadeDependents(ctx.state, taskId, "stopped", ctx.graph, ctx.repoStore, ctx.runId);
+    if (cascaded.length > 0) changed = true;
   }
-  if (changed) {
-    markStateDirty(ctx);
-  }
+  if (changed) markStateDirty(ctx);
 }
 
 async function resolveGithubUsername(ghToken: string): Promise<string> {
@@ -646,16 +625,18 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
   }
 }
 
-function checkAllFinished(state: OrchestrationState): boolean {
+function agentsMatch(state: OrchestrationState, match: (status: string) => boolean): boolean {
   const agents = Object.values(state.agents);
   if (!agents.length) return false;
-  return agents.every((a) => a.status === "finished");
+  return agents.every((a) => match(a.status));
+}
+
+function checkAllFinished(state: OrchestrationState): boolean {
+  return agentsMatch(state, (status) => status === "finished");
 }
 
 export function allAgentsTerminal(state: OrchestrationState): boolean {
-  const agents = Object.values(state.agents);
-  if (!agents.length) return false;
-  return agents.every((a) => isTerminalStatus(a.status));
+  return agentsMatch(state, isTerminalStatus);
 }
 
 function checkTerminalFailure(state: OrchestrationState): boolean {
@@ -1103,7 +1084,7 @@ async function runWorkerStream(
       ctx.runId,
       makeEvent("task_stopped", `Task ${taskId} stopped`, taskId),
     );
-    await cascadeStopped(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
+    await cascadeDependents(ctx.state, taskId, "stopped", ctx.graph, ctx.repoStore, ctx.runId);
   } else if (payloadStatus === "completed" && agentFilePersisted) {
     agent.status = "finished";
     agent.finished_at = finalizedAt;
@@ -1214,7 +1195,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
     agent.summary = agent.blocked_reason ?? "Blocked; follow-up dispatch failed";
     ctx.activeWorkers.delete(agent.task_id);
     await safeDisposeAgent(handle.sdkAgent);
-    await cascadeFailures(ctx.state, agent.task_id, ctx.graph, ctx.repoStore, ctx.runId);
+    await cascadeDependents(ctx.state, agent.task_id, "failed", ctx.graph, ctx.repoStore, ctx.runId);
     markStateDirty(ctx);
     return;
   }
@@ -1284,7 +1265,7 @@ async function handleBlockedTasks(ctx: LoopContext): Promise<void> {
       ctx.activeWorkers.delete(agent.task_id);
     }
     await appendEvent(ctx.repoStore, ctx.runId, makeEvent("task_failed", `Task ${agent.task_id} failed: blocked`, agent.task_id));
-    await cascadeFailures(ctx.state, agent.task_id, ctx.graph, ctx.repoStore, ctx.runId);
+    await cascadeDependents(ctx.state, agent.task_id, "failed", ctx.graph, ctx.repoStore, ctx.runId);
     markStateDirty(ctx);
   }
 }
@@ -1584,7 +1565,7 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   const failedIds = new Set(Object.entries(ctx.state.agents).filter(([, a]) => a.status === "failed").map(([id]) => id));
   if (!failedIds.size) return false;
   for (const fid of failedIds) {
-    await cascadeFailures(ctx.state, fid, ctx.graph, ctx.repoStore, ctx.runId);
+    await cascadeDependents(ctx.state, fid, "failed", ctx.graph, ctx.repoStore, ctx.runId);
   }
   if (!checkTerminalFailure(ctx.state)) return false;
   if (ctx.activeWorkers.size > 0) return false;
