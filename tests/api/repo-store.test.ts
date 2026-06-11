@@ -167,13 +167,21 @@ describe("RepoStoreClient", () => {
     expect(url).toContain("/git/refs/heads/run/");
   });
 
-  it("listRunBranches returns an empty list when no run branches exist", async () => {
+  it("listRunBranches returns an empty list when the refs endpoint is missing", async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
     const client = new RepoStoreClient("ghp-test", owner, repo);
     await expect(client.listRunBranches()).resolves.toEqual([]);
   });
 
-  it("deleteRunBranch is a no-op when the branch is absent", async () => {
+  it("listRunBranches returns an empty list when the payload is not an array", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ message: "unexpected" }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.listRunBranches()).resolves.toEqual([]);
+  });
+
+  it("deleteRunBranch is a no-op when the branch ref is absent", async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
     const client = new RepoStoreClient("ghp-test", owner, repo);
     await expect(client.deleteRunBranch(runId)).resolves.toBeUndefined();
