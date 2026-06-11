@@ -228,6 +228,34 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).agents["t-b"].status).toBe("finished");
   });
 
+  it("persists worker agent_id to state.json after launch before the worker stream completes", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-launch-sync";
+    const snapshots: Array<{ agentId: string | null; status: string }> = [];
+    const fake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", runId)],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (id, filename, content) => {
+      if (filename === "state.json") {
+        const parsed = JSON.parse(content) as { agents?: { t1?: { agent_id?: string | null; status?: string } } };
+        snapshots.push({
+          agentId: parsed.agents?.t1?.agent_id ?? null,
+          status: parsed.agents?.t1?.status ?? "",
+        });
+      }
+      return baseWrite(id, filename, content);
+    };
+
+    await runOrchestration(runId, fake, store);
+
+    expect(snapshots.some((s) => s.agentId !== null && s.status !== "finished" && s.status !== "failed")).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).agents.t1.status).toBe("finished");
+  });
+
   it("launches a worker, reads the artifact, and marks the run completed", async () => {
     const config = singleTaskConfig();
     const workerPayload = {
