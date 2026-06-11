@@ -48,13 +48,14 @@ function promptOnlyTaskPlan(prompt = "Planned work."): string {
   });
 }
 
-function eventTypesFromFiles(files: Map<string, string>): string[] {
+function eventsFromFiles(files: Map<string, string>): Array<{ event_type: string; detail?: string }> {
   const raw = files.get("events.jsonl");
   if (!raw?.trim()) return [];
-  return raw
-    .trim()
-    .split("\n")
-    .map((line) => (JSON.parse(line) as { event_type: string }).event_type);
+  return raw.trim().split("\n").map((line) => JSON.parse(line) as { event_type: string; detail?: string });
+}
+
+function eventTypesFromFiles(files: Map<string, string>): string[] {
+  return eventsFromFiles(files).map((event) => event.event_type);
 }
 
 function twoTaskChainConfig(): OrchestratorConfig {
@@ -966,23 +967,12 @@ describe("runOrchestration with SDK (happy path)", () => {
 
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
-    const taskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Planned work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
     const fake = new FakeAgentClient({
       defaultScripts: [completedWorkerScript("t1", "run-reuse-plan")],
     });
     const { store, files } = createInMemoryRepoStore({
       "config.yaml": toYaml(config),
-      "task-plan.json": taskPlan,
+      "task-plan.json": promptOnlyTaskPlan(),
     });
     await runOrchestration("run-reuse-plan", fake, store);
     expect(fake.launches).toHaveLength(1);
@@ -990,16 +980,14 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(fake.launches[0]!.prompt).toContain("Planned work.");
     const updatedConfig = files.get("config.yaml")!;
     expect(updatedConfig).toContain("t1");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = eventsFromFiles(files);
     expect(
-      events.some(
-        (e: { event_type: string; detail?: string }) =>
-          e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
-      ),
+      events.some((e) => e.event_type === "planning_completed" && e.detail?.includes("reused existing plan")),
     ).toBe(true);
-    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
-    expect(JSON.parse(files.get("state.json")!).phase_agents.planning.status).toBe("finished");
+    expect(events.some((e) => e.event_type === "planning_started")).toBe(false);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.phase_agents.planning.status).toBe("finished");
   });
 
   it("falls back to full planning when task-plan.json is invalid and emits planning lifecycle events", async () => {
@@ -1028,12 +1016,7 @@ describe("runOrchestration with SDK (happy path)", () => {
       expect(types).toContain("planning_started");
       expect(types).toContain("planning_completed");
       expect(types.indexOf("planning_started")).toBeLessThan(types.indexOf("planning_completed"));
-      const completed = files
-        .get("events.jsonl")!
-        .trim()
-        .split("\n")
-        .map((l) => JSON.parse(l) as { event_type: string; detail?: string })
-        .find((e) => e.event_type === "planning_completed");
+      const completed = eventsFromFiles(files).find((e) => e.event_type === "planning_completed");
       expect(completed?.detail).toBe("Planning completed: 1 tasks");
       expect(completed?.detail).not.toContain("reused existing plan");
       const state = JSON.parse(files.get("state.json")!);
@@ -1081,17 +1064,7 @@ describe("runOrchestration with SDK (happy path)", () => {
 
   it("emits planning_started after state.json exists when running full planning", async () => {
     const config = promptOnlyConfig();
-    const taskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Planned work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
+    const taskPlan = promptOnlyTaskPlan();
     const writeOrder: string[] = [];
     let taskPlanReads = 0;
     const { store: baseStore, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
@@ -1131,9 +1104,9 @@ describe("runOrchestration with SDK (happy path)", () => {
     });
     await runOrchestration("run-fresh-plan", fake, store);
     expect(fake.launches).toHaveLength(2);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    const planningStartedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_started");
-    const planningCompletedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_completed");
+    const events = eventsFromFiles(files);
+    const planningStartedIdx = events.findIndex((e) => e.event_type === "planning_started");
+    const planningCompletedIdx = events.findIndex((e) => e.event_type === "planning_completed");
     expect(planningStartedIdx).toBeGreaterThanOrEqual(0);
     expect(planningCompletedIdx).toBeGreaterThan(planningStartedIdx);
     const firstStateWrite = writeOrder.findIndex((f) => f === "state.json");
