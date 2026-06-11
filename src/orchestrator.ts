@@ -584,6 +584,14 @@ async function resolveGithubUsername(ghToken: string): Promise<string> {
   return data.login;
 }
 
+async function resolveBootstrapContext(
+  ghToken: string,
+  bootstrapRepoName: string,
+): Promise<{ ghUser: string; bootstrapUrl: string }> {
+  const ghUser = await resolveGithubUsername(ghToken);
+  return { ghUser, bootstrapUrl: `https://github.com/${ghUser}/${bootstrapRepoName}` };
+}
+
 function resolveBootstrapRef(): string {
   const r = process.env.CURSOR_ORCH_RUNTIME_REF;
   if (r?.trim()) {
@@ -1635,10 +1643,8 @@ async function runPlanningPhase(
   repoStore: RepoStoreClient,
   apiKey: string,
 ): Promise<void> {
-  const ghToken = process.env.GH_TOKEN!;
-  const ghUser = await resolveGithubUsername(ghToken);
+  const { ghUser, bootstrapUrl } = await resolveBootstrapContext(process.env.GH_TOKEN!, config.bootstrap_repo_name);
   const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
-  const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
   const plannerAgent = await agentClient.createCloudAgent({
     apiKey,
     model: config.model,
@@ -1658,9 +1664,9 @@ async function runPlanningPhase(
   if (!planContent) {
     const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey }).catch(() => null);
     if (runs) {
-      for (const r of runs.items) {
-        if (typeof r.result === "string" && r.result.trim()) {
-          planContent = r.result;
+      for (const run of runs.items) {
+        if (typeof run.result === "string" && run.result.trim()) {
+          planContent = run.result;
           break;
         }
       }
@@ -1891,7 +1897,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   let planningRan = false;
-  let planningOk = false;
   let planningFailureCause: unknown = null;
   let planningEmitStarted = false;
   let planningCompletedDetail: string | null = null;
@@ -1900,23 +1905,20 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
       try {
-        const ghUser = await resolveGithubUsername(ghToken);
-        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+        const { bootstrapUrl } = await resolveBootstrapContext(ghToken, config.bootstrap_repo_name);
         const taskCount = await applyTaskPlanContent(config, planContent, bootstrapUrl, runId, repoStore);
         planningCompletedDetail = `Planning completed: ${taskCount} tasks (reused existing plan)`;
-        planningOk = true;
-      } catch (reuseErr) {
-        planningFailureCause = reuseErr;
+      } catch (err) {
+        planningFailureCause = err;
       }
     }
-    if (!planningOk && !planningFailureCause) {
+    if (!planningCompletedDetail && !planningFailureCause) {
       planningEmitStarted = true;
       try {
         await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
-        planningOk = true;
         planningCompletedDetail = `Planning completed: ${config.tasks.length} tasks`;
-      } catch (planningExc) {
-        planningFailureCause = planningExc;
+      } catch (err) {
+        planningFailureCause = err;
       }
     }
   }
@@ -1950,7 +1952,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     );
   }
   if (planningRan) {
-    setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
+    setPhaseStatus(state, "planning", planningCompletedDetail ? "finished" : "failed", { timestamp: nowIso() });
     if (planningEmitStarted) {
       await appendEvent(
         repoStore,
@@ -1958,7 +1960,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
       );
     }
-    if (planningOk && planningCompletedDetail) {
+    if (planningCompletedDetail) {
       await appendEvent(
         repoStore,
         runId,
