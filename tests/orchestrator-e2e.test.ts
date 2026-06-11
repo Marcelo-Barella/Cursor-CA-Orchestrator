@@ -914,6 +914,38 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("allows retrying planning after a failure without tripping the empty-state guard", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const failFake = new FakeAgentClient({
+      defaultScripts: [{ sendThrows: new Error("planner boom") }],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+
+    await expect(runOrchestration("run-plan-retry", failFake, store)).rejects.toThrow(/planner boom/);
+    expect(files.get("state.json")).toBeTruthy();
+    const eventsAfterFailure = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(eventsAfterFailure.some((e: { event_type: string }) => e.event_type === "planning_failed")).toBe(true);
+
+    files.set("task-plan.json", taskPlan);
+    const okFake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", "run-plan-retry")],
+    });
+    await runOrchestration("run-plan-retry", okFake, store);
+    expect(okFake.launches).toHaveLength(1);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
     const taskPlan = JSON.stringify({
