@@ -1600,6 +1600,10 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
+function isPlanConstraintValidationError(err: unknown): boolean {
+  return String(err).includes("Plan constraint validation failed");
+}
+
 async function applyTaskPlanContent(
   config: OrchestratorConfig,
   planContent: string,
@@ -1719,6 +1723,13 @@ async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): 
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+async function rereadStateJsonIfEmpty(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<string> {
+  if (stateContent.trim()) {
+    return stateContent;
+  }
+  return repoStore.readFile(runId, "state.json");
 }
 
 async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
@@ -1874,7 +1885,8 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const apiKey = process.env.CURSOR_API_KEY ?? "";
   const ghToken = process.env.GH_TOKEN ?? "";
 
-  const stateContent = await readStateJsonContent(repoStore, runId);
+  let stateContent = await readStateJsonContent(repoStore, runId);
+  stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
   await refuseResumeWithEmptyState(repoStore, runId, stateContent);
   let parsedState: OrchestrationState | null = null;
   let stateParseDetail: string | null = null;
@@ -1908,11 +1920,14 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         };
         planningOk = true;
       } catch (reuseErr) {
-        planningFailureCause = reuseErr;
+        if (isPlanConstraintValidationError(reuseErr)) {
+          planningFailureCause = reuseErr;
+        }
       }
     }
     if (!planningOk && !planningFailureCause) {
       try {
+        await repoStore.deleteFile(runId, "task-plan.json");
         await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
         planningOk = true;
         planningEvents = {
@@ -1927,19 +1942,24 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   validateConfig(config);
 
+  let resumeStateContent = stateContent;
+  if (!resumeStateContent.trim()) {
+    resumeStateContent = await readStateJsonContent(repoStore, runId);
+    await refuseResumeWithEmptyState(repoStore, runId, resumeStateContent);
+  }
+
   let state: OrchestrationState;
-  if (!stateContent.trim()) {
-    const eventsContent = await repoStore.readFile(runId, "events.jsonl");
-    if (eventsContent.trim()) {
-      throw new Error(
-        `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
-      );
-    }
+  if (!resumeStateContent.trim()) {
     state = createInitialState(config, runId);
-  } else if (parsedState) {
+  } else if (resumeStateContent === stateContent && parsedState) {
     state = parsedState;
   } else {
-    throw new Error(`Invalid state.json for run ${runId}: ${stateParseDetail ?? "parse failed"}`);
+    try {
+      state = deserialize(resumeStateContent);
+    } catch (parseErr) {
+      const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
+    }
   }
 
   reconcileAgentsFromConfig(state, config);

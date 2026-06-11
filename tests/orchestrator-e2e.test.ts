@@ -893,6 +893,39 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it.each([
+    { label: "task run", config: singleTaskConfig, runId: "run-stopped-empty-first-read" },
+    { label: "prompt-only run", config: promptOnlyConfig, runId: "run-stopped-empty-first-read-plan" },
+  ])("skips work when stopped state loads after an empty pre-planning read ($label)", async ({ config: configFn, runId }) => {
+    const config = configFn();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", result: "" },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, runId);
+    stoppedState.status = "stopped";
+    let stateReadCount = 0;
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(stoppedState),
+    });
+    const baseReadFile = store.readFile.bind(store);
+    store.readFile = async (id: string, filename: string) => {
+      if (filename === "state.json") {
+        stateReadCount += 1;
+        return stateReadCount === 1 ? "" : baseReadFile(id, filename);
+      }
+      return baseReadFile(id, filename);
+    };
+    await runOrchestration(runId, fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
   it("does not launch planning when resuming a stopped prompt-only run", async () => {
     const config = promptOnlyConfig();
     const fake = new FakeAgentClient({
@@ -950,6 +983,24 @@ describe("runOrchestration with SDK (happy path)", () => {
     await runOrchestration("run-plan-retry", okFake, store);
     expect(okFake.launches).toHaveLength(1);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("falls back to full planning when cached task-plan.json cannot be applied", async () => {
+    const config = promptOnlyConfig();
+    const stalePlan = JSON.stringify({
+      tasks: [{ id: "t1" }],
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [{ sendThrows: new Error("planner launched after stale reuse") }],
+    });
+    const { store } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": stalePlan,
+    });
+    await expect(runOrchestration("run-stale-plan-fallback", fake, store)).rejects.toThrow(
+      /planner launched after stale reuse/,
+    );
+    expect(fake.launches).toHaveLength(1);
   });
 
   it("defers planning_failed when cached task-plan.json fails constraint validation without launching a planner", async () => {
