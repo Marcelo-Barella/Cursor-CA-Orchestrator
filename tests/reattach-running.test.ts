@@ -375,6 +375,69 @@ describe("reattachWorkers running tasks", () => {
     expect(fake.launches).toHaveLength(1);
   });
 
+  it("does not persist event-recovered agent_id before reattach verification", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-recover-no-premature-sync";
+    const deadAgentId = "agent-dead-events";
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+
+    const launchScript = completedResumeScript(runId);
+    listRunsMock.mockResolvedValue({ items: [] });
+
+    const fake = new FakeAgentClient({
+      runsByAgent: { [deadAgentId]: [] },
+      defaultScripts: [launchScript],
+      conversationText: null,
+    });
+
+    const launchEvent = JSON.stringify({
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: `Launched t1 (${deadAgentId})`,
+      payload: {
+        agent_id: deadAgentId,
+        run_id: "run-dead",
+        repository: "https://github.com/acme/svc",
+        ref: "main",
+        branch: `cursor-orch/${runId}/t1`,
+      },
+    });
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+      "events.jsonl": `${launchEvent}\n`,
+    });
+
+    const prematureSyncs: Array<{ agentId: string; status: string }> = [];
+    const origWrite = store.writeFile.bind(store);
+    vi.spyOn(store, "writeFile").mockImplementation(async (runIdArg, filename, content) => {
+      if (filename === "state.json") {
+        const parsed = JSON.parse(content) as { agents?: { t1?: { agent_id?: string; status?: string } } };
+        const t1 = parsed.agents?.t1;
+        if (t1?.agent_id === deadAgentId && t1?.status === "launching") {
+          prematureSyncs.push({ agentId: t1.agent_id, status: t1.status });
+        }
+      }
+      return origWrite(runIdArg, filename, content);
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    expect(prematureSyncs).toHaveLength(0);
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.status).toBe("completed");
+    expect(final.agents.t1.status).toBe("finished");
+    expect(fake.launches).toHaveLength(1);
+  });
+
   it("marks the task failed when resumeCloudAgent throws", async () => {
     const config = singleTaskConfig();
     const runId = "run-reattach-resume-fail";
