@@ -79,7 +79,9 @@ describe("fetchAgentConversationTextFromApi", () => {
   });
 
   it("returns null when the response body is not valid JSON", async () => {
-    globalThis.fetch = vi.fn(async () => new Response("not json", { status: 200 })) as typeof fetch;
+    globalThis.fetch = vi.fn(
+      async () => new Response("not-json {{{", { status: 200, headers: { "Content-Type": "application/json" } }),
+    ) as typeof fetch;
     await expect(fetchAgentConversationTextFromApi("agent-1", "key")).resolves.toBeNull();
   });
 

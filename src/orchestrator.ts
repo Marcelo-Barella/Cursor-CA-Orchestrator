@@ -260,6 +260,13 @@ function isTerminalStatus(status: string): boolean {
 
 const IN_FLIGHT_LAUNCH_TERMINAL_EVENTS = new Set(["task_finished", "task_failed", "task_stopped"]);
 
+export function agentIdFromTaskLaunchedEvent(event: OrchestrationEvent): string | null {
+  const fromPayload = event.payload.agent_id?.trim();
+  if (fromPayload) return fromPayload;
+  const match = /^Launched\s+\S+\s+\(([^)]+)\)\s*$/.exec(event.detail);
+  return match?.[1]?.trim() ?? null;
+}
+
 export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   if (runs.length === 0) return null;
   const running = runs.find((run) => run.status === "running");
@@ -293,7 +300,7 @@ export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, e
       }
     }
     if (!lastLaunch) continue;
-    const agentId = lastLaunch.payload.agent_id?.trim();
+    const agentId = agentIdFromTaskLaunchedEvent(lastLaunch);
     if (!agentId) continue;
     agent.agent_id = agentId;
     agent.status = "launching";
@@ -1600,7 +1607,6 @@ async function runPlanningPhase(
   repoStore: RepoStoreClient,
   apiKey: string,
 ): Promise<boolean> {
-  await appendEvent(repoStore, runId, makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }));
   try {
     const ghToken = process.env.GH_TOKEN!;
     const ghUser = await resolveGithubUsername(ghToken);
@@ -1657,11 +1663,6 @@ async function runPlanningPhase(
     config.tasks = canonPlan.tasks;
     config.delegation_map = canonPlan.delegation_map;
     await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-    await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("planning_completed", `Planning completed: ${parsedTasks.length} tasks`, null, { phase_id: "planning", agent_kind: "phase" }),
-    );
     return true;
   } catch (exc) {
     await appendEvent(repoStore, runId, makeEvent("planning_failed", String(exc), null, { phase_id: "planning", agent_kind: "phase" }));
@@ -1699,39 +1700,29 @@ async function persistUnexpectedFailure(state: OrchestrationState, repoStore: Re
   }
 }
 
-async function tryReadPersistedState(repoStore: RepoStoreClient, runId: string): Promise<OrchestrationState | null> {
-  let stateContent = "";
-  try {
-    stateContent = await repoStore.readFile(runId, "state.json");
-  } catch {
-    return null;
+const PERSISTED_STATE_READ_ATTEMPTS = 3;
+const PERSISTED_STATE_READ_RETRY_MS = 250;
+
+async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < PERSISTED_STATE_READ_ATTEMPTS; attempt++) {
+    try {
+      return await repoStore.readFile(runId, "state.json");
+    } catch (err) {
+      lastErr = err;
+      if (attempt + 1 < PERSISTED_STATE_READ_ATTEMPTS) {
+        await delay(PERSISTED_STATE_READ_RETRY_MS);
+      }
+    }
   }
-  if (!stateContent.trim()) {
-    return null;
-  }
-  try {
-    return deserialize(stateContent);
-  } catch {
-    return null;
-  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-async function refuseResumeWithMissingState(repoStore: RepoStoreClient, runId: string): Promise<void> {
-  let stateContent = "";
-  try {
-    stateContent = await repoStore.readFile(runId, "state.json");
-  } catch {
-    return;
-  }
+async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
   if (stateContent.trim()) {
     return;
   }
-  let eventsContent = "";
-  try {
-    eventsContent = await repoStore.readFile(runId, "events.jsonl");
-  } catch {
-    return;
-  }
+  const eventsContent = await repoStore.readFile(runId, "events.jsonl");
   if (eventsContent.trim()) {
     throw new Error(
       `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
@@ -1880,15 +1871,25 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const apiKey = process.env.CURSOR_API_KEY ?? "";
   const ghToken = process.env.GH_TOKEN ?? "";
 
-  await refuseResumeWithMissingState(repoStore, runId);
-  const persistedState = await tryReadPersistedState(repoStore, runId);
-  if (persistedState?.status === "stopped") {
+  const stateContent = await readStateJsonContent(repoStore, runId);
+  await refuseResumeWithEmptyState(repoStore, runId, stateContent);
+  let parsedState: OrchestrationState | null = null;
+  let stateParseDetail: string | null = null;
+  if (stateContent.trim()) {
+    try {
+      parsedState = deserialize(stateContent);
+    } catch (parseErr) {
+      stateParseDetail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    }
+  }
+  if (parsedState?.status === "stopped") {
     console.info(`Run ${runId} is already stopped; skipping orchestration`);
     return;
   }
 
   let planningRan = false;
   let planningOk = false;
+  let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
@@ -1904,53 +1905,39 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         config.tasks = canonReuse.tasks;
         config.delegation_map = canonReuse.delegation_map;
         await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-        await appendEvent(
-          repoStore,
-          runId,
-          makeEvent("planning_completed", `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`, null, {
-            phase_id: "planning",
-            agent_kind: "phase",
-          }),
-        );
+        planningEvents = {
+          emitStarted: false,
+          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
+        };
         planningOk = true;
-      } catch {
-        /* try full planning */
-      }
+      } catch {}
     }
     if (!planningOk) {
       planningOk = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
+      if (planningOk) {
+        planningEvents = {
+          emitStarted: true,
+          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
+        };
+      }
     }
   }
 
   validateConfig(config);
 
   let state: OrchestrationState;
-  let stateContent = "";
-  try {
-    stateContent = await repoStore.readFile(runId, "state.json");
-  } catch (readErr) {
-    throw readErr instanceof Error ? readErr : new Error(String(readErr));
-  }
   if (!stateContent.trim()) {
-    let eventsContent = "";
-    try {
-      eventsContent = await repoStore.readFile(runId, "events.jsonl");
-    } catch {
-      /* treat as no prior events */
-    }
+    const eventsContent = await repoStore.readFile(runId, "events.jsonl");
     if (eventsContent.trim()) {
       throw new Error(
         `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
       );
     }
     state = createInitialState(config, runId);
+  } else if (parsedState) {
+    state = parsedState;
   } else {
-    try {
-      state = deserialize(stateContent);
-    } catch (parseErr) {
-      const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
-      throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
-    }
+    throw new Error(`Invalid state.json for run ${runId}: ${stateParseDetail ?? "parse failed"}`);
   }
 
   reconcileAgentsFromConfig(state, config);
@@ -1972,6 +1959,20 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
+    if (planningOk && planningEvents) {
+      if (planningEvents.emitStarted) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+      );
+    }
     await syncToRepo(repoStore, runId, state);
   }
 
