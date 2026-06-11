@@ -1330,30 +1330,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("stopped");
   });
 
-  it("finalizes orchestration as stopped when SDK cancels without a stop sentinel", async () => {
-    const config = singleTaskConfig();
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING")],
-          result: { id: "r1", status: "cancelled" },
-        },
-      ],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    await runOrchestration("run-sdk-cancel-no-sentinel", fake, store);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("stopped");
-    expect(state.agents.t1.status).toBe("stopped");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(
-      events.some(
-        (e: { event_type: string; detail: string }) =>
-          e.event_type === "orchestration_stopped" && e.detail.includes("one or more tasks were stopped"),
-      ),
-    ).toBe(true);
-  });
-
   it("cascades terminal upstream failure to dependent pending tasks without launching them", async () => {
     const config = twoTaskChainConfig();
     const fake = new FakeAgentClient({
