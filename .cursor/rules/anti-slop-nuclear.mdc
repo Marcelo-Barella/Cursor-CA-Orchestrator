@@ -1,0 +1,37 @@
+---
+description: Anti-slop nuclear code standards — zero tolerance for redundancy and noise
+alwaysApply: true
+---
+
+# Anti-slop nuclear rules
+
+## Principles
+
+- Zero tolerance for redundancy.
+- No unnecessary comments.
+- No pointless wrappers.
+- No excessive structural depth.
+
+## Nuclear actions
+
+- Remove any comment that is not a "why" with a ticket.
+- Remove all duplicate functions or passive wrappers.
+- Flatten structures: nesting must not exceed 2 levels.
+- Split any function with multiple responsibilities.
+- Delete files used only for organizing without logic.
+- Rename generic variables (`data`, `info`, `result`) to semantic names.
+- Remove unused imports without asking.
+
+## Automatic delete criteria
+
+If something has no explicit reason, is not used directly, does not provide immediate clarity, or is more complex than necessary, delete it.
+
+## Red flags (immediate deletion)
+
+- Syntax comments.
+- Commented-out code.
+- Redundant try/catch blocks.
+- Files that only re-export.
+- Empty or meaningless AI-style words ("robust", "seamless", etc.).
+- Multiple returns without need.
+- Empty catch blocks.

@@ -5,7 +5,9 @@ node_modules/
 __pycache__/
 package-lock.json
 
-.cursor/
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 coordination/
 artifacts/
 uv.lock
