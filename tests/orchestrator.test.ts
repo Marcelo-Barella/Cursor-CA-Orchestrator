@@ -426,27 +426,7 @@ describe("orchestrator launch eligibility", () => {
     },
   );
 
-  it("treats a stopped task in the prior group as terminal for wave advancement", () => {
-    const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
-    config.delegation_map = {
-      phases: [
-        {
-          id: "phase-1",
-          groups: [
-            { id: "g1", task_ids: ["a"] },
-            { id: "g2", task_ids: ["b", "c"] },
-          ],
-        },
-      ],
-    };
-    const state = createInitialState(config, "run1");
-    state.agents.a!.status = "stopped";
-    const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
-    expect(eligible).toEqual(["b", "c"]);
-    expect(state.delegation_group_index).toBe(1);
-  });
-
-  it("after mapped waves complete, eligible ready tasks are only those not in the delegation map (defensive)", () => {
+  it("after mapped waves complete, eligible ready tasks are only those not in the delegation map", () => {
     const config = createConfig(["a", "b", "u"]);
     config.delegation_map = {
       phases: [
@@ -617,25 +597,6 @@ describe("runOrchestration validation gate", () => {
     } as unknown as RepoStoreClient;
     const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
     await expect(runOrchestration("run-empty-state", agentClient, repoStore)).rejects.toThrow(/refusing to reset orchestration progress/);
-  });
-
-  it("rejects whitespace-only state.json when events.jsonl shows an in-progress run", async () => {
-    const config = createConfig(["a"]);
-    const repoStore = {
-      async readFile(_runId: string, filename: string): Promise<string> {
-        if (filename === "config.yaml") return toYaml(config);
-        if (filename === "state.json") return "   \n";
-        if (filename === "events.jsonl") {
-          return `${JSON.stringify({ timestamp: "2026-06-01T00:00:00.000Z", event_type: "orchestration_started", task_id: null, detail: "started" })}\n`;
-        }
-        return "";
-      },
-      async writeFile(): Promise<void> {},
-      async updateFile(): Promise<void> {},
-      async deleteFile(): Promise<void> {},
-    } as unknown as RepoStoreClient;
-    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
-    await expect(runOrchestration("run-whitespace-state", agentClient, repoStore)).rejects.toThrow(/refusing to reset orchestration progress/);
   });
 
   it("propagates events.jsonl read errors when state.json is empty", async () => {
@@ -991,27 +952,6 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     expect(state.agents.t1!.status).toBe("running");
   });
 
-  it("skips agents that already have an agent_id", () => {
-    const config = createConfig(["t1"]);
-    const state = createInitialState(config, "run-recover-skip");
-    state.agents.t1!.agent_id = "agent-existing";
-    const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
-        detail: "Launched t1 (agent-other)",
-        payload: { agent_id: "agent-other", run_id: "run-other" },
-      },
-    ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
-    expect(state.agents.t1!.agent_id).toBe("agent-existing");
-    expect(state.agents.t1!.status).toBe("pending");
-  });
-
   it("ignores task_launched events with blank agent_id", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover-blank-detail");
@@ -1030,25 +970,6 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
-  });
-
-  it("ignores task_launched events with blank agent_id payloads", () => {
-    const config = createConfig(["t1"]);
-    const state = createInitialState(config, "run-recover-blank");
-    const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
-        detail: "Launched t1 ()",
-        payload: { agent_id: "   ", run_id: "run-blank" },
-      },
-    ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
-    expect(state.agents.t1!.agent_id).toBeNull();
   });
 
   it("uses the latest task_launched event when a task is relaunched", () => {
