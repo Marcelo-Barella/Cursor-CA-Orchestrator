@@ -1622,20 +1622,6 @@ function assertPlanMeetsPromptConstraints(config: OrchestratorConfig, parsedTask
   }
 }
 
-async function persistPlanTasks(
-  config: OrchestratorConfig,
-  runId: string,
-  repoStore: RepoStoreClient,
-  parsedTasks: TaskConfig[],
-): Promise<void> {
-  config.tasks = parsedTasks;
-  const canon = canonicalizeOrchestratorConfig(config);
-  config.repositories = canon.repositories;
-  config.tasks = canon.tasks;
-  config.delegation_map = canon.delegation_map;
-  await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-}
-
 async function applyParsedPlan(
   config: OrchestratorConfig,
   runId: string,
@@ -1646,7 +1632,12 @@ async function applyParsedPlan(
   config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
   const parsedTasks = parseTaskPlan(planContent, config);
   assertPlanMeetsPromptConstraints(config, parsedTasks);
-  await persistPlanTasks(config, runId, repoStore, parsedTasks);
+  config.tasks = parsedTasks;
+  const canon = canonicalizeOrchestratorConfig(config);
+  config.repositories = canon.repositories;
+  config.tasks = canon.tasks;
+  config.delegation_map = canon.delegation_map;
+  await repoStore.writeFile(runId, "config.yaml", toYaml(config));
   return parsedTasks;
 }
 
