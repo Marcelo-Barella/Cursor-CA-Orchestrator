@@ -130,7 +130,7 @@ export function singleTaskConfig(): OrchestratorConfig {
 
 let unmockedFetch: typeof fetch;
 
-export function installGithubBranchPrepMock(): void {
+export function installGithubBranchPrepMock(opts?: { rejectRefCreate?: boolean }): void {
   unmockedFetch = globalThis.fetch;
   globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -152,6 +152,12 @@ export function installGithubBranchPrepMock(): void {
       });
     }
     if (url.includes("/git/refs") && init?.method === "POST") {
+      if (opts?.rejectRefCreate) {
+        return new Response(JSON.stringify({ message: "Reference update not allowed" }), {
+          status: 422,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return new Response(JSON.stringify({ ref: "refs/heads/x" }), {
         status: 201,
         headers: { "Content-Type": "application/json" },
@@ -172,15 +178,5 @@ export function restoreGithubBranchPrepMock(): void {
 }
 
 export function installGithubBranchPrepRejectMock(): void {
-  unmockedFetch = globalThis.fetch;
-  globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (url.startsWith("https://api.github.com/") && url.includes("/git/refs") && init?.method === "POST") {
-      return new Response(JSON.stringify({ message: "Reference update not allowed" }), {
-        status: 422,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    return unmockedFetch(input, init);
-  }) as typeof fetch;
+  installGithubBranchPrepMock({ rejectRefCreate: true });
 }
