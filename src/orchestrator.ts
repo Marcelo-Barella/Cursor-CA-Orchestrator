@@ -1600,10 +1600,6 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
-function isPlanConstraintValidationError(err: unknown): boolean {
-  return String(err).includes("Plan constraint validation failed");
-}
-
 async function applyTaskPlanContent(
   config: OrchestratorConfig,
   planContent: string,
@@ -1723,13 +1719,6 @@ async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): 
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
-}
-
-async function rereadStateJsonIfEmpty(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<string> {
-  if (stateContent.trim()) {
-    return stateContent;
-  }
-  return repoStore.readFile(runId, "state.json");
 }
 
 async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
@@ -1886,16 +1875,15 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const ghToken = process.env.GH_TOKEN ?? "";
 
   let stateContent = await readStateJsonContent(repoStore, runId);
-  stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
+  if (!stateContent.trim()) {
+    stateContent = await repoStore.readFile(runId, "state.json");
+  }
   await refuseResumeWithEmptyState(repoStore, runId, stateContent);
   let parsedState: OrchestrationState | null = null;
-  let stateParseDetail: string | null = null;
   if (stateContent.trim()) {
     try {
       parsedState = deserialize(stateContent);
-    } catch (parseErr) {
-      stateParseDetail = parseErr instanceof Error ? parseErr.message : String(parseErr);
-    }
+    } catch {}
   }
   if (parsedState?.status === "stopped") {
     console.info(`Run ${runId} is already stopped; skipping orchestration`);
@@ -1920,7 +1908,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         };
         planningOk = true;
       } catch (reuseErr) {
-        if (isPlanConstraintValidationError(reuseErr)) {
+        if (String(reuseErr).includes("Plan constraint validation failed")) {
           planningFailureCause = reuseErr;
         }
       }
