@@ -1907,11 +1907,11 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
           completedDetail: `Planning completed: ${taskCount} tasks (reused existing plan)`,
         };
         planningOk = true;
-      } catch (reuseErr) {
-        planningFailureDetail = String(reuseErr);
+      } catch {
+        /* stale or invalid task-plan.json — fall through to full planning */
       }
     }
-    if (!planningOk && !planningFailureDetail) {
+    if (!planningOk) {
       try {
         await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
         planningOk = true;
