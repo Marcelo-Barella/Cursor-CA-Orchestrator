@@ -760,6 +760,40 @@ function createWakeup(): { resolve: () => void; promise: Promise<void> } {
   return { resolve: resolveFn, promise };
 }
 
+async function syncStopRequestedFromRepo(ctx: LoopContext): Promise<boolean> {
+  if (ctx.stopRequested.value) return true;
+  try {
+    const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+    if (stopContent) {
+      ctx.stopRequested.value = true;
+      return true;
+    }
+  } catch {
+    /* poller will retry */
+  }
+  return false;
+}
+
+async function shouldAbortWorkerFinalize(ctx: LoopContext): Promise<boolean> {
+  if (ctx.stopRequested.value) return true;
+  return syncStopRequestedFromRepo(ctx);
+}
+
+async function finalizeWorkerAsStopped(
+  ctx: LoopContext,
+  taskId: string,
+  sdkAgent: SdkAgent,
+  finalizedAt: string,
+): Promise<void> {
+  const agent = ctx.state.agents[taskId]!;
+  agent.status = "stopped";
+  agent.finished_at = finalizedAt;
+  await cascadeStopped(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
+  ctx.activeWorkers.delete(taskId);
+  await safeDisposeAgent(sdkAgent);
+  markStateDirty(ctx);
+}
+
 async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   try {
     await agent[Symbol.asyncDispose]();
@@ -774,6 +808,7 @@ async function launchWorkerAgent(
   task: TaskConfig,
   depOutputs: Record<string, Record<string, unknown>>,
 ): Promise<void> {
+  if (await syncStopRequestedFromRepo(ctx)) return;
   const agent = ctx.state.agents[taskId]!;
   const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
   const planRef = planRefForConsolidatedRunLine(task, ref);
@@ -1134,12 +1169,7 @@ async function runWorkerStream(
   const finalizedAt = nowIso();
 
   if (ctx.stopRequested.value) {
-    agent.status = "stopped";
-    agent.finished_at = finalizedAt;
-    await cascadeStopped(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
-    ctx.activeWorkers.delete(taskId);
-    await safeDisposeAgent(sdkAgent);
-    markStateDirty(ctx);
+    await finalizeWorkerAsStopped(ctx, taskId, sdkAgent, finalizedAt);
     return;
   }
 
@@ -1164,6 +1194,10 @@ async function runWorkerStream(
     );
     await cascadeStopped(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
   } else if (payloadStatus === "completed" && agentFilePersisted) {
+    if (await shouldAbortWorkerFinalize(ctx)) {
+      await finalizeWorkerAsStopped(ctx, taskId, sdkAgent, finalizedAt);
+      return;
+    }
     agent.status = "finished";
     agent.finished_at = finalizedAt;
     agent.summary = payloadSummary ?? "Task completed";
@@ -1358,6 +1392,7 @@ async function launchReadyTasks(ctx: LoopContext): Promise<void> {
     if (eligible.length === 0) return;
     await Promise.all(
       eligible.map(async (taskId) => {
+        if (await syncStopRequestedFromRepo(ctx)) return;
         const task = taskMap[taskId];
         if (!task) return;
         assignTaskPhase(ctx.state, taskId, "execution");
