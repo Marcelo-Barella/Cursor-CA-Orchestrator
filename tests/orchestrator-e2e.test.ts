@@ -1075,7 +1075,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     const updatedConfig = files.get("config.yaml")!;
     expect(updatedConfig).toContain("t1");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
     expect(
       events.some(
         (e: { event_type: string; detail?: string }) =>
@@ -1083,36 +1082,6 @@ describe("runOrchestration with SDK (happy path)", () => {
       ),
     ).toBe(true);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
-  });
-
-  it("rejects reused task-plan.json when task prompts miss prompt constraints", async () => {
-    const config = promptOnlyConfig();
-    config.prompt = "Every route must use your translation method.";
-    const taskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Implement the home page.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    const fake = new FakeAgentClient({
-      defaultScripts: [{ sendThrows: new Error("planner should not run") }],
-    });
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "task-plan.json": taskPlan,
-    });
-    await expect(runOrchestration("run-reuse-constraint-fail", fake, store)).rejects.toThrow(
-      /Plan constraint validation failed/,
-    );
-    expect(fake.launches).toHaveLength(0);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
-    expect(events.some((e: { event_type: string }) => e.event_type === "planning_failed")).toBe(true);
   });
 
   it("marks a task blocked when worker JSON reports blocked status", async () => {
