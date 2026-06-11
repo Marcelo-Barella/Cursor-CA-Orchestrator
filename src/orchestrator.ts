@@ -1732,6 +1732,13 @@ async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: str
   }
 }
 
+function resetEventRecoveredAgent(agent: AgentState, ctx: LoopContext): void {
+  agent.agent_id = null;
+  agent.status = "pending";
+  agent.started_at = null;
+  markStateDirty(ctx);
+}
+
 async function reattachWorkers(ctx: LoopContext): Promise<void> {
   const { Agent } = await import("@cursor/sdk");
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
@@ -1753,10 +1760,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
         if (ctx.eventRecoveredTaskIds.has(taskId)) {
-          agent.agent_id = null;
-          agent.status = "pending";
-          agent.started_at = null;
-          markStateDirty(ctx);
+          resetEventRecoveredAgent(agent, ctx);
           continue;
         }
         agent.status = "failed";
@@ -1793,10 +1797,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
       if (ctx.eventRecoveredTaskIds.has(taskId)) {
-        agent.agent_id = null;
-        agent.status = "pending";
-        agent.started_at = null;
-        markStateDirty(ctx);
+        resetEventRecoveredAgent(agent, ctx);
         continue;
       }
       agent.status = "failed";
