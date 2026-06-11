@@ -6,6 +6,7 @@ import { toYaml } from "../src/config/parse.js";
 import type { TaskConfig } from "../src/config/types.js";
 import { buildRepoCreationPrompt } from "../src/prompt-builder.js";
 import {
+  allAgentsTerminal,
   extractDelegationPhases,
   filterEligibleReadyTasks,
   getBlockedTasks,
@@ -47,6 +48,30 @@ function createConfig(
     bootstrap_repo_name: "b",
   };
 }
+
+describe("allAgentsTerminal", () => {
+  it("returns true when every agent has a terminal status", () => {
+    const config = createConfig(["a", "b"]);
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "finished";
+    state.agents.b!.status = "stopped";
+    expect(allAgentsTerminal(state)).toBe(true);
+  });
+
+  it("returns false when any agent is still active", () => {
+    const config = createConfig(["a", "b"]);
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "finished";
+    state.agents.b!.status = "pending";
+    expect(allAgentsTerminal(state)).toBe(false);
+  });
+
+  it("returns false when there are no agents", () => {
+    const config = createConfig([]);
+    const state = createInitialState(config, "run1");
+    expect(allAgentsTerminal(state)).toBe(false);
+  });
+});
 
 describe("getBlockedTasks", () => {
   it("returns only agents in blocked status", () => {
