@@ -1894,6 +1894,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   let planningCompletedDetail: string | null = null;
   let emitPlanningStarted = false;
   let planningFailureDetail: string | null = null;
+  let usedFullPlanningPhase = false;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
@@ -1907,6 +1908,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       }
     }
     if (!planningCompletedDetail) {
+      usedFullPlanningPhase = true;
       try {
         await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
         emitPlanningStarted = true;
@@ -1967,11 +1969,26 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         makeEvent("planning_completed", planningCompletedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
     } else if (planningFailureDetail) {
+      if (usedFullPlanningPhase) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
       await appendEvent(
         repoStore,
         runId,
         makeEvent("planning_failed", planningFailureDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
+    }
+    if (planningFailureDetail) {
+      state.status = "failed";
+      state.error = planningFailureDetail;
+      if (state.main_agent) {
+        state.main_agent.status = "failed";
+        state.main_agent.finished_at = nowIso();
+      }
     }
     await syncToRepo(repoStore, runId, state);
     if (planningFailureDetail) {

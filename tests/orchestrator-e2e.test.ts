@@ -920,8 +920,11 @@ describe("runOrchestration with SDK (happy path)", () => {
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
 
     await expect(runOrchestration("run-plan-retry", failFake, store)).rejects.toThrow(/planner boom/);
-    expect(files.get("state.json")).toBeTruthy();
+    const stateAfterFailure = JSON.parse(files.get("state.json")!);
+    expect(stateAfterFailure.status).toBe("failed");
+    expect(stateAfterFailure.error).toMatch(/planner boom/);
     const eventsAfterFailure = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(eventsAfterFailure.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(true);
     expect(eventsAfterFailure.some((e: { event_type: string }) => e.event_type === "planning_failed")).toBe(true);
 
     files.set("task-plan.json", taskPlan);
