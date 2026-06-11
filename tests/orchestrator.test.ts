@@ -575,7 +575,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.agent_id).toBe("agent-live-9");
     expect(state.agents.t1!.status).toBe("launching");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover/t1");
@@ -601,7 +601,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.agent_id).toBe("legacy-agent-9");
     expect(state.agents.t1!.status).toBe("launching");
   });
@@ -631,7 +631,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: {},
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
   });
