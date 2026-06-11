@@ -284,39 +284,21 @@ export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   return best;
 }
 
-export function findLastInFlightLaunchEvent(events: OrchestrationEvent[], taskId: string): OrchestrationEvent | null {
-  let lastLaunch: OrchestrationEvent | null = null;
-  for (const event of events) {
-    if (event.task_id !== taskId) continue;
-    if (IN_FLIGHT_LAUNCH_TERMINAL_EVENTS.has(event.event_type)) {
-      lastLaunch = null;
-      continue;
-    }
-    if (event.event_type === "task_launched") {
-      lastLaunch = event;
-    }
-  }
-  return lastLaunch;
-}
-
-export function shouldRelaunchMissingEventAgent(
-  agent: AgentState,
-  events: OrchestrationEvent[],
-  eventRecoveredTaskIds: Set<string>,
-): boolean {
-  if (eventRecoveredTaskIds.has(agent.task_id)) return true;
-  const lastLaunch = findLastInFlightLaunchEvent(events, agent.task_id);
-  if (!lastLaunch || !agent.agent_id) return false;
-  const launchedId = agentIdFromTaskLaunchedEvent(lastLaunch);
-  if (launchedId !== agent.agent_id) return false;
-  return agent.started_at === lastLaunch.timestamp;
-}
-
-export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): string[] {
-  const recoveredTaskIds: string[] = [];
+export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): boolean {
+  let changed = false;
   for (const agent of Object.values(state.agents)) {
     if (agent.agent_id || agent.status !== "pending") continue;
-    const lastLaunch = findLastInFlightLaunchEvent(events, agent.task_id);
+    let lastLaunch: OrchestrationEvent | null = null;
+    for (const event of events) {
+      if (event.task_id !== agent.task_id) continue;
+      if (IN_FLIGHT_LAUNCH_TERMINAL_EVENTS.has(event.event_type)) {
+        lastLaunch = null;
+        continue;
+      }
+      if (event.event_type === "task_launched") {
+        lastLaunch = event;
+      }
+    }
     if (!lastLaunch) continue;
     const agentId = agentIdFromTaskLaunchedEvent(lastLaunch);
     if (!agentId) continue;
@@ -329,9 +311,9 @@ export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, e
     if (branch && !agent.branch_name) {
       agent.branch_name = branch;
     }
-    recoveredTaskIds.push(agent.task_id);
+    changed = true;
   }
-  return recoveredTaskIds;
+  return changed;
 }
 
 function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
@@ -715,8 +697,6 @@ type LoopContext = {
   apiKey: string;
   ghToken: string;
   activeWorkers: Map<string, WorkerHandle>;
-  eventRecoveredTaskIds: Set<string>;
-  launchEvents: OrchestrationEvent[];
   dirty: { value: boolean };
   wakeup: { resolve: () => void; promise: Promise<void> };
   stopRequested: { value: boolean };
@@ -1751,13 +1731,6 @@ async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: str
   }
 }
 
-function resetEventRecoveredAgent(agent: AgentState, ctx: LoopContext): void {
-  agent.agent_id = null;
-  agent.status = "pending";
-  agent.started_at = null;
-  markStateDirty(ctx);
-}
-
 async function reattachWorkers(ctx: LoopContext): Promise<void> {
   const { Agent } = await import("@cursor/sdk");
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
@@ -1778,10 +1751,6 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
-        if (shouldRelaunchMissingEventAgent(agent, ctx.launchEvents, ctx.eventRecoveredTaskIds)) {
-          resetEventRecoveredAgent(agent, ctx);
-          continue;
-        }
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
         continue;
@@ -1815,10 +1784,6 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
-      if (shouldRelaunchMissingEventAgent(agent, ctx.launchEvents, ctx.eventRecoveredTaskIds)) {
-        resetEventRecoveredAgent(agent, ctx);
-        continue;
-      }
       agent.status = "failed";
       agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
       markStateDirty(ctx);
@@ -1978,7 +1943,9 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   reconcileAgentsFromConfig(state, config);
   const launchEvents = await readEvents(repoStore, runId);
-  const eventRecoveredTaskIds = reconcileInFlightLaunchesFromEvents(state, launchEvents);
+  if (reconcileInFlightLaunchesFromEvents(state, launchEvents)) {
+    await syncToRepo(repoStore, runId, state);
+  }
 
   if (state.status === "pending") {
     state.status = "running";
@@ -2046,8 +2013,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     apiKey,
     ghToken,
     activeWorkers: new Map(),
-    eventRecoveredTaskIds: new Set(eventRecoveredTaskIds),
-    launchEvents,
     dirty: { value: true },
     wakeup: createWakeup(),
     stopRequested: { value: false },
@@ -2055,9 +2020,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   try {
     await reattachWorkers(ctx);
-    if (ctx.dirty.value) {
-      await syncToRepo(repoStore, runId, state);
-    }
     await orchestrationLoop(ctx);
   } catch (exc) {
     console.error("Orchestration loop failed", exc);
