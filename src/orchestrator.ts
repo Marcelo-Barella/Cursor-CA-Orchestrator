@@ -1934,7 +1934,23 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    state = createInitialState(config, runId);
+    let lateStateContent = stateContent;
+    try {
+      lateStateContent = await repoStore.readFile(runId, "state.json");
+    } catch (readErr) {
+      throw readErr instanceof Error ? readErr : new Error(String(readErr));
+    }
+    await refuseResumeWithEmptyState(repoStore, runId, lateStateContent);
+    if (!lateStateContent.trim()) {
+      state = createInitialState(config, runId);
+    } else {
+      try {
+        state = deserialize(lateStateContent);
+      } catch (parseErr) {
+        const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+        throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
+      }
+    }
   } else if (parsedState) {
     state = parsedState;
   } else {
