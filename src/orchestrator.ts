@@ -1659,11 +1659,11 @@ async function runPlanningPhase(
     const runs = await (await import("@cursor/sdk"))
       .Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey })
       .catch(() => ({ items: [] as { result?: unknown }[] }));
-    const plannerRun = runs.items.find(
-      (run) => typeof run.result === "string" && run.result.trim(),
-    );
-    if (plannerRun && typeof plannerRun.result === "string") {
-      planContent = plannerRun.result;
+    for (const run of runs.items) {
+      if (typeof run.result === "string" && run.result.trim()) {
+        planContent = run.result;
+        break;
+      }
     }
   }
   await safeDisposeAgent(plannerAgent);
@@ -1902,12 +1902,14 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     reusePlanContent = storedPlan || null;
   }
   if (reusePlanContent) {
-    try {
-      const ghUser = await resolveGithubUsername(ghToken);
-      const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-      const taskCount = await applyTaskPlanContent(config, runId, repoStore, reusePlanContent, bootstrapUrl);
+    const ghUser = await resolveGithubUsername(ghToken);
+    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+    const taskCount = await applyTaskPlanContent(config, runId, repoStore, reusePlanContent, bootstrapUrl).catch(
+      () => null,
+    );
+    if (taskCount !== null) {
       planningCompletedDetail = `Planning completed: ${taskCount} tasks (reused existing plan)`;
-    } catch {}
+    }
   }
   if (needsPlanning && !planningCompletedDetail) {
     try {
