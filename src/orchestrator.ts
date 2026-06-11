@@ -708,6 +708,15 @@ function markStateDirty(ctx: LoopContext): void {
   triggerWakeup(ctx);
 }
 
+function resetEventRecoveredAgentIfStale(ctx: LoopContext, taskId: string, agent: AgentState): boolean {
+  if (!ctx.eventRecoveredTaskIds.has(taskId)) return false;
+  agent.agent_id = null;
+  agent.status = "pending";
+  agent.started_at = null;
+  markStateDirty(ctx);
+  return true;
+}
+
 function triggerWakeup(ctx: LoopContext): void {
   const resolve = ctx.wakeup.resolve;
   ctx.wakeup = createWakeup();
@@ -1752,13 +1761,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
-        if (ctx.eventRecoveredTaskIds.has(taskId)) {
-          agent.agent_id = null;
-          agent.status = "pending";
-          agent.started_at = null;
-          markStateDirty(ctx);
-          continue;
-        }
+        if (resetEventRecoveredAgentIfStale(ctx, taskId, agent)) continue;
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
         continue;
@@ -1792,13 +1795,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
-      if (ctx.eventRecoveredTaskIds.has(taskId)) {
-        agent.agent_id = null;
-        agent.status = "pending";
-        agent.started_at = null;
-        markStateDirty(ctx);
-        continue;
-      }
+      if (resetEventRecoveredAgentIfStale(ctx, taskId, agent)) continue;
       agent.status = "failed";
       agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
       markStateDirty(ctx);
