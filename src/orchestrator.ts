@@ -284,21 +284,39 @@ export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   return best;
 }
 
+export function findLastInFlightLaunchEvent(events: OrchestrationEvent[], taskId: string): OrchestrationEvent | null {
+  let lastLaunch: OrchestrationEvent | null = null;
+  for (const event of events) {
+    if (event.task_id !== taskId) continue;
+    if (IN_FLIGHT_LAUNCH_TERMINAL_EVENTS.has(event.event_type)) {
+      lastLaunch = null;
+      continue;
+    }
+    if (event.event_type === "task_launched") {
+      lastLaunch = event;
+    }
+  }
+  return lastLaunch;
+}
+
+export function shouldRelaunchMissingEventAgent(
+  agent: AgentState,
+  events: OrchestrationEvent[],
+  eventRecoveredTaskIds: Set<string>,
+): boolean {
+  if (eventRecoveredTaskIds.has(agent.task_id)) return true;
+  const lastLaunch = findLastInFlightLaunchEvent(events, agent.task_id);
+  if (!lastLaunch || !agent.agent_id) return false;
+  const launchedId = agentIdFromTaskLaunchedEvent(lastLaunch);
+  if (launchedId !== agent.agent_id) return false;
+  return agent.started_at === lastLaunch.timestamp;
+}
+
 export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): string[] {
   const recoveredTaskIds: string[] = [];
   for (const agent of Object.values(state.agents)) {
     if (agent.agent_id || agent.status !== "pending") continue;
-    let lastLaunch: OrchestrationEvent | null = null;
-    for (const event of events) {
-      if (event.task_id !== agent.task_id) continue;
-      if (IN_FLIGHT_LAUNCH_TERMINAL_EVENTS.has(event.event_type)) {
-        lastLaunch = null;
-        continue;
-      }
-      if (event.event_type === "task_launched") {
-        lastLaunch = event;
-      }
-    }
+    const lastLaunch = findLastInFlightLaunchEvent(events, agent.task_id);
     if (!lastLaunch) continue;
     const agentId = agentIdFromTaskLaunchedEvent(lastLaunch);
     if (!agentId) continue;
@@ -698,6 +716,7 @@ type LoopContext = {
   ghToken: string;
   activeWorkers: Map<string, WorkerHandle>;
   eventRecoveredTaskIds: Set<string>;
+  launchEvents: OrchestrationEvent[];
   dirty: { value: boolean };
   wakeup: { resolve: () => void; promise: Promise<void> };
   stopRequested: { value: boolean };
@@ -1759,7 +1778,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
-        if (ctx.eventRecoveredTaskIds.has(taskId)) {
+        if (shouldRelaunchMissingEventAgent(agent, ctx.launchEvents, ctx.eventRecoveredTaskIds)) {
           resetEventRecoveredAgent(agent, ctx);
           continue;
         }
@@ -1796,7 +1815,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
-      if (ctx.eventRecoveredTaskIds.has(taskId)) {
+      if (shouldRelaunchMissingEventAgent(agent, ctx.launchEvents, ctx.eventRecoveredTaskIds)) {
         resetEventRecoveredAgent(agent, ctx);
         continue;
       }
@@ -1960,9 +1979,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   reconcileAgentsFromConfig(state, config);
   const launchEvents = await readEvents(repoStore, runId);
   const eventRecoveredTaskIds = reconcileInFlightLaunchesFromEvents(state, launchEvents);
-  if (eventRecoveredTaskIds.length > 0) {
-    await syncToRepo(repoStore, runId, state);
-  }
 
   if (state.status === "pending") {
     state.status = "running";
@@ -2031,6 +2047,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     ghToken,
     activeWorkers: new Map(),
     eventRecoveredTaskIds: new Set(eventRecoveredTaskIds),
+    launchEvents,
     dirty: { value: true },
     wakeup: createWakeup(),
     stopRequested: { value: false },
@@ -2038,6 +2055,9 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   try {
     await reattachWorkers(ctx);
+    if (ctx.dirty.value) {
+      await syncToRepo(repoStore, runId, state);
+    }
     await orchestrationLoop(ctx);
   } catch (exc) {
     console.error("Orchestration loop failed", exc);

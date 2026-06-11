@@ -326,6 +326,63 @@ describe("reattachWorkers running tasks", () => {
     expect(fake.launches).toHaveLength(0);
   });
 
+  it("relaunches when pre-sync persisted a dead event-recovered agent_id", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-recover-pre-sync-corruption";
+    const deadAgentId = "agent-dead-pre-sync";
+    const launchTimestamp = "2026-06-01T00:00:00.000Z";
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    state.agents.t1 = {
+      ...state.agents.t1!,
+      agent_id: deadAgentId,
+      status: "launching",
+      started_at: launchTimestamp,
+      branch_name: `cursor-orch/${runId}/t1`,
+    };
+
+    const launchScript = completedResumeScript(runId);
+    listRunsMock.mockResolvedValue({ items: [] });
+
+    const fake = new FakeAgentClient({
+      runsByAgent: { [deadAgentId]: [] },
+      defaultScripts: [launchScript],
+      conversationText: null,
+    });
+
+    const launchEvent = JSON.stringify({
+      timestamp: launchTimestamp,
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: `Launched t1 (${deadAgentId})`,
+      payload: {
+        agent_id: deadAgentId,
+        run_id: "run-dead",
+        repository: "https://github.com/acme/svc",
+        ref: "main",
+        branch: `cursor-orch/${runId}/t1`,
+      },
+    });
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+      "events.jsonl": `${launchEvent}\n`,
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.status).toBe("completed");
+    expect(final.agents.t1.status).toBe("finished");
+    expect(fake.launches).toHaveLength(1);
+  });
+
   it("relaunches when event-recovered agent has no SDK runs", async () => {
     const config = singleTaskConfig();
     const runId = "run-recover-dead-agent";
