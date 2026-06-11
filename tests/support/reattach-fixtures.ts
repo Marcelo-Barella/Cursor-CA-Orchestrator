@@ -46,6 +46,26 @@ export function promptOnlyConfig(): OrchestratorConfig {
   };
 }
 
+export function validTaskPlanJson(): string {
+  return JSON.stringify({
+    tasks: [
+      {
+        id: "t1",
+        repo: "svc",
+        prompt: "Planned work.",
+        depends_on: [],
+        timeout_minutes: 30,
+      },
+    ],
+  });
+}
+
+export function parseEvents(files: FileStore): { event_type: string; detail?: string }[] {
+  const raw = files.get("events.jsonl");
+  if (!raw?.trim()) return [];
+  return raw.trim().split("\n").map((line) => JSON.parse(line));
+}
+
 export function completedWorkerScript(
   taskId: string,
   runId: string,

@@ -1866,6 +1866,10 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
   }
 }
 
+type PlanningOutcome =
+  | { status: "finished"; emitStarted: boolean; detail: string }
+  | { status: "failed"; detail: string };
+
 export async function runOrchestration(runId: string, agentClient: AgentClient, repoStore: RepoStoreClient): Promise<void> {
   const configStr = await repoStore.readFile(runId, "config.yaml");
   let config = parseConfig(configStr);
@@ -1890,9 +1894,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     return;
   }
 
-  type PlanningOutcome =
-    | { status: "finished"; emitStarted: boolean; detail: string }
-    | { status: "failed"; detail: string };
   let planningOutcome: PlanningOutcome | null = null;
   if (config.prompt && !config.tasks.length) {
     const planContent = await repoStore.readFile(runId, "task-plan.json");

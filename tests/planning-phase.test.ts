@@ -6,8 +6,10 @@ import {
   completedWorkerScript,
   createInMemoryRepoStore,
   installGithubBranchPrepMock,
+  parseEvents,
   promptOnlyConfig,
   restoreGithubBranchPrepMock,
+  validTaskPlanJson,
 } from "./support/reattach-fixtures.js";
 
 const waitForPlanMock = vi.hoisted(() => vi.fn());
@@ -31,26 +33,6 @@ vi.mock("@cursor/sdk", async (importOriginal) => {
     },
   };
 });
-
-function validTaskPlanJson(): string {
-  return JSON.stringify({
-    tasks: [
-      {
-        id: "t1",
-        repo: "svc",
-        prompt: "Planned work.",
-        depends_on: [],
-        timeout_minutes: 30,
-      },
-    ],
-  });
-}
-
-function parseEvents(files: Map<string, string>): { event_type: string; detail?: string }[] {
-  const raw = files.get("events.jsonl");
-  if (!raw?.trim()) return [];
-  return raw.trim().split("\n").map((l) => JSON.parse(l));
-}
 
 describe("planning phase", () => {
   const originalEnv = { ...process.env };
