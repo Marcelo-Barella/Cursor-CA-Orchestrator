@@ -1639,9 +1639,7 @@ async function runPlanningPhase(
             break;
           }
         }
-      } catch {
-        /* no fallback available */
-      }
+      } catch {}
     }
     await safeDisposeAgent(plannerAgent);
     if (!planContent) {
@@ -1890,7 +1888,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningRan = false;
   let planningOk = false;
-  let planningAttemptedFull = false;
   let planningFailureDetail: string | null = null;
   let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
@@ -1918,7 +1915,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       }
     }
     if (!planningOk) {
-      planningAttemptedFull = true;
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
         planningOk = true;
@@ -1982,13 +1978,11 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
     } else if (!planningOk) {
-      if (planningAttemptedFull) {
-        await appendEvent(
-          repoStore,
-          runId,
-          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
-        );
-      }
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+      );
       const failureDetail = planningFailureDetail ?? "Planning failed";
       await appendEvent(
         repoStore,
