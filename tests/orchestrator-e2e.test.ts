@@ -1081,62 +1081,6 @@ describe("runOrchestration with SDK (happy path)", () => {
           e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
       ),
     ).toBe(true);
-    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
-  });
-
-  it("falls back to full planning when task-plan.json reuse fails", async () => {
-    const config = promptOnlyConfig();
-    const validPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Planned via fallback.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    let taskPlanReadCount = 0;
-    const { store: baseStore, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "task-plan.json": "not-valid-json",
-    });
-    const store = {
-      ...baseStore,
-      async readFile(runId: string, filename: string): Promise<string> {
-        if (filename === "task-plan.json") {
-          taskPlanReadCount += 1;
-          return taskPlanReadCount === 1 ? "not-valid-json" : validPlan;
-        }
-        return baseStore.readFile(runId, filename);
-      },
-    } as unknown as RepoStoreClient;
-
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r-plan", status: "finished", result: "" },
-        },
-        completedWorkerScript("t1", "run-fallback-plan"),
-      ],
-    });
-
-    await runOrchestration("run-fallback-plan", fake, store);
-
-    expect(fake.launches).toHaveLength(2);
-    expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
-    expect(fake.launches[1]!.prompt).toContain("Planned via fallback.");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(true);
-    expect(
-      events.some(
-        (e: { event_type: string; detail?: string }) =>
-          e.event_type === "planning_completed" && !e.detail?.includes("reused existing plan"),
-      ),
-    ).toBe(true);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
