@@ -1048,6 +1048,64 @@ describe("runOrchestration with SDK (happy path)", () => {
     );
   });
 
+  it("defers planning_failed when cached task-plan.json fails constraint validation without launching a planner", async () => {
+    const config = {
+      ...promptOnlyConfig(),
+      prompt: "Every route must use your translation method.",
+    };
+    const invalidPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Implement the page without the required constraint phrase.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const fixedPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Implement the page. Every route must use your translation method.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const failFake = new FakeAgentClient({
+      defaultScripts: [{ sendThrows: new Error("planner must not run on invalid reuse") }],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": invalidPlan,
+    });
+
+    await expect(runOrchestration("run-reuse-constraint-fail", failFake, store)).rejects.toThrow(
+      /Plan constraint validation failed/,
+    );
+    expect(failFake.launches).toHaveLength(0);
+    const stateAfterFailure = JSON.parse(files.get("state.json")!);
+    expect(stateAfterFailure.status).toBe("running");
+    expect(stateAfterFailure.phase_agents.planning.status).toBe("failed");
+    const eventsAfterFailure = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const startedIdx = eventsAfterFailure.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
+    const failedIdx = eventsAfterFailure.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(failedIdx).toBeGreaterThan(startedIdx);
+    expect(eventsAfterFailure[failedIdx]!.detail).toContain("Plan constraint validation failed");
+
+    files.set("task-plan.json", fixedPlan);
+    const okFake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", "run-reuse-constraint-fail")],
+    });
+    await runOrchestration("run-reuse-constraint-fail", okFake, store);
+    expect(okFake.launches).toHaveLength(1);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
     const taskPlan = JSON.stringify({
