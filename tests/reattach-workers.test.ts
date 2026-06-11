@@ -280,6 +280,49 @@ describe("reattachWorkers", () => {
     expect(final.agents.t1.branch_name).toBe(branchName);
   });
 
+  it("does not persist event-recovered agent_id before reattach verification", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-recover-no-premature-sync";
+    const deadAgentId = "agent-dead-events";
+    const state = runningOrchestrationState(config, runId);
+
+    const launchScript = completedResumeScript(runId);
+    listRunsMock.mockResolvedValue({ items: [] });
+
+    const fake = new FakeAgentClient({
+      runsByAgent: { [deadAgentId]: [] },
+      defaultScripts: [launchScript],
+      conversationText: null,
+    });
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+      "events.jsonl": `${JSON.stringify(taskLaunchedEvent(runId, deadAgentId, { runIdInPayload: "run-dead" }))}\n`,
+    });
+
+    const prematureSyncs: Array<{ agentId: string; status: string }> = [];
+    const origWrite = store.writeFile.bind(store);
+    vi.spyOn(store, "writeFile").mockImplementation(async (runIdArg, filename, content) => {
+      if (filename === "state.json") {
+        const parsed = JSON.parse(content) as { agents?: { t1?: { agent_id?: string; status?: string } } };
+        const t1 = parsed.agents?.t1;
+        if (t1?.agent_id === deadAgentId && t1?.status === "launching") {
+          prematureSyncs.push({ agentId: t1.agent_id, status: t1.status });
+        }
+      }
+      return origWrite(runIdArg, filename, content);
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    expect(prematureSyncs).toHaveLength(0);
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.status).toBe("completed");
+    expect(final.agents.t1.status).toBe("finished");
+    expect(fake.launches).toHaveLength(1);
+  });
+
   it("marks the task failed when resumeCloudAgent throws", async () => {
     const config = singleTaskConfig();
     const runId = "run-reattach-resume-fail";

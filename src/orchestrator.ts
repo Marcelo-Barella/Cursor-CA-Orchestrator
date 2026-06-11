@@ -1951,9 +1951,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   reconcileAgentsFromConfig(state, config);
   const launchEvents = await readEvents(repoStore, runId);
   const eventRecoveredTaskIds = reconcileInFlightLaunchesFromEvents(state, launchEvents);
-  if (eventRecoveredTaskIds.length > 0) {
-    await syncToRepo(repoStore, runId, state);
-  }
 
   if (state.status === "pending") {
     state.status = "running";
