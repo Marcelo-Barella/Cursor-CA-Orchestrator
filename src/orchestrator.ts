@@ -1656,15 +1656,17 @@ async function runPlanningPhase(
   }
   let planContent = await waitForPlan(repoStore, runId);
   if (!planContent) {
-    try {
-      const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
+    const runs = await (await import("@cursor/sdk"))
+      .Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey })
+      .catch(() => null);
+    if (runs) {
       for (const r of runs.items) {
         if (typeof r.result === "string" && r.result.trim()) {
           planContent = r.result;
           break;
         }
       }
-    } catch {}
+    }
   }
   await safeDisposeAgent(plannerAgent);
   if (!planContent) {
@@ -1883,7 +1885,9 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   if (stateContent.trim()) {
     try {
       parsedState = deserialize(stateContent);
-    } catch {}
+    } catch {
+      parsedState = null;
+    }
   }
   if (parsedState?.status === "stopped") {
     console.info(`Run ${runId} is already stopped; skipping orchestration`);
@@ -1908,7 +1912,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         };
         planningOk = true;
       } catch (reuseErr) {
-        if (String(reuseErr).includes("Plan constraint validation failed")) {
+        if (reuseErr instanceof Error && reuseErr.message.startsWith("Plan constraint validation failed")) {
           planningFailureCause = reuseErr;
         }
       }
