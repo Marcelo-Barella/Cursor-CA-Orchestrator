@@ -18,6 +18,7 @@ import {
 } from "../src/orchestrator.js";
 import type { AgentState, OrchestrationEvent } from "../src/state.js";
 import { createInitialState, deserialize, serialize } from "../src/state.js";
+import { taskLaunchedEvent } from "./support/reattach-fixtures.js";
 
 function createConfig(
   taskIds: string[],
@@ -558,22 +559,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover");
     const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
-        detail: "Launched t1 (agent-live-9)",
-        payload: {
-          agent_id: "agent-live-9",
-          run_id: "run-9",
-          repository: "https://github.com/acme/svc",
-          ref: "main",
-          branch: "cursor-orch/run-recover/t1",
-        },
-      },
+      taskLaunchedEvent("run-recover", "agent-live-9", { runIdInPayload: "run-9" }),
     ];
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.agent_id).toBe("agent-live-9");
@@ -585,21 +571,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover-legacy");
     const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
-        detail: "Launched t1 (legacy-agent-9)",
-        payload: {
-          run_id: "run-9",
-          repository: "https://github.com/acme/svc",
-          ref: "main",
-          branch: "cursor-orch/run-recover-legacy/t1",
-        },
-      },
+      taskLaunchedEvent("run-recover-legacy", "legacy-agent-9", { legacyPayload: true, runIdInPayload: "run-9" }),
     ];
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.agent_id).toBe("legacy-agent-9");
@@ -610,16 +582,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover-stale");
     const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
-        detail: "Launched t1 (agent-old)",
-        payload: { agent_id: "agent-old", run_id: "run-old" },
-      },
+      taskLaunchedEvent("run-recover-stale", "agent-old", { runIdInPayload: "run-old" }),
       {
         timestamp: "2026-06-01T00:01:00.000Z",
         event_type: "task_failed",

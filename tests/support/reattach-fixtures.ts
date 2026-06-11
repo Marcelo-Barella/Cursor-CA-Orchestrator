@@ -2,7 +2,7 @@ import { vi } from "vitest";
 import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import type { RepoStoreClient } from "../../src/api/repo-store.js";
 import type { OrchestratorConfig } from "../../src/config/types.js";
-import type { AgentState, OrchestrationState } from "../../src/state.js";
+import type { AgentState, OrchestrationEvent, OrchestrationState } from "../../src/state.js";
 import { createInitialState, seedMainAgent } from "../../src/state.js";
 import { statusMessage } from "./fake-agent-client.js";
 
@@ -87,6 +87,14 @@ export function completedResumeScript(runId: string) {
       }),
     },
   };
+}
+
+export function taskLaunchedEvent(
+  runId: string,
+  agentId: string,
+  opts?: { legacyPayload?: boolean; runIdInPayload?: string },
+): OrchestrationEvent {
+  return JSON.parse(taskLaunchedEventLine(runId, agentId, opts)) as OrchestrationEvent;
 }
 
 export function taskLaunchedEventLine(
