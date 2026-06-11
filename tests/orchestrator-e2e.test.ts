@@ -1119,6 +1119,76 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
+  it("preserves task-plan.json when plan reuse fails for transient infra errors", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = taskPlanJson("Planned work.");
+    let userApiCalls = 0;
+    globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!url.startsWith("https://api.github.com/")) {
+        return unmockedFetch(input, init);
+      }
+      if (url === "https://api.github.com/user") {
+        userApiCalls += 1;
+        if (userApiCalls === 1) {
+          return new Response("service unavailable", { status: 503 });
+        }
+        return new Response(JSON.stringify({ login: "acme-user" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/git/ref/heads/")) {
+        const tail = url.split("/git/ref/heads/")[1] ?? "";
+        const decoded = decodeURIComponent(tail);
+        if (decoded === "main" || decoded.endsWith("/main")) {
+          return new Response(JSON.stringify({ object: { sha: "0123456789abcdef0123456789abcdef01234567" } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ message: "Not Found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/git/refs") && init?.method === "POST") {
+        return new Response(JSON.stringify({ ref: "refs/heads/x" }), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return unmockedFetch(input, init);
+    }) as typeof fetch;
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-transient-reuse"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    let planDeleted = false;
+    const baseDelete = store.deleteFile.bind(store);
+    store.deleteFile = async (runId, filename) => {
+      if (filename === "task-plan.json") {
+        planDeleted = true;
+      }
+      return baseDelete(runId, filename);
+    };
+    await runOrchestration("run-transient-reuse", fake, store);
+    expect(planDeleted).toBe(false);
+    expect(files.get("task-plan.json")).toBe(taskPlan);
+    expect(fake.launches).toHaveLength(2);
+    expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
   it("rejects cached task-plan.json that violates prompt constraints and replans", async () => {
     const config = constraintPromptOnlyConfig();
     const constraintLine = "Every route must use your translation method.";
