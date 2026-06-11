@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
-import { createInitialState, seedMainAgent, serialize } from "../src/state.js";
+import { serialize } from "../src/state.js";
 import { FakeAgentClient, FakeSdkRun, statusMessage } from "./support/fake-agent-client.js";
 import {
+  completedResumeScript,
   createInMemoryRepoStore,
-  installGithubBranchPrepMock,
-  restoreGithubBranchPrepMock,
+  resetReattachTestEnv,
+  restoreReattachTestEnv,
   runGit,
+  runningOrchestrationState,
   singleTaskConfig,
+  taskLaunchedEventLine,
 } from "./support/reattach-fixtures.js";
 
 const listRunsMock = vi.hoisted(() => vi.fn());
@@ -24,62 +27,27 @@ vi.mock("@cursor/sdk", async (importOriginal) => {
   };
 });
 
-function completedResumeScript(runId: string) {
-  return {
-    events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-    result: { id: "r-resume", status: "finished" as const, git: runGit(`cursor-orch/${runId}/t1`) },
-    artifacts: {
-      "cursor-orch-output.json": JSON.stringify({
-        task_id: "t1",
-        status: "completed",
-        summary: "done after resume",
-        outputs: {},
-      }),
-    },
-  };
-}
-
 describe("reattachWorkers running tasks", () => {
   const originalEnv = { ...process.env };
 
-  beforeEach(() => {
-    process.env.CURSOR_API_KEY = "sk-fake";
-    process.env.GH_TOKEN = "ghp-fake";
-    process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES = "0";
-    delete process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRY_MS;
-    delete process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES;
-    installGithubBranchPrepMock();
-    listRunsMock.mockReset();
-  });
-
-  afterEach(() => {
-    restoreGithubBranchPrepMock();
-    process.env = { ...originalEnv };
-  });
+  beforeEach(() => resetReattachTestEnv(listRunsMock));
+  afterEach(() => restoreReattachTestEnv(originalEnv));
 
   it("reattaches running workers via resumeCloudAgent and listRuns without relaunching", async () => {
     const config = singleTaskConfig();
     const runId = "run-reattach-running";
     const liveAgentId = "agent-live-1";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
+    const state = runningOrchestrationState(config, runId, {
       agent_id: liveAgentId,
       status: "running",
       summary: "in flight",
-    };
+    });
 
     const resumeScript = completedResumeScript(runId);
-    const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
-    listRunsMock.mockResolvedValue({ items: [resumedRun] });
+    listRunsMock.mockResolvedValue({ items: [new FakeSdkRun(liveAgentId, resumeScript)] });
 
     const fake = new FakeAgentClient({
-      runsByAgent: {
-        [liveAgentId]: [resumeScript],
-      },
+      runsByAgent: { [liveAgentId]: [resumeScript] },
       conversationText: null,
     });
 
@@ -101,15 +69,10 @@ describe("reattachWorkers running tasks", () => {
     const config = singleTaskConfig();
     const runId = "run-reattach-no-runs";
     const liveAgentId = "agent-live-2";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
+    const state = runningOrchestrationState(config, runId, {
       agent_id: liveAgentId,
       status: "running",
-    };
+    });
 
     listRunsMock.mockResolvedValue({ items: [] });
 
@@ -135,15 +98,10 @@ describe("reattachWorkers running tasks", () => {
     const config = singleTaskConfig();
     const runId = "run-reattach-multi-run";
     const liveAgentId = "agent-live-multi";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
+    const state = runningOrchestrationState(config, runId, {
       agent_id: liveAgentId,
       status: "running",
-    };
+    });
 
     const staleRun = new FakeSdkRun(liveAgentId, {
       events: [statusMessage("FINISHED")],
@@ -181,41 +139,20 @@ describe("reattachWorkers running tasks", () => {
     const config = singleTaskConfig();
     const runId = "run-recover-from-events";
     const liveAgentId = "agent-live-events";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    const state = runningOrchestrationState(config, runId);
 
     const resumeScript = completedResumeScript(runId);
-    const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
-    listRunsMock.mockResolvedValue({ items: [resumedRun] });
+    listRunsMock.mockResolvedValue({ items: [new FakeSdkRun(liveAgentId, resumeScript)] });
 
     const fake = new FakeAgentClient({
       runsByAgent: { [liveAgentId]: [resumeScript] },
       conversationText: null,
     });
 
-    const launchEvent = JSON.stringify({
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: `Launched t1 (${liveAgentId})`,
-      payload: {
-        agent_id: liveAgentId,
-        run_id: "run-live",
-        repository: "https://github.com/acme/svc",
-        ref: "main",
-        branch: `cursor-orch/${runId}/t1`,
-      },
-    });
-
     const { store, files } = createInMemoryRepoStore({
       "config.yaml": toYaml(config),
       "state.json": serialize(state),
-      "events.jsonl": `${launchEvent}\n`,
+      "events.jsonl": `${taskLaunchedEventLine(runId, liveAgentId)}\n`,
     });
 
     await runOrchestration(runId, fake, store);
@@ -231,40 +168,20 @@ describe("reattachWorkers running tasks", () => {
     const config = singleTaskConfig();
     const runId = "run-recover-legacy-events";
     const liveAgentId = "agent-legacy-events";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    const state = runningOrchestrationState(config, runId);
 
     const resumeScript = completedResumeScript(runId);
-    const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
-    listRunsMock.mockResolvedValue({ items: [resumedRun] });
+    listRunsMock.mockResolvedValue({ items: [new FakeSdkRun(liveAgentId, resumeScript)] });
 
     const fake = new FakeAgentClient({
       runsByAgent: { [liveAgentId]: [resumeScript] },
       conversationText: null,
     });
 
-    const launchEvent = JSON.stringify({
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: `Launched t1 (${liveAgentId})`,
-      payload: {
-        run_id: "run-live",
-        repository: "https://github.com/acme/svc",
-        ref: "main",
-        branch: `cursor-orch/${runId}/t1`,
-      },
-    });
-
     const { store, files } = createInMemoryRepoStore({
       "config.yaml": toYaml(config),
       "state.json": serialize(state),
-      "events.jsonl": `${launchEvent}\n`,
+      "events.jsonl": `${taskLaunchedEventLine(runId, liveAgentId, { legacyPayload: true })}\n`,
     });
 
     await runOrchestration(runId, fake, store);
@@ -329,10 +246,7 @@ describe("reattachWorkers running tasks", () => {
     const config = singleTaskConfig();
     const runId = "run-recover-dead-agent";
     const deadAgentId = "agent-dead-events";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    const state = runningOrchestrationState(config, runId);
 
     const launchScript = completedResumeScript(runId);
     listRunsMock.mockResolvedValue({ items: [] });
@@ -343,27 +257,10 @@ describe("reattachWorkers running tasks", () => {
       conversationText: null,
     });
 
-    const launchEvent = JSON.stringify({
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: `Launched t1 (${deadAgentId})`,
-      payload: {
-        agent_id: deadAgentId,
-        run_id: "run-dead",
-        repository: "https://github.com/acme/svc",
-        ref: "main",
-        branch: `cursor-orch/${runId}/t1`,
-      },
-    });
-
     const { store, files } = createInMemoryRepoStore({
       "config.yaml": toYaml(config),
       "state.json": serialize(state),
-      "events.jsonl": `${launchEvent}\n`,
+      "events.jsonl": `${taskLaunchedEventLine(runId, deadAgentId, { runIdInPayload: "run-dead" })}\n`,
     });
 
     await runOrchestration(runId, fake, store);
@@ -378,15 +275,10 @@ describe("reattachWorkers running tasks", () => {
     const config = singleTaskConfig();
     const runId = "run-reattach-resume-fail";
     const liveAgentId = "agent-live-3";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
+    const state = runningOrchestrationState(config, runId, {
       agent_id: liveAgentId,
       status: "launching",
-    };
+    });
 
     const fake = new FakeAgentClient({ conversationText: null });
     vi.spyOn(fake, "resumeCloudAgent").mockRejectedValue(new Error("resume boom"));
@@ -403,5 +295,72 @@ describe("reattachWorkers running tasks", () => {
     expect(final.agents.t1.summary).toBe("Resume failed: resume boom");
     expect(listRunsMock).not.toHaveBeenCalled();
     expect(fake.launches).toHaveLength(0);
+  });
+});
+
+describe("reattachWorkers blocked tasks", () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => resetReattachTestEnv(listRunsMock));
+  afterEach(() => restoreReattachTestEnv(originalEnv));
+
+  it("does not re-run finished SDK streams for blocked tasks on resume", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-reattach-blocked";
+    const blockedAgentId = "blocked-agent-1";
+    const state = runningOrchestrationState(config, runId, {
+      agent_id: blockedAgentId,
+      status: "blocked",
+      blocked_reason: "needs clarification",
+      blocked_since: new Date(Date.now() - 400_000).toISOString(),
+      summary: "blocked",
+    });
+
+    listRunsMock.mockResolvedValue({
+      items: [
+        new FakeSdkRun(blockedAgentId, {
+          events: [statusMessage("FINISHED")],
+          result: { id: "stale-run", status: "finished" },
+        }),
+      ],
+    });
+
+    const successScript = {
+      events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+      result: { id: "r-retry", status: "finished" as const, git: runGit(`cursor-orch/${runId}/t1-retry-1`) },
+      artifacts: {
+        "cursor-orch-output.json": JSON.stringify({
+          task_id: "t1",
+          status: "completed",
+          summary: "done after blocked retry",
+          outputs: {},
+        }),
+      },
+    };
+
+    const fake = new FakeAgentClient({
+      runsByAgent: {
+        [blockedAgentId]: [
+          {
+            events: [statusMessage("FINISHED")],
+            result: { id: "stale-run", status: "finished" },
+          },
+        ],
+      },
+      defaultScripts: [successScript],
+      conversationText: null,
+    });
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.status).toBe("completed");
+    expect(final.agents.t1.status).toBe("finished");
+    expect(listRunsMock).not.toHaveBeenCalled();
   });
 });
