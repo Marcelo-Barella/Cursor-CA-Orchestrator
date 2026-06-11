@@ -1644,6 +1644,15 @@ async function tryReuseExistingPlan(
   }
 }
 
+async function readPlanFromAgentRuns(agentId: string, apiKey: string): Promise<string | null> {
+  const runs = await (await import("@cursor/sdk")).Agent.listRuns(agentId, { runtime: "cloud", apiKey }).catch(() => null);
+  if (!runs) return null;
+  for (const run of runs.items) {
+    if (typeof run.result === "string" && run.result.trim()) return run.result;
+  }
+  return null;
+}
+
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
 async function runPlanningPhase(
@@ -1670,15 +1679,7 @@ async function runPlanningPhase(
     await plannerAgent.send(plannerPrompt);
     let planContent = await waitForPlan(repoStore, runId);
     if (!planContent) {
-      try {
-        const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
-        for (const r of runs.items) {
-          if (typeof r.result === "string" && r.result.trim()) {
-            planContent = r.result;
-            break;
-          }
-        }
-      } catch {}
+      planContent = await readPlanFromAgentRuns(plannerAgent.agentId, apiKey);
     }
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
