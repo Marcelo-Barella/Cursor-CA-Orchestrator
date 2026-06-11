@@ -1640,14 +1640,6 @@ async function applyTaskPlanToConfig(
 
 const PLANNING_PHASE_META = { phase_id: "planning", agent_kind: "phase" } as const;
 
-async function appendPlanningStarted(repoStore: RepoStoreClient, runId: string): Promise<void> {
-  await appendEvent(
-    repoStore,
-    runId,
-    makeEvent("planning_started", "Planning phase started", null, PLANNING_PHASE_META),
-  );
-}
-
 type PlanningEvents =
   | { kind: "completed"; source: "reused" | "fresh"; taskCount: number }
   | { kind: "failed"; detail: string; emitStarted: boolean };
@@ -1655,7 +1647,11 @@ type PlanningEvents =
 async function emitPlanningEvents(repoStore: RepoStoreClient, runId: string, events: PlanningEvents): Promise<void> {
   if (events.kind === "completed") {
     if (events.source === "fresh") {
-      await appendPlanningStarted(repoStore, runId);
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_started", "Planning phase started", null, PLANNING_PHASE_META),
+      );
     }
     const suffix = events.source === "reused" ? " (reused existing plan)" : "";
     await appendEvent(
@@ -1666,7 +1662,11 @@ async function emitPlanningEvents(repoStore: RepoStoreClient, runId: string, eve
     return;
   }
   if (events.emitStarted) {
-    await appendPlanningStarted(repoStore, runId);
+    await appendEvent(
+      repoStore,
+      runId,
+      makeEvent("planning_started", "Planning phase started", null, PLANNING_PHASE_META),
+    );
   }
   await appendEvent(
     repoStore,
@@ -1675,7 +1675,7 @@ async function emitPlanningEvents(repoStore: RepoStoreClient, runId: string, eve
   );
 }
 
-type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
+type PlanningPhaseResult = { ok: true } | { ok: false; detail: string };
 
 type PlanningOutcome =
   | { ran: false }
@@ -1729,7 +1729,7 @@ async function runPlanningPhase(
     await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, true);
     return { ok: true };
   } catch (exc) {
-    return { ok: false, error: String(exc) };
+    return { ok: false, detail: String(exc) };
   }
 }
 
@@ -1955,18 +1955,16 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     const ghUser = await resolveGithubUsername(ghToken);
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      const reused = await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false)
-        .then(() => true)
-        .catch(() => false);
-      if (reused) {
+      try {
+        await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false);
         planning = { ran: true, ok: true, source: "reused" };
-      }
+      } catch {}
     }
     if (!planning.ran || !planning.ok) {
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
       planning = planningResult.ok
         ? { ran: true, ok: true, source: "fresh" }
-        : { ran: true, ok: false, detail: planningResult.error, usedFullPhase: true };
+        : { ran: true, ok: false, detail: planningResult.detail, usedFullPhase: true };
     }
   }
 
