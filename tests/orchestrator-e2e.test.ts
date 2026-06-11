@@ -993,6 +993,42 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("reuses existing task-plan.json without launching a planner agent", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", "run-reuse-plan")],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    await runOrchestration("run-reuse-plan", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    expect(fake.launches[0]!.opts.repoUrl).toBe("https://github.com/acme/svc");
+    expect(fake.launches[0]!.prompt).toContain("Planned work.");
+    const updatedConfig = files.get("config.yaml")!;
+    expect(updatedConfig).toContain("t1");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(
+      events.some(
+        (e: { event_type: string; detail?: string }) =>
+          e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
+      ),
+    ).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
   it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
