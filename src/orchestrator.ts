@@ -1602,61 +1602,6 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
-type DeferredPlanningEvents =
-  | { status: "finished"; emitStarted: boolean; completedDetail: string }
-  | { status: "failed"; emitStarted: boolean; failedDetail: string };
-
-async function reuseTaskPlanFromRepo(
-  config: OrchestratorConfig,
-  planContent: string,
-  ghToken: string,
-  repoStore: RepoStoreClient,
-  runId: string,
-): Promise<string | null> {
-  try {
-    const ghUser = await resolveGithubUsername(ghToken);
-    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-    const parsedTasks = parseTaskPlan(planContent, config);
-    config.tasks = parsedTasks;
-    const canonReuse = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonReuse.repositories;
-    config.tasks = canonReuse.tasks;
-    config.delegation_map = canonReuse.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-    return `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`;
-  } catch {
-    return null;
-  }
-}
-
-async function appendDeferredPlanningEvents(
-  repoStore: RepoStoreClient,
-  runId: string,
-  deferred: DeferredPlanningEvents,
-): Promise<void> {
-  if (deferred.emitStarted) {
-    await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
-    );
-  }
-  if (deferred.status === "finished") {
-    await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("planning_completed", deferred.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
-    );
-    return;
-  }
-  await appendEvent(
-    repoStore,
-    runId,
-    makeEvent("planning_failed", deferred.failedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
-  );
-}
-
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
@@ -1694,7 +1639,9 @@ async function runPlanningPhase(
             break;
           }
         }
-      } catch {}
+      } catch {
+        /* no fallback available */
+      }
     }
     await safeDisposeAgent(plannerAgent);
     if (!planContent) {
@@ -1704,9 +1651,9 @@ async function runPlanningPhase(
     const parsedTasks = parseTaskPlan(planContent, config);
     const constraints = extractConstraintsFromPrompt(config.prompt);
     if (constraints.length > 0) {
-      const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!constraintValidation.valid) {
-        const detail = constraintValidation.violations
+      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+      if (!result.valid) {
+        const detail = result.violations
           .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
           .join("; ");
         throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
@@ -1942,26 +1889,43 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   let planningRan = false;
-  let deferredPlanning: DeferredPlanningEvents | null = null;
+  let planningOk = false;
+  let planningUsedFullPhase = false;
+  let planningFailedDetail: string | null = null;
+  let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      const reuseDetail = await reuseTaskPlanFromRepo(config, planContent, ghToken, repoStore, runId);
-      if (reuseDetail) {
-        deferredPlanning = { status: "finished", emitStarted: false, completedDetail: reuseDetail };
-      }
+      try {
+        const ghUser = await resolveGithubUsername(ghToken);
+        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+        config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+        const parsedTasks = parseTaskPlan(planContent, config);
+        config.tasks = parsedTasks;
+        const canonReuse = canonicalizeOrchestratorConfig(config);
+        config.repositories = canonReuse.repositories;
+        config.tasks = canonReuse.tasks;
+        config.delegation_map = canonReuse.delegation_map;
+        await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+        planningEvents = {
+          emitStarted: false,
+          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
+        };
+        planningOk = true;
+      } catch {}
     }
-    if (!deferredPlanning) {
+    if (!planningOk) {
+      planningUsedFullPhase = true;
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
-        deferredPlanning = {
-          status: "finished",
+        planningOk = true;
+        planningEvents = {
           emitStarted: true,
           completedDetail: `Planning completed: ${config.tasks.length} tasks`,
         };
       } else {
-        deferredPlanning = { status: "failed", emitStarted: true, failedDetail: planningResult.error };
+        planningFailedDetail = planningResult.error;
       }
     }
   }
@@ -1994,21 +1958,48 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       makeEvent("orchestration_started", "Orchestration started", null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
     );
   }
-  if (planningRan && deferredPlanning) {
-    setPhaseStatus(state, "planning", deferredPlanning.status, { timestamp: nowIso() });
-    await appendDeferredPlanningEvents(repoStore, runId, deferredPlanning);
-    if (deferredPlanning.status === "failed") {
-      state.status = "failed";
-      state.error = deferredPlanning.failedDetail;
-      if (state.main_agent) {
-        state.main_agent.status = "failed";
-        state.main_agent.finished_at = nowIso();
+  if (planningRan) {
+    setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
+    if (planningOk && planningEvents) {
+      if (planningEvents.emitStarted) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
       }
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+      );
+    } else if (!planningOk && planningFailedDetail !== null) {
+      if (planningUsedFullPhase) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_failed", planningFailedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+      );
     }
     await syncToRepo(repoStore, runId, state);
-    if (deferredPlanning.status === "failed") {
-      throw new Error(deferredPlanning.failedDetail);
+  }
+
+  if (planningRan && !planningOk) {
+    const failureMessage = planningFailedDetail ?? "Planning failed";
+    state.status = "failed";
+    state.error = failureMessage;
+    if (state.main_agent) {
+      state.main_agent.status = "failed";
+      state.main_agent.finished_at = nowIso();
     }
+    await syncToRepo(repoStore, runId, state);
+    throw new Error(failureMessage);
   }
 
   const graph = buildDependencyGraph(config.tasks);
