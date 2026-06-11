@@ -1038,14 +1038,70 @@ describe("runOrchestration with SDK (happy path)", () => {
     await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
     expect(files.has("state.json")).toBe(true);
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    const startedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
+    const orchStartedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
+    const planningStartedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_started");
     const failedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
-    expect(startedIdx).toBeGreaterThanOrEqual(0);
-    expect(failedIdx).toBeGreaterThan(startedIdx);
+    expect(orchStartedIdx).toBeGreaterThanOrEqual(0);
+    expect(planningStartedIdx).toBeGreaterThan(orchStartedIdx);
+    expect(failedIdx).toBeGreaterThan(planningStartedIdx);
+    expect(JSON.parse(files.get("state.json")!).phase_agents.planning.status).toBe("failed");
     await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
     await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.not.toThrow(
       /refusing to reset orchestration progress/,
     );
+  });
+
+  it("falls back to full planning when pre-seeded task-plan.json fails reuse parsing", async () => {
+    const config = promptOnlyConfig();
+    const runId = "run-invalid-plan-fallback";
+    const validPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Replanned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const invalidPlan = JSON.stringify({ tasks: [{ id: "t1" }] });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": invalidPlan,
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", runId),
+      ],
+    });
+    const origCreate = fake.createCloudAgent.bind(fake);
+    fake.createCloudAgent = async (opts) => {
+      const agent = await origCreate(opts);
+      if (opts.repoUrl.includes("cursor-orch-bootstrap")) {
+        const origSend = agent.send.bind(agent);
+        agent.send = async (message?: string) => {
+          files.set("task-plan.json", validPlan);
+          return origSend(message);
+        };
+      }
+      return agent;
+    };
+    await runOrchestration(runId, fake, store);
+    expect(fake.launches).toHaveLength(2);
+    expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+    expect(fake.launches[1]!.opts.repoUrl).toBe("https://github.com/acme/svc");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const planningStartedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_started");
+    const planningCompletedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_completed");
+    expect(planningStartedIdx).toBeGreaterThanOrEqual(0);
+    expect(planningCompletedIdx).toBeGreaterThan(planningStartedIdx);
+    expect(JSON.parse(files.get("state.json")!).phase_agents.planning.status).toBe("finished");
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
   it("reuses existing task-plan.json without launching a planner agent", async () => {
@@ -1081,6 +1137,8 @@ describe("runOrchestration with SDK (happy path)", () => {
           e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
       ),
     ).toBe(true);
+    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
+    expect(JSON.parse(files.get("state.json")!).phase_agents.planning.status).toBe("finished");
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
