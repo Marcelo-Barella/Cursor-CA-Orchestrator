@@ -57,6 +57,9 @@ const WORKER_ARTIFACT_ERROR_RETRY_MS_DEFAULT = 2_000;
 const TASK_FAILURE_MAX_RETRIES_DEFAULT = 0;
 const TASK_FAILURE_MAX_RETRIES_CAP = 32;
 
+type WorkerStreamInfo = { repoUrl: string; ref: string; runLine: boolean; planRef: string | null };
+const EMPTY_WORKER_STREAM_INFO: WorkerStreamInfo = { repoUrl: "", ref: "", runLine: false, planRef: null };
+
 export function readTaskFailureRetryCap(): number {
   const raw = process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES;
   if (raw !== undefined && raw !== "") {
@@ -722,24 +725,21 @@ async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   } catch {}
 }
 
-async function resolveWorkerStreamInfo(
-  ctx: LoopContext,
-  task: TaskConfig,
-): Promise<{ repoUrl: string; ref: string; runLine: boolean; planRef: string | null }> {
-  const info = { repoUrl: "", ref: "", runLine: false, planRef: null as string | null };
+async function resolveWorkerStreamInfo(ctx: LoopContext, task: TaskConfig): Promise<WorkerStreamInfo> {
+  const streamLaunch = { ...EMPTY_WORKER_STREAM_INFO };
   try {
     const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
     const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
-    info.repoUrl = repoUrl;
-    info.ref = ref;
-    info.planRef = planRefForConsolidatedRunLine(task, ref);
-    info.runLine =
-      Boolean(info.planRef) &&
+    streamLaunch.repoUrl = repoUrl;
+    streamLaunch.ref = ref;
+    streamLaunch.planRef = planRefForConsolidatedRunLine(task, ref);
+    streamLaunch.runLine =
+      Boolean(streamLaunch.planRef) &&
       !task.create_repo &&
       ctx.config.target.branch_layout === "consolidated" &&
       ctx.config.target.consolidate_prs;
   } catch {}
-  return info;
+  return streamLaunch;
 }
 
 async function launchWorkerAgent(
@@ -924,11 +924,7 @@ async function launchWorkerAgent(
   markStateDirty(ctx);
 }
 
-async function runWorkerStream(
-  ctx: LoopContext,
-  handle: WorkerHandle,
-  info: { repoUrl: string; ref: string; runLine: boolean; planRef: string | null },
-): Promise<void> {
+async function runWorkerStream(ctx: LoopContext, handle: WorkerHandle, streamLaunch: WorkerStreamInfo): Promise<void> {
   const taskId = handle.taskId;
   const agent = ctx.state.agents[taskId]!;
   let lastStatus: SDKStatusMessage["status"] | null = null;
@@ -1062,12 +1058,12 @@ async function runWorkerStream(
   const payloadBlockedReason = typeof payload?.blocked_reason === "string" ? (payload.blocked_reason as string) : null;
 
   const taskCfg = ctx.config.tasks.find((t) => t.id === taskId);
-  if (info.runLine && info.planRef) {
-    const ownerRepo = parseGithubOwnerRepo(info.repoUrl);
+  if (streamLaunch.runLine && streamLaunch.planRef) {
+    const ownerRepo = parseGithubOwnerRepo(streamLaunch.repoUrl);
     if (ownerRepo) {
-      const gk = groupKeyForRepo(info.repoUrl, info.planRef);
+      const gk = groupKeyForRepo(streamLaunch.repoUrl, streamLaunch.planRef);
       ctx.state.repo_run_head = ctx.state.repo_run_head ?? {};
-      ctx.state.repo_run_head[gk] = runBranchName(ctx.config.target.branch_prefix, ctx.runId, info.planRef);
+      ctx.state.repo_run_head[gk] = runBranchName(ctx.config.target.branch_prefix, ctx.runId, streamLaunch.planRef);
       agent.branch_name = ctx.state.repo_run_head[gk]!;
     }
   } else if (
@@ -1254,8 +1250,8 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
     done: Promise.resolve(),
   };
   const task = ctx.config.tasks.find((t) => t.id === agent.task_id);
-  const info = task ? await resolveWorkerStreamInfo(ctx, task) : { repoUrl: "", ref: "", runLine: false, planRef: null };
-  nextHandle.done = runWorkerStream(ctx, nextHandle, info);
+  const streamLaunch = task ? await resolveWorkerStreamInfo(ctx, task) : EMPTY_WORKER_STREAM_INFO;
+  nextHandle.done = runWorkerStream(ctx, nextHandle, streamLaunch);
   ctx.activeWorkers.set(agent.task_id, nextHandle);
   await appendEvent(ctx.repoStore, ctx.runId, makeEvent("task_retried", `Task ${agent.task_id} retried`, agent.task_id));
   markStateDirty(ctx);
@@ -1745,8 +1741,8 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
         done: Promise.resolve(),
       };
       const task = ctx.config.tasks.find((t) => t.id === taskId);
-      const info = task ? await resolveWorkerStreamInfo(ctx, task) : { repoUrl: "", ref: "", runLine: false, planRef: null };
-      handle.done = runWorkerStream(ctx, handle, info);
+      const streamLaunch = task ? await resolveWorkerStreamInfo(ctx, task) : EMPTY_WORKER_STREAM_INFO;
+      handle.done = runWorkerStream(ctx, handle, streamLaunch);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
       agent.status = "failed";
