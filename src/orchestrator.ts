@@ -1600,20 +1600,6 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
-function assertPlanMeetsPromptConstraints(config: OrchestratorConfig, parsedTasks: { id: string; prompt: string }[]): void {
-  const constraints = extractConstraintsFromPrompt(config.prompt);
-  if (constraints.length === 0) {
-    return;
-  }
-  const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-  if (!result.valid) {
-    const detail = result.violations
-      .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-      .join("; ");
-    throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-  }
-}
-
 async function applyParsedPlan(
   config: OrchestratorConfig,
   parsedTasks: TaskConfig[],
@@ -1621,7 +1607,16 @@ async function applyParsedPlan(
   runId: string,
   repoStore: RepoStoreClient,
 ): Promise<void> {
-  assertPlanMeetsPromptConstraints(config, parsedTasks);
+  const constraints = extractConstraintsFromPrompt(config.prompt);
+  if (constraints.length > 0) {
+    const validation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+    if (!validation.valid) {
+      const detail = validation.violations
+        .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+        .join("; ");
+      throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+    }
+  }
   config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
   config.tasks = parsedTasks;
   const canonPlan = canonicalizeOrchestratorConfig(config);
@@ -1629,6 +1624,24 @@ async function applyParsedPlan(
   config.tasks = canonPlan.tasks;
   config.delegation_map = canonPlan.delegation_map;
   await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+}
+
+async function tryReuseExistingPlan(
+  config: OrchestratorConfig,
+  planContent: string,
+  ghToken: string,
+  runId: string,
+  repoStore: RepoStoreClient,
+): Promise<{ ok: true; taskCount: number } | { ok: false }> {
+  try {
+    const ghUser = await resolveGithubUsername(ghToken);
+    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+    const parsedTasks = parseTaskPlan(planContent, config);
+    await applyParsedPlan(config, parsedTasks, bootstrapUrl, runId, repoStore);
+    return { ok: true, taskCount: parsedTasks.length };
+  } catch {
+    return { ok: false };
+  }
 }
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
@@ -1665,9 +1678,7 @@ async function runPlanningPhase(
             break;
           }
         }
-      } catch {
-        /* no fallback available */
-      }
+      } catch {}
     }
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
@@ -1908,17 +1919,14 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      try {
-        const ghUser = await resolveGithubUsername(ghToken);
-        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-        const parsedTasks = parseTaskPlan(planContent, config);
-        await applyParsedPlan(config, parsedTasks, bootstrapUrl, runId, repoStore);
+      const reuse = await tryReuseExistingPlan(config, planContent, ghToken, runId, repoStore);
+      if (reuse.ok) {
         planningEvents = {
           emitStarted: false,
-          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
+          completedDetail: `Planning completed: ${reuse.taskCount} tasks (reused existing plan)`,
         };
         planningOk = true;
-      } catch {}
+      }
     }
     if (!planningOk) {
       await repoStore.deleteFile(runId, "task-plan.json");
