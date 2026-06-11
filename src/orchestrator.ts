@@ -734,7 +734,6 @@ async function launchWorkerAgent(
   taskId: string,
   task: TaskConfig,
   depOutputs: Record<string, Record<string, unknown>>,
-  existingSdkAgent?: SdkAgent,
 ): Promise<void> {
   const agent = ctx.state.agents[taskId]!;
   const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
@@ -823,44 +822,35 @@ async function launchWorkerAgent(
       });
   const model: ModelSelectionConfig = task.model != null ? { id: task.model } : ctx.config.model;
   let sdkAgent: SdkAgent;
-  if (existingSdkAgent) {
-    sdkAgent = existingSdkAgent;
-  } else {
-    try {
-      sdkAgent = await ctx.agentClient.createCloudAgent({
-        apiKey: ctx.apiKey,
-        model,
-        repoUrl,
-        startingRef: startingRefForSdk,
-        autoCreatePR: false,
-        skipReviewerRequest: true,
-        mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${startingRefForSdk})`;
-      console.error(summary);
-      const finishedAt = nowIso();
-      await handleTaskFailureWithOptionalRetry(
-        ctx,
-        taskId,
-        () =>
-          appendEvent(
-            ctx.repoStore,
-            ctx.runId,
-            makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
-              payload: { repository: repoUrl, ref: startingRefForSdk },
-            }),
-          ),
-        { finishedAt, summary },
-      );
-      return;
-    }
-    agent.agent_id = sdkAgent.agentId;
-    agent.status = "launching";
-    agent.started_at = nowIso();
-    agent.branch_name = workerBranch;
-    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+  try {
+    sdkAgent = await ctx.agentClient.createCloudAgent({
+      apiKey: ctx.apiKey,
+      model,
+      repoUrl,
+      startingRef: startingRefForSdk,
+      autoCreatePR: false,
+      skipReviewerRequest: true,
+      mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${startingRefForSdk})`;
+    console.error(summary);
+    const finishedAt = nowIso();
+    await handleTaskFailureWithOptionalRetry(
+      ctx,
+      taskId,
+      () =>
+        appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
+            payload: { repository: repoUrl, ref: startingRefForSdk },
+          }),
+        ),
+      { finishedAt, summary },
+    );
+    return;
   }
   let run: SdkRun;
   try {
@@ -886,6 +876,10 @@ async function launchWorkerAgent(
     );
     return;
   }
+  agent.agent_id = sdkAgent.agentId;
+  agent.status = "launching";
+  agent.started_at = nowIso();
+  agent.branch_name = workerBranch;
   await appendEvent(
     ctx.repoStore,
     ctx.runId,
@@ -1215,63 +1209,9 @@ async function runWorkerStream(
   markStateDirty(ctx);
 }
 
-async function resumeWorkerSdkAgent(ctx: LoopContext, agentId: string): Promise<SdkAgent> {
-  const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
-    apiKey: ctx.apiKey,
-    model: toSdkModelSelection(ctx.config.model),
-  };
-  const mcpServers = nonEmptyMcpServers(ctx.config.mcp_servers);
-  if (mcpServers) {
-    resumeOptions.mcpServers = mcpServers;
-  }
-  return ctx.agentClient.resumeCloudAgent(agentId, resumeOptions);
-}
-
-async function workerStreamInfoForTask(
-  ctx: LoopContext,
-  taskId: string,
-): Promise<{ repoUrl: string; ref: string; runLine: boolean; planRef: string | null }> {
-  const empty = { repoUrl: "", ref: "", runLine: false, planRef: null as string | null };
-  const task = ctx.config.tasks.find((t) => t.id === taskId);
-  if (!task) {
-    return empty;
-  }
-  try {
-    const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
-    const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
-    const planRef = planRefForConsolidatedRunLine(task, ref);
-    return {
-      repoUrl,
-      ref,
-      planRef,
-      runLine:
-        Boolean(planRef) &&
-        !task.create_repo &&
-        ctx.config.target.branch_layout === "consolidated" &&
-        ctx.config.target.consolidate_prs,
-    };
-  } catch {
-    return empty;
-  }
-}
-
 async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<void> {
-  const prompt = `Your previous attempt was blocked. Reason: ${agent.blocked_reason}. Please try a different approach or report blocked again with a specific reason. Remember to write the final JSON to cursor-orch-output.json and include it as a fenced \`\`\`json block in your last assistant message.`;
-  const existingHandle = ctx.activeWorkers.get(agent.task_id);
-  let sdkAgent: SdkAgent;
-  if (existingHandle) {
-    sdkAgent = existingHandle.sdkAgent;
-  } else if (agent.agent_id) {
-    try {
-      sdkAgent = await resumeWorkerSdkAgent(ctx, agent.agent_id);
-    } catch (error) {
-      agent.status = "failed";
-      agent.finished_at = nowIso();
-      agent.summary = `Blocked retry resume failed: ${error instanceof Error ? error.message : String(error)}`;
-      markStateDirty(ctx);
-      return;
-    }
-  } else {
+  const handle = ctx.activeWorkers.get(agent.task_id);
+  if (!handle) {
     agent.blocked_retry_count += 1;
     agent.status = "pending";
     agent.blocked_reason = null;
@@ -1280,18 +1220,17 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
     markStateDirty(ctx);
     return;
   }
+  const prompt = `Your previous attempt was blocked. Reason: ${agent.blocked_reason}. Please try a different approach or report blocked again with a specific reason. Remember to write the final JSON to cursor-orch-output.json and include it as a fenced \`\`\`json block in your last assistant message.`;
   let run: SdkRun;
   try {
-    run = await sdkAgent.send(prompt);
+    run = await handle.sdkAgent.send(prompt);
   } catch (error) {
     console.error(`Failed to send follow-up for blocked task ${agent.task_id}: ${error instanceof Error ? error.message : String(error)}`);
     agent.status = "failed";
     agent.finished_at = nowIso();
     agent.summary = agent.blocked_reason ?? "Blocked; follow-up dispatch failed";
-    if (existingHandle) {
-      ctx.activeWorkers.delete(agent.task_id);
-    }
-    await safeDisposeAgent(sdkAgent);
+    ctx.activeWorkers.delete(agent.task_id);
+    await safeDisposeAgent(handle.sdkAgent);
     await cascadeFailures(ctx.state, agent.task_id, ctx.graph, ctx.repoStore, ctx.runId);
     markStateDirty(ctx);
     return;
@@ -1302,16 +1241,41 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
   agent.blocked_since = null;
   try {
     await ctx.repoStore.deleteFile(ctx.runId, `agent-${agent.task_id}.json`);
-  } catch {}
+  } catch {
+    /* advisory */
+  }
   const nextHandle: WorkerHandle = {
     taskId: agent.task_id,
-    sdkAgent,
+    sdkAgent: handle.sdkAgent,
     run,
     assistantMessages: [],
     transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId: agent.task_id }),
     done: Promise.resolve(),
   };
-  nextHandle.done = runWorkerStream(ctx, nextHandle, await workerStreamInfoForTask(ctx, agent.task_id));
+  const info = {
+    repoUrl: "",
+    ref: "",
+    runLine: false,
+    planRef: null as string | null,
+  };
+  const task = ctx.config.tasks.find((t) => t.id === agent.task_id);
+  if (task) {
+    try {
+      const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+      const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
+      info.repoUrl = repoUrl;
+      info.ref = ref;
+      info.planRef = planRefForConsolidatedRunLine(task, ref);
+      info.runLine =
+        Boolean(info.planRef) &&
+        !task.create_repo &&
+        ctx.config.target.branch_layout === "consolidated" &&
+        ctx.config.target.consolidate_prs;
+    } catch {
+      /* fall through with empty info; branch_name will not update via run-line logic */
+    }
+  }
+  nextHandle.done = runWorkerStream(ctx, nextHandle, info);
   ctx.activeWorkers.set(agent.task_id, nextHandle);
   await appendEvent(ctx.repoStore, ctx.runId, makeEvent("task_retried", `Task ${agent.task_id} retried`, agent.task_id));
   markStateDirty(ctx);
@@ -1774,18 +1738,18 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
     if (agent.status !== "launching" && agent.status !== "running") continue;
     if (ctx.activeWorkers.has(taskId)) continue;
     try {
-      const sdkAgent = await resumeWorkerSdkAgent(ctx, agent.agent_id);
+      const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
+        apiKey: ctx.apiKey,
+        model: toSdkModelSelection(ctx.config.model),
+      };
+      const mcpServers = nonEmptyMcpServers(ctx.config.mcp_servers);
+      if (mcpServers) {
+        resumeOptions.mcpServers = mcpServers;
+      }
+      const sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
-        if (agent.status === "launching") {
-          const task = ctx.config.tasks.find((t) => t.id === taskId);
-          if (task) {
-            const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
-            await launchWorkerAgent(ctx, taskId, task, depOutputs, sdkAgent);
-            continue;
-          }
-        }
         await safeDisposeAgent(sdkAgent);
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
@@ -1799,7 +1763,25 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
         transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId }),
         done: Promise.resolve(),
       };
-      handle.done = runWorkerStream(ctx, handle, await workerStreamInfoForTask(ctx, taskId));
+      const task = ctx.config.tasks.find((t) => t.id === taskId);
+      const info = { repoUrl: "", ref: "", runLine: false, planRef: null as string | null };
+      if (task) {
+        try {
+          const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+          const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
+          info.repoUrl = repoUrl;
+          info.ref = ref;
+          info.planRef = planRefForConsolidatedRunLine(task, ref);
+          info.runLine =
+            Boolean(info.planRef) &&
+            !task.create_repo &&
+            ctx.config.target.branch_layout === "consolidated" &&
+            ctx.config.target.consolidate_prs;
+        } catch {
+          /* ignore */
+        }
+      }
+      handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
       agent.status = "failed";
