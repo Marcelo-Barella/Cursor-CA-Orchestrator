@@ -103,6 +103,27 @@ function promptOnlyConfig(): OrchestratorConfig {
   };
 }
 
+function promptOnlyConfigWithConstraints(): OrchestratorConfig {
+  return {
+    ...promptOnlyConfig(),
+    prompt: "Every route must use your translation method.",
+  };
+}
+
+function taskPlanJson(taskPrompt: string): string {
+  return JSON.stringify({
+    tasks: [
+      {
+        id: "t1",
+        repo: "svc",
+        prompt: taskPrompt,
+        depends_on: [],
+        timeout_minutes: 30,
+      },
+    ],
+  });
+}
+
 function twoTaskChainConfig(): OrchestratorConfig {
   const base = singleTaskConfig();
   return {
@@ -1145,6 +1166,40 @@ describe("runOrchestration with SDK (happy path)", () => {
     }
   });
 
+  it("rejects constraint-violating reused task-plan and falls back to full planning", async () => {
+    const config = promptOnlyConfigWithConstraints();
+    const validPlan = taskPlanJson("Implement the home page. Every route must use your translation method.");
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(validPlan);
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
+        completedWorkerScript("t1", "run-constraint-replan"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlanJson("Implement the home page without translation."),
+    });
+    try {
+      await runOrchestration("run-constraint-replan", fake, store);
+      expect(fake.launches).toHaveLength(2);
+      expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+      const types = eventTypesFromFiles(files);
+      expect(types).toContain("planning_started");
+      expect(types).toContain("planning_completed");
+      const completed = files
+        .get("events.jsonl")!
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { event_type: string; detail?: string })
+        .find((event) => event.event_type === "planning_completed");
+      expect(completed?.detail).not.toContain("reused existing plan");
+      expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
   it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
@@ -1283,6 +1338,49 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(t2Prompt).not.toContain("upstream_token");
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
+
+  it("does not mark a completed worker finished when stop appears between finalize stop checks", async () => {
+    const config = singleTaskConfig();
+    const script = completedWorkerScript("t1", "run-stop-finalize-race");
+    const fake = new FakeAgentClient({
+      defaultScripts: [script],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    let agentFileWritten = false;
+    let stopReadsAfterAgentFile = 0;
+    const baseWrite = store.writeFile.bind(store);
+    const baseRead = store.readFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        agentFileWritten = true;
+      }
+    };
+    store.readFile = async (runId, filename) => {
+      if (filename === "stop-requested.json" && agentFileWritten) {
+        stopReadsAfterAgentFile += 1;
+        if (stopReadsAfterAgentFile === 1) {
+          queueMicrotask(() => {
+            void baseWrite(
+              runId,
+              "stop-requested.json",
+              JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
+            );
+          });
+          return "";
+        }
+      }
+      return baseRead(runId, filename);
+    };
+    await runOrchestration("run-stop-finalize-race", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("stopped");
+    expect(state.agents.t1.status).toBe("stopped");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(
+      false,
+    );
+  }, 20_000);
 
   it("marks a completed worker stopped when stop is requested while the worker is running", async () => {
     const config = singleTaskConfig();

@@ -729,6 +729,21 @@ async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   }
 }
 
+async function syncStopRequestedFromRepo(ctx: LoopContext): Promise<boolean> {
+  if (ctx.stopRequested.value) return true;
+  const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json").catch(() => null);
+  if (!stopContent) return false;
+  ctx.stopRequested.value = true;
+  return true;
+}
+
+async function shouldAbortWorkerFinalize(ctx: LoopContext): Promise<boolean> {
+  if (ctx.stopRequested.value) return true;
+  if (await syncStopRequestedFromRepo(ctx)) return true;
+  if (ctx.stopRequested.value) return true;
+  return syncStopRequestedFromRepo(ctx);
+}
+
 async function launchWorkerAgent(
   ctx: LoopContext,
   taskId: string,
@@ -1094,10 +1109,12 @@ async function runWorkerStream(
 
   const finalizedAt = nowIso();
 
-  if (ctx.stopRequested.value) {
+  if (payloadStatus !== "blocked" && (await shouldAbortWorkerFinalize(ctx))) {
     agent.status = "stopped";
     agent.finished_at = finalizedAt;
-    ctx.activeWorkers.delete(taskId);
+    if (ctx.activeWorkers.get(taskId) === handle) {
+      ctx.activeWorkers.delete(taskId);
+    }
     await safeDisposeAgent(sdkAgent);
     return;
   }
@@ -1600,27 +1617,32 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
+async function deleteStaleTaskPlan(repoStore: RepoStoreClient, runId: string): Promise<void> {
+  try {
+    await repoStore.deleteFile(runId, "task-plan.json");
+  } catch {
+    /* advisory */
+  }
+}
+
 async function applyTaskPlanToConfig(
   config: OrchestratorConfig,
   runId: string,
   planContent: string,
   ghUser: string,
   repoStore: RepoStoreClient,
-  validateConstraints: boolean,
 ): Promise<void> {
   const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
   config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
   const parsedTasks = parseTaskPlan(planContent, config);
-  if (validateConstraints) {
-    const constraints = extractConstraintsFromPrompt(config.prompt);
-    if (constraints.length > 0) {
-      const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!constraintValidation.valid) {
-        const detail = constraintValidation.violations
-          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-          .join("; ");
-        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-      }
+  const constraints = extractConstraintsFromPrompt(config.prompt);
+  if (constraints.length > 0) {
+    const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+    if (!constraintValidation.valid) {
+      const detail = constraintValidation.violations
+        .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+        .join("; ");
+      throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
     }
   }
   config.tasks = parsedTasks;
@@ -1645,7 +1667,7 @@ async function tryReuseTaskPlan(
   repoStore: RepoStoreClient,
 ): Promise<boolean> {
   try {
-    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false);
+    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore);
     return true;
   } catch {
     return false;
@@ -1708,6 +1730,9 @@ async function resolvePlanningIfNeeded(
   if (planContent && (await tryReuseTaskPlan(config, runId, planContent, ghUser, repoStore))) {
     return { kind: "reused", taskCount: config.tasks.length };
   }
+  if (planContent) {
+    await deleteStaleTaskPlan(repoStore, runId);
+  }
   const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
   if (planningResult.ok) {
     return { kind: "fresh", taskCount: config.tasks.length };
@@ -1737,6 +1762,7 @@ async function runPlanningPhase(
   ghUser: string,
 ): Promise<PlanningPhaseResult> {
   try {
+    await deleteStaleTaskPlan(repoStore, runId);
     const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
     const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
     const plannerAgent = await agentClient.createCloudAgent({
@@ -1762,7 +1788,7 @@ async function runPlanningPhase(
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
     }
-    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, true);
+    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore);
     return { ok: true };
   } catch (exc) {
     return { ok: false, error: String(exc) };
