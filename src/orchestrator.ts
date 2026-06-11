@@ -1620,10 +1620,10 @@ async function applyTaskPlanContent(
     }
   }
   config.tasks = parsedTasks;
-  const canon = canonicalizeOrchestratorConfig(config);
-  config.repositories = canon.repositories;
-  config.tasks = canon.tasks;
-  config.delegation_map = canon.delegation_map;
+  const canonPlan = canonicalizeOrchestratorConfig(config);
+  config.repositories = canonPlan.repositories;
+  config.tasks = canonPlan.tasks;
+  config.delegation_map = canonPlan.delegation_map;
   await repoStore.writeFile(runId, "config.yaml", toYaml(config));
   return parsedTasks.length;
 }
@@ -1659,11 +1659,11 @@ async function runPlanningPhase(
     const runs = await (await import("@cursor/sdk"))
       .Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey })
       .catch(() => ({ items: [] as { result?: unknown }[] }));
-    for (const plannerRun of runs.items) {
-      if (typeof plannerRun.result === "string" && plannerRun.result.trim()) {
-        planContent = plannerRun.result;
-        break;
-      }
+    const plannerRun = runs.items.find(
+      (run) => typeof run.result === "string" && run.result.trim(),
+    );
+    if (plannerRun && typeof plannerRun.result === "string") {
+      planContent = plannerRun.result;
     }
   }
   await safeDisposeAgent(plannerAgent);
@@ -1894,24 +1894,28 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   let planningCompletedDetail: string | null = null;
   let emitPlanningStarted = false;
   let planningFailureDetail: string | null = null;
-  if (config.prompt && !config.tasks.length) {
+  const needsPlanning = Boolean(config.prompt && !config.tasks.length);
+  let reusePlanContent: string | null = null;
+  if (needsPlanning) {
     planningRan = true;
-    const planContent = await repoStore.readFile(runId, "task-plan.json");
-    if (planContent) {
+    const storedPlan = await repoStore.readFile(runId, "task-plan.json");
+    reusePlanContent = storedPlan || null;
+  }
+  if (reusePlanContent) {
+    try {
       const ghUser = await resolveGithubUsername(ghToken);
       const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-      planningCompletedDetail = await applyTaskPlanContent(config, runId, repoStore, planContent, bootstrapUrl)
-        .then((taskCount) => `Planning completed: ${taskCount} tasks (reused existing plan)`)
-        .catch(() => null);
-    }
-    if (!planningCompletedDetail) {
-      try {
-        await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
-        emitPlanningStarted = true;
-        planningCompletedDetail = `Planning completed: ${config.tasks.length} tasks`;
-      } catch (planningExc) {
-        planningFailureDetail = String(planningExc);
-      }
+      const taskCount = await applyTaskPlanContent(config, runId, repoStore, reusePlanContent, bootstrapUrl);
+      planningCompletedDetail = `Planning completed: ${taskCount} tasks (reused existing plan)`;
+    } catch {}
+  }
+  if (needsPlanning && !planningCompletedDetail) {
+    try {
+      await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
+      emitPlanningStarted = true;
+      planningCompletedDetail = `Planning completed: ${config.tasks.length} tasks`;
+    } catch (planningExc) {
+      planningFailureDetail = String(planningExc);
     }
   }
 
