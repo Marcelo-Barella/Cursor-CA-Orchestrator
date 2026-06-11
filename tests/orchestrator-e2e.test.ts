@@ -4,18 +4,12 @@ import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
 import { createInitialState, serialize } from "../src/state.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
-import {
-  FakeAgentClient,
-  type FakeRunScript,
-  assistantText,
-  statusMessage,
-} from "./support/fake-agent-client.js";
+import { FakeAgentClient, assistantText, statusMessage } from "./support/fake-agent-client.js";
 import {
   completedWorkerScript,
   createInMemoryRepoStore,
   type FileStore,
   installGithubBranchPrepMock,
-  installGithubBranchPrepRejectMock,
   parseEvents,
   promptOnlyConfig,
   restoreGithubBranchPrepMock,
@@ -997,9 +991,10 @@ describe("runOrchestration with SDK (happy path)", () => {
   });
 
   it("fails without launching worker when per-task branch preparation is rejected", async () => {
+    restoreGithubBranchPrepMock();
+    installGithubBranchPrepMock({ rejectBranchCreate: true });
     const config = singleTaskConfig();
     const fake = new FakeAgentClient();
-    installGithubBranchPrepRejectMock();
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
     await expect(runOrchestration("run-branch-prep-fail", fake, store)).rejects.toThrow();
     expect(fake.launches).toHaveLength(0);
@@ -1007,10 +1002,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
     expect(state.agents.t1.summary).toContain("Failed to prepare task branch");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    const failedEvent = events.find(
-      (e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t1",
-    );
+    const failedEvent = parseEvents(files).find((e) => e.event_type === "task_failed");
     expect(failedEvent?.detail).toContain("create run branch");
   });
 

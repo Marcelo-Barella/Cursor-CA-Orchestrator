@@ -1912,14 +1912,14 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningOutcome) {
     setPhaseStatus(state, "planning", planningOutcome.status, { timestamp: nowIso() });
-    if (planningOutcome.status === "finished" && planningOutcome.emitStarted) {
-      await appendEvent(
-        repoStore,
-        runId,
-        makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
-      );
-    }
     if (planningOutcome.status === "finished") {
+      if (planningOutcome.emitStarted) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
       await appendEvent(
         repoStore,
         runId,
