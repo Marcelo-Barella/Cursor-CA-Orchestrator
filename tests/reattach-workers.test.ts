@@ -226,7 +226,8 @@ describe("reattachWorkers running tasks", () => {
     const config = singleTaskConfig();
     const runId = "run-recover-dead-agent";
     const deadAgentId = "agent-dead-events";
-    const state = runningOrchestrationState(config, runId);
+    const branchName = `cursor-orch/${runId}/t1`;
+    const state = runningOrchestrationState(config, runId, { branch_name: branchName });
 
     const launchScript = completedResumeScript(runId);
     listRunsMock.mockResolvedValue({ items: [] });
@@ -249,6 +250,8 @@ describe("reattachWorkers running tasks", () => {
     expect(final.status).toBe("completed");
     expect(final.agents.t1.status).toBe("finished");
     expect(fake.launches).toHaveLength(1);
+    expect(fake.launches[0]!.opts.startingRef).toBe(branchName);
+    expect(final.agents.t1.branch_name).toBe(branchName);
   });
 
   it("marks the task failed when resumeCloudAgent throws", async () => {
