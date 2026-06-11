@@ -659,6 +659,38 @@ describe("runOrchestration validation gate", () => {
     );
   });
 
+  it("does not reset orchestration when refuseResume events reads fail before a later success", async () => {
+    const config = createConfig(["a"]);
+    let eventsReadCount = 0;
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") return "";
+        if (filename === "events.jsonl") {
+          eventsReadCount += 1;
+          if (eventsReadCount <= 2) {
+            throw new Error("transient events read failure");
+          }
+          return `${JSON.stringify({
+            timestamp: "2026-06-01T00:00:00.000Z",
+            event_type: "orchestration_started",
+            task_id: null,
+            detail: "started",
+          })}\n`;
+        }
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
+    await expect(runOrchestration("run-events-transient-refuse", agentClient, repoStore)).rejects.toThrow(
+      /transient events read failure/,
+    );
+    expect(eventsReadCount).toBe(1);
+  });
+
   it("aborts before repo writes when delegation_map fails validateConfig", async () => {
     const bad: OrchestratorConfig = {
       name: "n",
