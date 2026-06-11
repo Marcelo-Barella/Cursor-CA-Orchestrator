@@ -370,6 +370,25 @@ export class RepoStoreClient implements RepoStoreReader {
     }
   }
 
+  async getRunBranchCommitDate(runId: string): Promise<Date | null> {
+    const url = `${BASE_URL}/repos/${this.owner}/${this.repo}/branches/run/${encodeURIComponent(runId)}`;
+    try {
+      const resp = await this.request("GET", url);
+      const data = (await resp.json()) as {
+        commit?: { commit?: { committer?: { date?: string }; author?: { date?: string } } };
+      };
+      const commitDateIso = data.commit?.commit?.committer?.date ?? data.commit?.commit?.author?.date;
+      if (!commitDateIso) return null;
+      const commitDate = new Date(commitDateIso);
+      return Number.isNaN(commitDate.getTime()) ? null : commitDate;
+    } catch (e) {
+      if (e instanceof RepoStoreNotFound) {
+        return null;
+      }
+      throw e;
+    }
+  }
+
   async batchWriteFiles(runId: string, files: Record<string, string>, message = "batch update"): Promise<void> {
     for (let attempt = 0; attempt <= MAX_RETRIES_409; attempt++) {
       const parentSha = await this.getBranchSha(runId);
