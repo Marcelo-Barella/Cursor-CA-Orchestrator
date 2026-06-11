@@ -1311,6 +1311,32 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t2")).toBe(true);
   });
 
+  it("cascades stopped upstream tasks to dependents and exits without hanging", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING")],
+          result: { id: "r-t1", status: "cancelled" },
+        },
+        completedWorkerScript("t2", "run-dep-stopped"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-dep-stopped", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("stopped");
+    expect(state.agents.t1.status).toBe("stopped");
+    expect(state.agents.t2.status).toBe("stopped");
+    expect(state.agents.t2.cascade_source_task_id).toBe("t1");
+    expect(state.agents.t2.summary).toBe("Upstream task t1 stopped");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_stopped" && e.task_id === "t2")).toBe(
+      true,
+    );
+  });
+
   it("writes the stop sentinel leads to state.status=stopped", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({

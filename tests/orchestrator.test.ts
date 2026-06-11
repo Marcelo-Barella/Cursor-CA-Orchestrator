@@ -6,6 +6,7 @@ import { toYaml } from "../src/config/parse.js";
 import type { TaskConfig } from "../src/config/types.js";
 import { buildRepoCreationPrompt } from "../src/prompt-builder.js";
 import {
+  allAgentsTerminal,
   extractDelegationPhases,
   filterEligibleReadyTasks,
   getBlockedTasks,
@@ -47,6 +48,24 @@ function createConfig(
     bootstrap_repo_name: "b",
   };
 }
+
+describe("allAgentsTerminal", () => {
+  it("returns true when every agent has a terminal status", () => {
+    const config = createConfig(["a", "b"]);
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "finished";
+    state.agents.b!.status = "stopped";
+    expect(allAgentsTerminal(state)).toBe(true);
+  });
+
+  it("returns false when any agent is still active", () => {
+    const config = createConfig(["a", "b"]);
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "finished";
+    state.agents.b!.status = "running";
+    expect(allAgentsTerminal(state)).toBe(false);
+  });
+});
 
 describe("getBlockedTasks", () => {
   it("returns only agents in blocked status", () => {
@@ -425,26 +444,6 @@ describe("orchestrator launch eligibility", () => {
       expect(state.delegation_group_index).toBe(1);
     },
   );
-
-  it("treats a stopped task in the prior group as terminal for wave advancement", () => {
-    const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
-    config.delegation_map = {
-      phases: [
-        {
-          id: "phase-1",
-          groups: [
-            { id: "g1", task_ids: ["a"] },
-            { id: "g2", task_ids: ["b", "c"] },
-          ],
-        },
-      ],
-    };
-    const state = createInitialState(config, "run1");
-    state.agents.a!.status = "stopped";
-    const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
-    expect(eligible).toEqual(["b", "c"]);
-    expect(state.delegation_group_index).toBe(1);
-  });
 
   it("after mapped waves complete, eligible ready tasks are only those not in the delegation map (defensive)", () => {
     const config = createConfig(["a", "b", "u"]);
