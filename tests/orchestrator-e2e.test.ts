@@ -42,22 +42,6 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
   return { store, files };
 }
 
-function createEmptyFirstStateReadStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
-  const { store: baseStore, files } = createInMemoryRepoStore(initial);
-  let stateReadCount = 0;
-  const store = {
-    ...baseStore,
-    async readFile(runId: string, filename: string): Promise<string> {
-      if (filename === "state.json") {
-        stateReadCount += 1;
-        if (stateReadCount === 1) return "";
-      }
-      return baseStore.readFile(runId, filename);
-    },
-  } as unknown as RepoStoreClient;
-  return { store, files };
-}
-
 function createTransientStateReadStore(
   initial: Record<string, string>,
   failCount = 2,
@@ -139,26 +123,6 @@ function twoTaskChainConfig(): OrchestratorConfig {
         prompt: "Consume upstream outputs.",
         model: null,
         depends_on: ["t1"],
-        timeout_minutes: 30,
-        create_repo: false,
-        repo_config: null,
-      },
-    ],
-  };
-}
-
-function threeTaskChainConfig(): OrchestratorConfig {
-  const base = twoTaskChainConfig();
-  return {
-    ...base,
-    tasks: [
-      ...base.tasks,
-      {
-        id: "t3",
-        repo: "svc",
-        prompt: "Consume t2 outputs.",
-        model: null,
-        depends_on: ["t2"],
         timeout_minutes: 30,
         create_repo: false,
         repo_config: null,
@@ -962,28 +926,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
-  it("skips planning when stopped state loads after an empty pre-planning read (prompt-only)", async () => {
-    const config = promptOnlyConfig();
-    const runId = "run-stopped-empty-first-read";
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r1", status: "finished", result: "" },
-        },
-      ],
-    });
-    const stoppedState = createInitialState(config, runId);
-    stoppedState.status = "stopped";
-    const { store, files } = createEmptyFirstStateReadStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(stoppedState),
-    });
-    await runOrchestration(runId, fake, store);
-    expect(fake.launches).toHaveLength(0);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
-  });
-
   it("propagates state.json read errors after retry exhaustion", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
@@ -1367,84 +1309,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t2.summary).toContain("Upstream task t1 failed");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t2")).toBe(true);
-  });
-
-  it("cascades stopped upstream tasks to dependents and exits without hanging", async () => {
-    const config = twoTaskChainConfig();
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING")],
-          result: { id: "r-t1", status: "cancelled" },
-        },
-        completedWorkerScript("t2", "run-dep-stopped"),
-      ],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    await runOrchestration("run-dep-stopped", fake, store);
-    expect(fake.launches).toHaveLength(1);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("stopped");
-    expect(state.agents.t1.status).toBe("stopped");
-    expect(state.agents.t2.status).toBe("stopped");
-    expect(state.agents.t2.cascade_source_task_id).toBe("t1");
-    expect(state.agents.t2.summary).toBe("Upstream task t1 stopped");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_stopped" && e.task_id === "t2")).toBe(
-      true,
-    );
-  });
-
-  it("recursively cascades stopped status through a multi-hop dependency chain", async () => {
-    const config = threeTaskChainConfig();
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING")],
-          result: { id: "r-t1", status: "cancelled" },
-        },
-        completedWorkerScript("t2", "run-dep-stopped-chain"),
-        completedWorkerScript("t3", "run-dep-stopped-chain"),
-      ],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    await runOrchestration("run-dep-stopped-chain", fake, store);
-    expect(fake.launches).toHaveLength(1);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("stopped");
-    expect(state.agents.t1.status).toBe("stopped");
-    expect(state.agents.t2.status).toBe("stopped");
-    expect(state.agents.t2.cascade_source_task_id).toBe("t1");
-    expect(state.agents.t3.status).toBe("stopped");
-    expect(state.agents.t3.cascade_source_task_id).toBe("t2");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_stopped" && e.task_id === "t3")).toBe(
-      true,
-    );
-  });
-
-  it("on resume, reconciles pending dependents of an already-stopped upstream task", async () => {
-    const config = twoTaskChainConfig();
-    const fake = new FakeAgentClient({
-      defaultScripts: [completedWorkerScript("t2", "run-resume-stopped-cascade")],
-    });
-    const resumedState = createInitialState(config, "run-resume-stopped-cascade");
-    resumedState.status = "running";
-    resumedState.agents.t1!.status = "stopped";
-    resumedState.agents.t1!.finished_at = "2026-06-11T00:00:00.000Z";
-    resumedState.agents.t1!.summary = "Task cancelled";
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(resumedState),
-    });
-    await runOrchestration("run-resume-stopped-cascade", fake, store);
-    expect(fake.launches).toHaveLength(0);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("stopped");
-    expect(state.agents.t1.status).toBe("stopped");
-    expect(state.agents.t2.status).toBe("stopped");
-    expect(state.agents.t2.cascade_source_task_id).toBe("t1");
-    expect(state.agents.t2.summary).toBe("Upstream task t1 stopped");
   });
 
   it("writes the stop sentinel leads to state.status=stopped", async () => {
