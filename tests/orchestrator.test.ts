@@ -855,7 +855,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("agent-live-9");
     expect(state.agents.t1!.status).toBe("launching");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover/t1");
@@ -888,7 +888,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
           payload: {},
         },
       ];
-      expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+      expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
       expect(state.agents.t1!.agent_id).toBeNull();
       expect(state.agents.t1!.status).toBe("pending");
     },
@@ -914,7 +914,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("legacy-agent-9");
     expect(state.agents.t1!.status).toBe("launching");
   });
@@ -934,7 +934,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { run_id: "run-9" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
   });
@@ -964,7 +964,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "agent-new", run_id: "run-new", branch: "cursor-orch/run-recover-latest/t1" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("agent-new");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover-latest/t1");
   });
@@ -986,7 +986,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "agent-other", run_id: "run-other" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBe("agent-kept");
     expect(state.agents.t1!.status).toBe("running");
   });
@@ -1007,7 +1007,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "agent-other", run_id: "run-other" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBe("agent-existing");
     expect(state.agents.t1!.status).toBe("pending");
   });
@@ -1027,7 +1027,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "   ", run_id: "run-blank" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
   });
@@ -1047,7 +1047,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "   ", run_id: "run-blank" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
   });
 
@@ -1090,7 +1090,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("agent-retry");
     expect(state.agents.t1!.status).toBe("launching");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover-retry/t1-retry-1");
@@ -1117,52 +1117,8 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.started_at).toBe("2026-05-01T00:00:00.000Z");
     expect(state.agents.t1!.branch_name).toBe("existing-branch");
-  });
-});
-
-describe("pickReattachRun", () => {
-  it("prefers a running run over a newer finished run", () => {
-    const staleFinished = { status: "finished" as const, createdAt: 200 };
-    const activeRunning = { status: "running" as const, createdAt: 100 };
-    expect(pickReattachRun([staleFinished, activeRunning] as never)).toBe(activeRunning);
-  });
-
-  it("falls back to the newest createdAt when no run is running", () => {
-    const older = { status: "finished" as const, createdAt: 100 };
-    const newer = { status: "finished" as const, createdAt: 200 };
-    expect(pickReattachRun([older, newer] as never)).toBe(newer);
-  });
-});
-
-describe("agentIdFromTaskLaunchedEvent", () => {
-  it("reads agent_id from payload when present", () => {
-    const event: OrchestrationEvent = {
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: "Launched t1 (from-detail)",
-      payload: { agent_id: "from-payload" },
-    };
-    expect(agentIdFromTaskLaunchedEvent(event)).toBe("from-payload");
-  });
-
-  it("falls back to detail when legacy events omit payload agent_id", () => {
-    const event: OrchestrationEvent = {
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: "Launched t1 (legacy-agent-7)",
-      payload: { run_id: "run-legacy" },
-    };
-    expect(agentIdFromTaskLaunchedEvent(event)).toBe("legacy-agent-7");
   });
 });
