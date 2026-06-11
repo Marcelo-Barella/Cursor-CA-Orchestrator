@@ -303,6 +303,32 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
+  it("falls back to assistant JSON when the artifact is valid JSON but missing a worker status", async () => {
+    const config = singleTaskConfig();
+    const workerJson = { task_id: "t1", status: "completed", summary: "from assistant after incomplete artifact", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [
+            statusMessage("RUNNING"),
+            assistantText(`\`\`\`json\n${JSON.stringify(workerJson)}\n\`\`\``),
+            statusMessage("FINISHED"),
+          ],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", summary: "incomplete artifact", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-incomplete-artifact-fallback", fake, store);
+    expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
+    expect(finishedEvent?.payload?.payload_source).toBe("assistant");
+  });
+
   it("falls back to assistant JSON when the artifact exists but is not valid JSON", async () => {
     const config = singleTaskConfig();
     const workerJson = { task_id: "t1", status: "completed", summary: "from assistant after bad artifact", outputs: {} };
@@ -818,6 +844,53 @@ describe("runOrchestration with SDK (happy path)", () => {
       "state.json": serialize(stoppedState),
     });
     await runOrchestration("run-stopped-resume", fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
+  it("skips orchestration loop when stopped state loads after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, "run-stopped-transient");
+    stoppedState.status = "stopped";
+    const stateJson = serialize(stoppedState);
+    let stateReadCount = 0;
+    const files: FileStore = new Map([["config.yaml", toYaml(config)], ["state.json", stateJson]]);
+    const store = {
+      rateLimitRemaining: null,
+      rateLimitLimit: null,
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "state.json") {
+          stateReadCount += 1;
+          if (stateReadCount <= 2) {
+            throw new Error("transient repo read failure");
+          }
+          return files.get(filename) ?? "";
+        }
+        return files.get(filename) ?? "";
+      },
+      async writeFile(_runId: string, filename: string, content: string): Promise<void> {
+        files.set(filename, content);
+      },
+      async updateFile(_runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
+        const current = files.get(filename) ?? "";
+        files.set(filename, await updater(current));
+      },
+      async deleteFile(_runId: string, filename: string): Promise<void> {
+        files.delete(filename);
+      },
+    } as unknown as RepoStoreClient;
+    await runOrchestration("run-stopped-transient", fake, store);
     expect(fake.launches).toHaveLength(0);
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
