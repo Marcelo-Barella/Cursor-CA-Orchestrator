@@ -67,10 +67,14 @@ export function readTaskFailureRetryCap(): number {
   return TASK_FAILURE_MAX_RETRIES_DEFAULT;
 }
 
-function resetAgentToSchedulableForRetry(agent: AgentState): void {
+function resetAgentForLaunch(agent: AgentState): void {
   agent.agent_id = null;
   agent.status = "pending";
   agent.started_at = null;
+}
+
+function resetAgentToSchedulableForRetry(agent: AgentState): void {
+  resetAgentForLaunch(agent);
   agent.finished_at = null;
   agent.branch_name = null;
   agent.pr_url = null;
@@ -271,21 +275,11 @@ export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   if (runs.length === 0) return null;
   const running = runs.find((run) => run.status === "running");
   if (running) return running;
-  let best = runs[0]!;
-  let bestCreated = best.createdAt ?? 0;
-  for (let i = 1; i < runs.length; i += 1) {
-    const run = runs[i]!;
-    const created = run.createdAt ?? 0;
-    if (created >= bestCreated) {
-      best = run;
-      bestCreated = created;
-    }
-  }
-  return best;
+  return runs.reduce((best, run) => ((run.createdAt ?? 0) >= (best.createdAt ?? 0) ? run : best));
 }
 
-export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): boolean {
-  let changed = false;
+export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): string[] {
+  const recoveredTaskIds: string[] = [];
   for (const agent of Object.values(state.agents)) {
     if (agent.agent_id || agent.status !== "pending") continue;
     let lastLaunch: OrchestrationEvent | null = null;
@@ -311,9 +305,9 @@ export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, e
     if (branch && !agent.branch_name) {
       agent.branch_name = branch;
     }
-    changed = true;
+    recoveredTaskIds.push(agent.task_id);
   }
-  return changed;
+  return recoveredTaskIds;
 }
 
 function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
@@ -697,6 +691,7 @@ type LoopContext = {
   apiKey: string;
   ghToken: string;
   activeWorkers: Map<string, WorkerHandle>;
+  eventRecoveredTaskIds: Set<string>;
   dirty: { value: boolean };
   wakeup: { resolve: () => void; promise: Promise<void> };
   stopRequested: { value: boolean };
@@ -1733,10 +1728,17 @@ async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: str
 
 async function reattachWorkers(ctx: LoopContext): Promise<void> {
   const { Agent } = await import("@cursor/sdk");
+  const resetEventRecoveredForRelaunch = (taskId: string, agent: AgentState): boolean => {
+    if (!ctx.eventRecoveredTaskIds.has(taskId)) return false;
+    resetAgentForLaunch(agent);
+    markStateDirty(ctx);
+    return true;
+  };
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
     if (!agent.agent_id) continue;
     if (agent.status !== "launching" && agent.status !== "running") continue;
     if (ctx.activeWorkers.has(taskId)) continue;
+    let sdkAgent: SdkAgent | undefined;
     try {
       const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
         apiKey: ctx.apiKey,
@@ -1746,11 +1748,12 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       if (mcpServers) {
         resumeOptions.mcpServers = mcpServers;
       }
-      const sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
+      sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
+        if (resetEventRecoveredForRelaunch(taskId, agent)) continue;
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
         continue;
@@ -1784,6 +1787,10 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
+      if (sdkAgent) {
+        await safeDisposeAgent(sdkAgent);
+      }
+      if (!sdkAgent && resetEventRecoveredForRelaunch(taskId, agent)) continue;
       agent.status = "failed";
       agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
       markStateDirty(ctx);
@@ -1943,7 +1950,8 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   reconcileAgentsFromConfig(state, config);
   const launchEvents = await readEvents(repoStore, runId);
-  if (reconcileInFlightLaunchesFromEvents(state, launchEvents)) {
+  const eventRecoveredTaskIds = reconcileInFlightLaunchesFromEvents(state, launchEvents);
+  if (eventRecoveredTaskIds.length > 0) {
     await syncToRepo(repoStore, runId, state);
   }
 
@@ -2013,6 +2021,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     apiKey,
     ghToken,
     activeWorkers: new Map(),
+    eventRecoveredTaskIds: new Set(eventRecoveredTaskIds),
     dirty: { value: true },
     wakeup: createWakeup(),
     stopRequested: { value: false },

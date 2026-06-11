@@ -2,6 +2,9 @@ import { vi } from "vitest";
 import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import type { RepoStoreClient } from "../../src/api/repo-store.js";
 import type { OrchestratorConfig } from "../../src/config/types.js";
+import type { AgentState, OrchestrationEvent, OrchestrationState } from "../../src/state.js";
+import { createInitialState, seedMainAgent } from "../../src/state.js";
+import { statusMessage } from "./fake-agent-client.js";
 
 export type FileStore = Map<string, string>;
 
@@ -56,6 +59,62 @@ export function singleTaskConfig(): OrchestratorConfig {
   };
 }
 
+export function runningOrchestrationState(
+  config: OrchestratorConfig,
+  runId: string,
+  taskPatch?: Partial<AgentState>,
+): OrchestrationState {
+  const state = createInitialState(config, runId);
+  state.status = "running";
+  state.started_at = new Date().toISOString();
+  seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+  if (taskPatch) {
+    state.agents.t1 = { ...state.agents.t1!, ...taskPatch };
+  }
+  return state;
+}
+
+export function completedResumeScript(runId: string) {
+  return {
+    events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+    result: { id: "r-resume", status: "finished" as const, git: runGit(`cursor-orch/${runId}/t1`) },
+    artifacts: {
+      "cursor-orch-output.json": JSON.stringify({
+        task_id: "t1",
+        status: "completed",
+        summary: "done after resume",
+        outputs: {},
+      }),
+    },
+  };
+}
+
+export function taskLaunchedEvent(
+  runId: string,
+  agentId: string,
+  opts?: { legacyPayload?: boolean; runIdInPayload?: string },
+): OrchestrationEvent {
+  const payload: Record<string, string> = {
+    run_id: opts?.runIdInPayload ?? "run-live",
+    repository: "https://github.com/acme/svc",
+    ref: "main",
+    branch: `cursor-orch/${runId}/t1`,
+  };
+  if (!opts?.legacyPayload) {
+    payload.agent_id = agentId;
+  }
+  return {
+    timestamp: "2026-06-01T00:00:00.000Z",
+    event_type: "task_launched",
+    task_id: "t1",
+    phase_id: "execution",
+    agent_node_id: "t1",
+    agent_kind: "task",
+    detail: `Launched t1 (${agentId})`,
+    payload,
+  };
+}
+
 let unmockedFetch: typeof fetch;
 
 export function installGithubBranchPrepMock(): void {
@@ -91,4 +150,19 @@ export function installGithubBranchPrepMock(): void {
 
 export function restoreGithubBranchPrepMock(): void {
   globalThis.fetch = unmockedFetch;
+}
+
+export function resetReattachTestEnv(listRunsMock: ReturnType<typeof vi.fn>): void {
+  process.env.CURSOR_API_KEY = "sk-fake";
+  process.env.GH_TOKEN = "ghp-fake";
+  process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES = "0";
+  delete process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRY_MS;
+  delete process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES;
+  installGithubBranchPrepMock();
+  listRunsMock.mockReset();
+}
+
+export function restoreReattachTestEnv(originalEnv: NodeJS.ProcessEnv): void {
+  restoreGithubBranchPrepMock();
+  process.env = { ...originalEnv };
 }
