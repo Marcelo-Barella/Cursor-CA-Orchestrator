@@ -42,6 +42,22 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
   return { store, files };
 }
 
+function createEmptyFirstStateReadStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
+  const { store: baseStore, files } = createInMemoryRepoStore(initial);
+  let stateReadCount = 0;
+  const store = {
+    ...baseStore,
+    async readFile(runId: string, filename: string): Promise<string> {
+      if (filename === "state.json") {
+        stateReadCount += 1;
+        if (stateReadCount === 1) return "";
+      }
+      return baseStore.readFile(runId, filename);
+    },
+  } as unknown as RepoStoreClient;
+  return { store, files };
+}
+
 function createTransientStateReadStore(
   initial: Record<string, string>,
   failCount = 2,
@@ -939,19 +955,10 @@ describe("runOrchestration with SDK (happy path)", () => {
     });
     const stoppedState = createInitialState(config, runId);
     stoppedState.status = "stopped";
-    let stateReadCount = 0;
-    const { store, files } = createInMemoryRepoStore({
+    const { store, files } = createEmptyFirstStateReadStore({
       "config.yaml": toYaml(config),
       "state.json": serialize(stoppedState),
     });
-    const baseReadFile = store.readFile.bind(store);
-    store.readFile = async (id: string, filename: string) => {
-      if (filename === "state.json") {
-        stateReadCount += 1;
-        return stateReadCount === 1 ? "" : baseReadFile(id, filename);
-      }
-      return baseReadFile(id, filename);
-    };
     await runOrchestration(runId, fake, store);
     expect(fake.launches).toHaveLength(0);
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");

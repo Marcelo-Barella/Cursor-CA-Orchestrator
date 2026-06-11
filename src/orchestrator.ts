@@ -1720,14 +1720,7 @@ async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): 
 }
 
 async function rereadStateJsonIfEmpty(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<string> {
-  if (stateContent.trim()) {
-    return stateContent;
-  }
-  try {
-    return await repoStore.readFile(runId, "state.json");
-  } catch (readErr) {
-    throw readErr instanceof Error ? readErr : new Error(String(readErr));
-  }
+  return stateContent.trim() ? stateContent : repoStore.readFile(runId, "state.json");
 }
 
 async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
@@ -1944,20 +1937,21 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   validateConfig(config);
 
-  let state: OrchestrationState;
   if (!stateContent.trim()) {
     stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
     await refuseResumeWithEmptyState(repoStore, runId, stateContent);
-    if (!stateContent.trim()) {
-      state = createInitialState(config, runId);
-    } else {
+    if (stateContent.trim()) {
       try {
-        state = deserialize(stateContent);
+        parsedState = deserialize(stateContent);
       } catch (parseErr) {
-        const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
-        throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
+        stateParseDetail = parseErr instanceof Error ? parseErr.message : String(parseErr);
       }
     }
+  }
+
+  let state: OrchestrationState;
+  if (!stateContent.trim()) {
+    state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
   } else {
