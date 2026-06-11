@@ -1905,7 +1905,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   let planningOk = false;
   let planningSource: "reused" | "fresh" | null = null;
   let planningFailedDetail: string | null = null;
-  let planningUsedFullPhase = false;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
@@ -1919,7 +1918,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       }
     }
     if (!planningOk) {
-      planningUsedFullPhase = true;
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
         planningOk = true;
@@ -1986,13 +1984,11 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         ),
       );
     } else if (!planningOk && planningFailedDetail !== null) {
-      if (planningUsedFullPhase) {
-        await appendEvent(
-          repoStore,
-          runId,
-          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
-        );
-      }
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+      );
       await appendEvent(
         repoStore,
         runId,

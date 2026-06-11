@@ -141,10 +141,6 @@ function eventsFromFiles(files: FileStore): { event_type: string; detail?: strin
     .map((line) => JSON.parse(line) as { event_type: string; detail?: string });
 }
 
-function eventTypesFromFiles(files: FileStore): string[] {
-  return eventsFromFiles(files).map((event) => event.event_type);
-}
-
 function promptOnlyTaskPlan(prompt = "Planned work."): string {
   return JSON.stringify({
     tasks: [
@@ -979,11 +975,12 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(fake.launches[0]!.prompt).toContain("Planned work.");
     const updatedConfig = files.get("config.yaml")!;
     expect(updatedConfig).toContain("t1");
-    const types = eventTypesFromFiles(files);
+    const events = eventsFromFiles(files);
+    const types = events.map((event) => event.event_type);
     expect(types).toContain("planning_completed");
     expect(types).not.toContain("planning_started");
     expect(types.indexOf("orchestration_started")).toBeLessThan(types.indexOf("planning_completed"));
-    const completedDetail = eventsFromFiles(files).find((event) => event.event_type === "planning_completed")?.detail;
+    const completedDetail = events.find((event) => event.event_type === "planning_completed")?.detail;
     expect(completedDetail).toContain("reused existing plan");
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("completed");
@@ -1012,11 +1009,12 @@ describe("runOrchestration with SDK (happy path)", () => {
       expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
       expect(fake.launches[1]!.opts.repoUrl).toBe("https://github.com/acme/svc");
       expect(fake.launches[1]!.prompt).toContain("Replanned work.");
-      const types = eventTypesFromFiles(files);
+      const events = eventsFromFiles(files);
+      const types = events.map((event) => event.event_type);
       expect(types).toContain("planning_started");
       expect(types).toContain("planning_completed");
       expect(types.indexOf("planning_started")).toBeLessThan(types.indexOf("planning_completed"));
-      const completed = eventsFromFiles(files).find((event) => event.event_type === "planning_completed");
+      const completed = events.find((event) => event.event_type === "planning_completed");
       expect(completed?.detail).toBe("Planning completed: 1 tasks");
       expect(completed?.detail).not.toContain("reused existing plan");
       const state = JSON.parse(files.get("state.json")!);
