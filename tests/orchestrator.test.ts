@@ -249,6 +249,94 @@ describe("orchestrator launch eligibility", () => {
     expect(extractDelegationPhases(config, new Set())).toBeNull();
   });
 
+  it("extractDelegationPhases parses legacy delegationMap waves and parallel_groups", () => {
+    const config = createConfig(["a", "b", "c"]) as OrchestratorConfig & {
+      delegationMap?: unknown;
+    };
+    config.delegationMap = {
+      waves: [
+        {
+          phase_id: "wave-1",
+          parallel_groups: [{ tasks: ["a", "b"] }],
+        },
+        {
+          name: "wave-2",
+          parallelGroups: [{ taskIds: ["c"] }],
+        },
+      ],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b", "c"]));
+    expect(phases).toEqual([
+      { id: "wave-1", groups: [{ id: "group-1", task_ids: ["a", "b"] }] },
+      { id: "wave-2", groups: [{ id: "group-1", task_ids: ["c"] }] },
+    ]);
+  });
+
+  it("extractDelegationPhases legacy path drops unknown task ids", () => {
+    const config = createConfig(["a"]) as OrchestratorConfig & { delegationMap?: unknown };
+    config.delegationMap = {
+      waves: [{ tasks: ["a", "ghost"] }],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).toEqual([{ id: "phase-1", groups: [{ id: "group-1", task_ids: ["a"] }] }]);
+  });
+
+  it("extractDelegationPhases parses legacy waves with parallel_groups and tasks fields", () => {
+    const config = createConfig(["a", "b", "c"]);
+    config.delegation_map = undefined;
+    Object.assign(config as unknown as Record<string, unknown>, {
+      delegation_map: {
+        waves: [
+          {
+            phase_id: "wave-1",
+            parallel_groups: [
+              { id: "pg1", tasks: ["a", "b"] },
+              { id: "pg2", taskIds: ["c"] },
+            ],
+          },
+        ],
+      },
+    });
+    const phases = extractDelegationPhases(config, new Set(["a", "b", "c"]));
+    expect(phases).toEqual([
+      {
+        id: "wave-1",
+        groups: [
+          { id: "group-1", task_ids: ["a", "b", "c"] },
+        ],
+      },
+    ]);
+  });
+
+  it("extractDelegationPhases parses legacy delegationMap camelCase phase task lists", () => {
+    const config = createConfig(["a", "b"]);
+    config.delegation_map = undefined;
+    Object.assign(config as unknown as Record<string, unknown>, {
+      delegationMap: {
+        phases: [{ name: "setup", tasks: ["a"] }, { id: "run", tasks: ["b"] }],
+      },
+    });
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).toEqual([
+      { id: "setup", groups: [{ id: "group-1", task_ids: ["a"] }] },
+      { id: "run", groups: [{ id: "group-1", task_ids: ["b"] }] },
+    ]);
+  });
+
+  it("filterEligibleReadyTasks honors legacy delegation_map wave ordering", () => {
+    const config = createConfig(["a", "b"]);
+    config.delegation_map = undefined;
+    Object.assign(config as unknown as Record<string, unknown>, {
+      delegation_map: {
+        waves: [{ id: "p1", tasks: ["a"] }, { id: "p2", tasks: ["b"] }],
+      },
+    });
+    const state = createInitialState(config, "run1");
+    expect(filterEligibleReadyTasks(state, config, ["a", "b"])).toEqual(["a"]);
+    state.agents.a!.status = "finished";
+    expect(filterEligibleReadyTasks(state, config, ["a", "b"])).toEqual(["b"]);
+  });
+
   it("eligibles multiple tasks in the same parallel group when both are ready", () => {
     const config = createConfig(["a", "b", "c"]);
     config.delegation_map = {
