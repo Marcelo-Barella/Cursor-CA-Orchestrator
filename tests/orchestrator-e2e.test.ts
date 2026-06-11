@@ -1288,6 +1288,32 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
+  it("does not bypass constraint validation when reusing task-plan.json", async () => {
+    const config = {
+      ...promptOnlyConfig(),
+      prompt: "Every route must use your translation method.",
+    };
+    const taskPlan = JSON.stringify({
+      tasks: [{ id: "t1", repo: "svc", prompt: "Implement the home page.", depends_on: [], timeout_minutes: 30 }],
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { sendThrows: new Error("planner should not be required when reuse is valid") },
+        completedWorkerScript("t1", "run-constraint-reuse"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    await expect(runOrchestration("run-constraint-reuse", fake, store)).rejects.toThrow();
+    expect(fake.launches.some((launch) => launch.opts.repoUrl.includes("/acme/svc"))).toBe(false);
+    expect(files.get("events.jsonl")).toContain("planning_failed");
+    const state = files.get("state.json");
+    expect(state).toBeTruthy();
+    expect(JSON.parse(state!).status).not.toBe("completed");
+  });
+
   it("cascades failure to dependent tasks without launching them", async () => {
     const config = twoTaskChainConfig();
     const fake = new FakeAgentClient({
