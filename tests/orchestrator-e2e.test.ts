@@ -1032,6 +1032,34 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(events.some((e: { event_type: string }) => e.event_type === "task_failed" && e.task_id === "t1")).toBe(true);
   });
 
+  it("fails without launching worker when per-task branch preparation is rejected", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient();
+    const baselineFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.startsWith("https://api.github.com/") && url.includes("/git/refs") && init?.method === "POST") {
+        return new Response(JSON.stringify({ message: "Reference update not allowed" }), {
+          status: 422,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return baselineFetch(input, init);
+    }) as typeof fetch;
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-branch-prep-fail", fake, store)).rejects.toThrow();
+    expect(fake.launches).toHaveLength(0);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.agents.t1.status).toBe("failed");
+    expect(state.agents.t1.summary).toContain("Failed to prepare task branch");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const failedEvent = events.find(
+      (e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t1",
+    );
+    expect(failedEvent?.detail).toContain("create run branch");
+  });
+
   it("runs dependent tasks sequentially and injects upstream outputs into the worker prompt", async () => {
     const config = twoTaskChainConfig();
     const fake = new FakeAgentClient({
