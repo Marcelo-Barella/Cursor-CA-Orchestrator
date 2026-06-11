@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
-import { toYaml } from "../src/config/parse.js";
+import { parseConfig, toYaml } from "../src/config/parse.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import { FakeAgentClient, statusMessage, type FakeRunScript } from "./support/fake-agent-client.js";
 import * as planner from "../src/planner.js";
@@ -130,6 +130,27 @@ describe("planning reuse fallback", () => {
     globalThis.fetch = unmockedFetch;
     waitForPlanSpy.mockRestore();
     vi.clearAllMocks();
+  });
+
+  it("does not persist task plan to config.yaml when validateConfig rejects it", async () => {
+    const config = promptOnlyConfig();
+    const cyclicPlan = JSON.stringify({
+      tasks: [
+        { id: "t1", repo: "svc", prompt: "work a", depends_on: ["t2"], timeout_minutes: 30 },
+        { id: "t2", repo: "svc", prompt: "work b", depends_on: ["t1"], timeout_minutes: 30 },
+      ],
+    });
+    const failFake = new FakeAgentClient({
+      defaultScripts: [{ sendThrows: new Error("planner unavailable") }],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": cyclicPlan,
+    });
+
+    await expect(runOrchestration("run-invalid-plan-gate", failFake, store)).rejects.toThrow();
+
+    expect(parseConfig(files.get("config.yaml")!).tasks).toHaveLength(0);
   });
 
   it("deletes stale task-plan.json before replanning when reuse fails", async () => {

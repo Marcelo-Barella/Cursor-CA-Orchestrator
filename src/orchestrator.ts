@@ -1607,8 +1607,15 @@ async function applyTaskPlanContent(
   planContent: string,
   bootstrapUrl: string,
 ): Promise<number> {
-  config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-  const parsedTasks = parseTaskPlan(planContent, config);
+  const trialConfig: OrchestratorConfig = {
+    ...config,
+    repositories: {
+      ...config.repositories,
+      __bootstrap__: { url: bootstrapUrl, ref: resolveBootstrapRef() },
+    },
+    tasks: [],
+  };
+  const parsedTasks = parseTaskPlan(planContent, trialConfig);
   const constraints = extractConstraintsFromPrompt(config.prompt);
   if (constraints.length > 0) {
     const validation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
@@ -1619,11 +1626,15 @@ async function applyTaskPlanContent(
       throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
     }
   }
-  config.tasks = parsedTasks;
-  const canon = canonicalizeOrchestratorConfig(config);
-  config.repositories = canon.repositories;
-  config.tasks = canon.tasks;
-  config.delegation_map = canon.delegation_map;
+  trialConfig.tasks = parsedTasks;
+  const canon = canonicalizeOrchestratorConfig(trialConfig);
+  trialConfig.repositories = canon.repositories;
+  trialConfig.tasks = canon.tasks;
+  trialConfig.delegation_map = canon.delegation_map;
+  validateConfig(trialConfig);
+  config.repositories = trialConfig.repositories;
+  config.tasks = trialConfig.tasks;
+  config.delegation_map = trialConfig.delegation_map;
   await repoStore.writeFile(runId, "config.yaml", toYaml(config));
   return parsedTasks.length;
 }
