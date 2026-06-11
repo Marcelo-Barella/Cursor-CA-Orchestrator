@@ -57,12 +57,13 @@ describe("reattachWorkers running tasks", () => {
     process.env = { ...originalEnv };
   });
 
-  it.each(["running", "launching"] as const)(
-    "reattaches %s workers without relaunching",
-    async (workerStatus) => {
+  it.each([
+    { workerStatus: "running" as const, runId: "run-reattach-running", liveAgentId: "agent-live-1" },
+    { workerStatus: "launching" as const, runId: "run-reattach-launching", liveAgentId: "agent-live-launching" },
+  ])(
+    "reattaches $workerStatus workers via resumeCloudAgent without relaunching",
+    async ({ workerStatus, runId, liveAgentId }) => {
       const config = singleTaskConfig();
-      const runId = `run-reattach-${workerStatus}`;
-      const liveAgentId = `agent-live-${workerStatus}`;
       const state = createInitialState(config, runId);
       state.status = "running";
       state.started_at = new Date().toISOString();
@@ -273,6 +274,55 @@ describe("reattachWorkers running tasks", () => {
     expect(final.status).toBe("completed");
     expect(final.agents.t1.agent_id).toBe(liveAgentId);
     expect(final.agents.t1.status).toBe("finished");
+    expect(fake.launches).toHaveLength(0);
+  });
+
+  it("passes configured mcp_servers to resumeCloudAgent", async () => {
+    const config = {
+      ...singleTaskConfig(),
+      mcp_servers: {
+        github: {
+          type: "stdio" as const,
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-github"],
+        },
+      },
+    };
+    const runId = "run-reattach-mcp";
+    const liveAgentId = "agent-live-mcp";
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    state.agents.t1 = {
+      ...state.agents.t1!,
+      agent_id: liveAgentId,
+      status: "running",
+    };
+
+    const resumeScript = completedResumeScript(runId);
+    const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
+    listRunsMock.mockResolvedValue({ items: [resumedRun] });
+
+    const fake = new FakeAgentClient({
+      runsByAgent: { [liveAgentId]: [resumeScript] },
+      conversationText: null,
+    });
+    const resumeSpy = vi.spyOn(fake, "resumeCloudAgent");
+
+    const { store } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    expect(resumeSpy).toHaveBeenCalledWith(
+      liveAgentId,
+      expect.objectContaining({
+        mcpServers: config.mcp_servers,
+      }),
+    );
     expect(fake.launches).toHaveLength(0);
   });
 
