@@ -42,6 +42,26 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
   return { store, files };
 }
 
+function createEmptyThenPopulatedStateReadStore(
+  initial: Record<string, string>,
+): { store: RepoStoreClient; files: FileStore } {
+  const { store: baseStore, files } = createInMemoryRepoStore(initial);
+  let stateReadCount = 0;
+  const store = {
+    ...baseStore,
+    async readFile(runId: string, filename: string): Promise<string> {
+      if (filename === "state.json") {
+        stateReadCount += 1;
+        if (stateReadCount === 1) {
+          return "";
+        }
+      }
+      return baseStore.readFile(runId, filename);
+    },
+  } as unknown as RepoStoreClient;
+  return { store, files };
+}
+
 function createTransientStateReadStore(
   initial: Record<string, string>,
   failCount = 2,
@@ -926,6 +946,49 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("skips planning when stopped state loads after an empty pre-planning read (prompt-only)", async () => {
+    const config = promptOnlyConfig();
+    const runId = "run-stopped-empty-first-read";
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", result: "" },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, runId);
+    stoppedState.status = "stopped";
+    const { store, files } = createEmptyThenPopulatedStateReadStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(stoppedState),
+    });
+    await runOrchestration(runId, fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
+  it("does not launch planning when the first empty state read is followed by a stopped state re-read", async () => {
+    const config = promptOnlyConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, "run-empty-then-stopped-plan");
+    stoppedState.status = "stopped";
+    const { store, files } = createEmptyThenPopulatedStateReadStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(stoppedState),
+    });
+    await runOrchestration("run-empty-then-stopped-plan", fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
   it("propagates state.json read errors after retry exhaustion", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
@@ -1310,6 +1373,51 @@ describe("runOrchestration with SDK (happy path)", () => {
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t2")).toBe(true);
   });
+
+  it("finalizes as stopped when parallel tasks mix finished and cancelled agents", async () => {
+    const config = twoRepoParallelTaskConfig();
+    const completed = (taskId: string) => ({
+      events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+      result: { id: `r-${taskId}`, status: "finished" as const, git: runGit(`cursor-orch/run-mixed-terminal/${taskId}`) },
+      artifacts: {
+        "cursor-orch-output.json": JSON.stringify({ task_id: taskId, status: "completed", summary: "ok", outputs: {} }),
+      },
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [completed("t-a"), { events: [statusMessage("RUNNING")], result: { id: "r-t-b", status: "cancelled" } }],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-mixed-terminal", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.agents["t-a"].status).toBe("finished");
+    expect(state.agents["t-b"].status).toBe("stopped");
+    expect(state.status).toBe("stopped");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "orchestration_stopped")).toBe(true);
+  }, 20_000);
+
+  it("cascades stopped upstream to dependent tasks without launching them", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { events: [statusMessage("RUNNING")], result: { id: "r-t1", status: "cancelled" } },
+        completedWorkerScript("t2", "run-stopped-cascade"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-stopped-cascade", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.agents.t1.status).toBe("stopped");
+    expect(state.agents.t2.status).toBe("stopped");
+    expect(state.agents.t2.cascade_source_task_id).toBe("t1");
+    expect(state.agents.t2.summary).toContain("Upstream task t1 stopped");
+    expect(state.status).toBe("stopped");
+    expect(fake.launches).toHaveLength(1);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_stopped" && e.task_id === "t2")).toBe(
+      true,
+    );
+  }, 20_000);
 
   it("writes the stop sentinel leads to state.status=stopped", async () => {
     const config = singleTaskConfig();

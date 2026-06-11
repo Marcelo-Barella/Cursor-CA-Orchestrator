@@ -600,6 +600,38 @@ describe("runOrchestration validation gate", () => {
     await expect(runOrchestration("run-corrupt-state", agentClient, repoStore)).rejects.toThrow(/Invalid state\.json/);
   });
 
+  it("re-reads state.json before reset when the pre-planning read was empty", async () => {
+    const config = createConfig(["a"]);
+    const persisted = createInitialState(config, "run-reread");
+    persisted.status = "running";
+    persisted.agents.a!.status = "finished";
+    let stateReadCount = 0;
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") {
+          stateReadCount += 1;
+          return stateReadCount === 1 ? "" : serialize(persisted);
+        }
+        if (filename === "events.jsonl") return "";
+        throw new Error(`unexpected read: ${filename}`);
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    let launchCount = 0;
+    const agentClient = {
+      createCloudAgent: async () => {
+        launchCount += 1;
+        return { agentId: "x" };
+      },
+    } as unknown as AgentClient;
+    await runOrchestration("run-reread", agentClient, repoStore);
+    expect(stateReadCount).toBeGreaterThanOrEqual(2);
+    expect(launchCount).toBe(0);
+  });
+
   it("rejects empty state.json when events.jsonl shows an in-progress run", async () => {
     const config = createConfig(["a"]);
     const repoStore = {
