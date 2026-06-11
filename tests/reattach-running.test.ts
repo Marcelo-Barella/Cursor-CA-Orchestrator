@@ -98,6 +98,62 @@ describe("reattachWorkers running tasks", () => {
     },
   );
 
+  it("does not re-send the worker prompt when task_launched was already recorded", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-launched-no-runs";
+    const liveAgentId = "agent-launched-1";
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    state.agents.t1 = {
+      ...state.agents.t1!,
+      agent_id: liveAgentId,
+      status: "launching",
+      started_at: state.started_at,
+      branch_name: `cursor-orch/${runId}/t1`,
+    };
+
+    listRunsMock.mockResolvedValue({ items: [] });
+
+    const fake = new FakeAgentClient({
+      runsByAgent: {
+        [liveAgentId]: [completedResumeScript(runId)],
+      },
+      conversationText: null,
+    });
+
+    const launchEvent = JSON.stringify({
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: `Launched t1 (${liveAgentId})`,
+      payload: {
+        agent_id: liveAgentId,
+        run_id: "run-live",
+        repository: "https://github.com/acme/svc",
+        ref: "main",
+        branch: `cursor-orch/${runId}/t1`,
+      },
+    });
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+      "events.jsonl": `${launchEvent}\n`,
+    });
+
+    await expect(runOrchestration(runId, fake, store)).rejects.toThrow();
+
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.agents.t1.status).toBe("failed");
+    expect(final.agents.t1.summary).toBe("Resume: task launched but run not found");
+    expect(fake.launches).toHaveLength(0);
+  });
+
   it("completes a deferred launch by sending the worker prompt when listRuns is empty but agent is launching", async () => {
     const config = singleTaskConfig();
     const runId = "run-deferred-launch";
