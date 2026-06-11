@@ -1721,15 +1721,17 @@ async function runPlanningPhase(
     await plannerAgent.send(plannerPrompt);
     let planContent = await waitForPlan(repoStore, runId);
     if (!planContent) {
-      try {
-        const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
+      const runs = await (await import("@cursor/sdk"))
+        .Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey })
+        .catch(() => null);
+      if (runs) {
         for (const r of runs.items) {
           if (typeof r.result === "string" && r.result.trim()) {
             planContent = r.result;
             break;
           }
         }
-      } catch {}
+      }
     }
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
