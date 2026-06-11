@@ -722,36 +722,8 @@ async function syncStopRequestedFromRepo(ctx: LoopContext): Promise<boolean> {
       ctx.stopRequested.value = true;
       return true;
     }
-  } catch {
-    /* poller will retry */
-  }
+  } catch {}
   return false;
-}
-
-async function shouldAbortWorkerFinalize(ctx: LoopContext): Promise<boolean> {
-  if (ctx.stopRequested.value) return true;
-  if (await syncStopRequestedFromRepo(ctx)) return true;
-  if (ctx.stopRequested.value) return true;
-  return syncStopRequestedFromRepo(ctx);
-}
-
-async function finalizeWorkerAsStopped(
-  ctx: LoopContext,
-  taskId: string,
-  agent: AgentState,
-  handle: WorkerHandle,
-  sdkAgent: SdkAgent,
-  finalizedAt: string,
-): Promise<void> {
-  agent.status = "stopped";
-  agent.finished_at = finalizedAt;
-  if (ctx.activeWorkers.get(taskId) === handle) {
-    ctx.activeWorkers.delete(taskId);
-  }
-  await safeDisposeAgent(sdkAgent);
-  ctx.dirty.value = true;
-  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
-  triggerWakeup(ctx);
 }
 
 async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
@@ -1129,8 +1101,16 @@ async function runWorkerStream(
 
   const finalizedAt = nowIso();
 
-  if (await shouldAbortWorkerFinalize(ctx)) {
-    await finalizeWorkerAsStopped(ctx, taskId, agent, handle, sdkAgent, finalizedAt);
+  if (await syncStopRequestedFromRepo(ctx)) {
+    agent.status = "stopped";
+    agent.finished_at = finalizedAt;
+    if (ctx.activeWorkers.get(taskId) === handle) {
+      ctx.activeWorkers.delete(taskId);
+    }
+    await safeDisposeAgent(sdkAgent);
+    ctx.dirty.value = true;
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+    triggerWakeup(ctx);
     return;
   }
 

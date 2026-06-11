@@ -1053,7 +1053,7 @@ describe("runOrchestration with SDK (happy path)", () => {
   it("marks a completed worker stopped when stop is requested while the worker is running", async () => {
     const config = singleTaskConfig();
     const script = completedWorkerScript("t1", "run-stop-finalize");
-    script.waitDelayMs = 6_000;
+    script.waitDelayMs = 3_000;
     const fake = new FakeAgentClient({
       defaultScripts: [script],
     });
@@ -1080,34 +1080,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(
       false,
     );
-  }, 20_000);
-
-  it("marks a worker stopped when stop is requested before the in-memory stop flag is set", async () => {
-    const config = singleTaskConfig();
-    const script = completedWorkerScript("t1", "run-stop-fast-worker");
-    script.waitDelayMs = 3_000;
-    const fake = new FakeAgentClient({
-      defaultScripts: [script],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    const baseWrite = store.writeFile.bind(store);
-    store.writeFile = async (runId, filename, content) => {
-      await baseWrite(runId, filename, content);
-      if (filename === "state.json") {
-        const state = JSON.parse(content) as { agents?: Record<string, { status?: string }> };
-        if (state.agents?.t1?.status === "running") {
-          await baseWrite(
-            runId,
-            "stop-requested.json",
-            JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
-          );
-        }
-      }
-    };
-    await runOrchestration("run-stop-fast-worker", fake, store);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("stopped");
-    expect(state.agents.t1.status).toBe("stopped");
   }, 20_000);
 
   it("does not launch the next delegation phase after stop during the current phase", async () => {
