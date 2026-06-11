@@ -15,6 +15,7 @@ import {
   createInMemoryRepoStore,
   type FileStore,
   installGithubBranchPrepMock,
+  installGithubBranchPrepRejectMock,
   parseEvents,
   promptOnlyConfig,
   restoreGithubBranchPrepMock,
@@ -998,17 +999,7 @@ describe("runOrchestration with SDK (happy path)", () => {
   it("fails without launching worker when per-task branch preparation is rejected", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient();
-    const baselineFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      if (url.startsWith("https://api.github.com/") && url.includes("/git/refs") && init?.method === "POST") {
-        return new Response(JSON.stringify({ message: "Reference update not allowed" }), {
-          status: 422,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return baselineFetch(input, init);
-    }) as typeof fetch;
+    installGithubBranchPrepRejectMock();
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
     await expect(runOrchestration("run-branch-prep-fail", fake, store)).rejects.toThrow();
     expect(fake.launches).toHaveLength(0);
