@@ -326,6 +326,135 @@ describe("reattachWorkers running tasks", () => {
     expect(fake.launches).toHaveLength(0);
   });
 
+  it("relaunches when event-recovered agent resumeCloudAgent throws", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-recover-resume-throw";
+    const deadAgentId = "agent-dead-resume-throw";
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+
+    const launchScript = completedResumeScript(runId);
+    const fake = new FakeAgentClient({
+      runsByAgent: { [deadAgentId]: [] },
+      defaultScripts: [launchScript],
+      conversationText: null,
+    });
+    vi.spyOn(fake, "resumeCloudAgent").mockRejectedValue(new Error("agent gone"));
+
+    const launchEvent = JSON.stringify({
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: `Launched t1 (${deadAgentId})`,
+      payload: {
+        agent_id: deadAgentId,
+        run_id: "run-dead",
+        repository: "https://github.com/acme/svc",
+        ref: "main",
+        branch: `cursor-orch/${runId}/t1`,
+      },
+    });
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+      "events.jsonl": `${launchEvent}\n`,
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.status).toBe("completed");
+    expect(final.agents.t1.status).toBe("finished");
+    expect(fake.launches).toHaveLength(1);
+    expect(listRunsMock).not.toHaveBeenCalled();
+  });
+
+  it("relaunches when event-recovered agent has no SDK runs", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-recover-dead-agent";
+    const deadAgentId = "agent-dead-no-runs";
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+
+    const launchScript = completedResumeScript(runId);
+    listRunsMock.mockResolvedValue({ items: [] });
+
+    const fake = new FakeAgentClient({
+      runsByAgent: { [deadAgentId]: [] },
+      defaultScripts: [launchScript],
+      conversationText: null,
+    });
+
+    const launchEvent = JSON.stringify({
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: `Launched t1 (${deadAgentId})`,
+      payload: {
+        agent_id: deadAgentId,
+        run_id: "run-dead",
+        repository: "https://github.com/acme/svc",
+        ref: "main",
+        branch: `cursor-orch/${runId}/t1`,
+      },
+    });
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+      "events.jsonl": `${launchEvent}\n`,
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.status).toBe("completed");
+    expect(final.agents.t1.status).toBe("finished");
+    expect(fake.launches).toHaveLength(1);
+  });
+
+  it("marks the task failed when listRuns fails after a successful resume", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-reattach-listruns-fail";
+    const liveAgentId = "agent-live-listruns-fail";
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    state.agents.t1 = {
+      ...state.agents.t1!,
+      agent_id: liveAgentId,
+      status: "running",
+    };
+
+    const fake = new FakeAgentClient({ conversationText: null });
+    vi.spyOn(fake, "resumeCloudAgent").mockResolvedValue({ dispose: vi.fn() } as never);
+    listRunsMock.mockRejectedValue(new Error("listRuns boom"));
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+
+    await expect(runOrchestration(runId, fake, store)).rejects.toThrow(/Failed tasks: t1/);
+
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.agents.t1.status).toBe("failed");
+    expect(final.agents.t1.summary).toBe("Resume failed: listRuns boom");
+    expect(fake.launches).toHaveLength(0);
+  });
+
   it("marks the task failed when resumeCloudAgent throws", async () => {
     const config = singleTaskConfig();
     const runId = "run-reattach-resume-fail";
