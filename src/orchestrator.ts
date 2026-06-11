@@ -1671,8 +1671,6 @@ async function emitPlanningEvents(repoStore: RepoStoreClient, runId: string, eve
   );
 }
 
-type PlanningPhaseResult = { ok: true } | { ok: false; detail: string };
-
 type PlanningOutcome =
   | { ran: false }
   | { ran: true; ok: true; source: "reused" | "fresh" }
@@ -1685,7 +1683,7 @@ async function runPlanningPhase(
   repoStore: RepoStoreClient,
   apiKey: string,
   ghUser: string,
-): Promise<PlanningPhaseResult> {
+): Promise<Extract<PlanningOutcome, { ran: true }>> {
   try {
     const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
     const plannerAgent = await agentClient.createCloudAgent({
@@ -1722,9 +1720,9 @@ async function runPlanningPhase(
       throw new Error("Timed out waiting for task plan from planner agent");
     }
     await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, true);
-    return { ok: true };
+    return { ran: true, ok: true, source: "fresh" };
   } catch (exc) {
-    return { ok: false, detail: String(exc) };
+    return { ran: true, ok: false, detail: String(exc) };
   }
 }
 
@@ -1950,22 +1948,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     const ghUser = await resolveGithubUsername(ghToken);
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      let reusedOk = false;
       try {
         await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false);
-        reusedOk = true;
-      } catch {
-        reusedOk = false;
-      }
-      if (reusedOk) {
         planning = { ran: true, ok: true, source: "reused" };
-      }
+      } catch {}
     }
     if (!planning.ran || !planning.ok) {
-      const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
-      planning = planningResult.ok
-        ? { ran: true, ok: true, source: "fresh" }
-        : { ran: true, ok: false, detail: planningResult.detail };
+      planning = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
     }
   }
 
