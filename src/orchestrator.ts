@@ -445,12 +445,6 @@ function makeEvent(
   };
 }
 
-function truncateOutput(data: Record<string, unknown>, taskId: string): Record<string, unknown> {
-  truncateSummary(data, taskId);
-  truncateOutputs(data, taskId);
-  return data;
-}
-
 function truncateSummary(data: Record<string, unknown>, taskId: string): void {
   const summary = data.summary;
   if (typeof summary !== "string") return;
@@ -505,7 +499,9 @@ export function normalizeWorkerPayload(raw: unknown, taskId: string): Record<str
   if (Buffer.byteLength(JSON.stringify(obj), "utf8") > MAX_WORKER_OUTPUT_BYTES) {
     console.warn(`Worker output for ${taskId} exceeds 512KB, truncating`);
   }
-  return truncateOutput(obj, taskId);
+  truncateSummary(obj, taskId);
+  truncateOutputs(obj, taskId);
+  return obj;
 }
 
 async function readWorkerOutputFromRepo(repoStore: RepoStoreClient, runId: string, taskId: string): Promise<Record<string, unknown> | null> {
@@ -1600,8 +1596,6 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
-type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
-
 type PlanningOutcome =
   | { kind: "none" }
   | { kind: "ok"; emitStarted: boolean; completedDetail: string }
@@ -1678,7 +1672,7 @@ async function runPlanningPhase(
   agentClient: AgentClient,
   repoStore: RepoStoreClient,
   apiKey: string,
-): Promise<PlanningPhaseResult> {
+): Promise<Extract<PlanningOutcome, { kind: "ok" } | { kind: "failed" }>> {
   try {
     const ghToken = process.env.GH_TOKEN!;
     const ghUser = await resolveGithubUsername(ghToken);
@@ -1731,9 +1725,13 @@ async function runPlanningPhase(
     }
     config.tasks = parsedTasks;
     await writeCanonicalConfig(config, runId, repoStore);
-    return { ok: true };
+    return {
+      kind: "ok",
+      emitStarted: true,
+      completedDetail: `Planning completed: ${config.tasks.length} tasks`,
+    };
   } catch (exc) {
-    return { ok: false, error: String(exc) };
+    return { kind: "failed", emitStarted: true, error: String(exc) };
   }
 }
 
@@ -1960,16 +1958,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     if (reusedDetail) {
       planningOutcome = { kind: "ok", emitStarted: false, completedDetail: reusedDetail };
     } else {
-      const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
-      if (planningResult.ok) {
-        planningOutcome = {
-          kind: "ok",
-          emitStarted: true,
-          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
-        };
-      } else {
-        planningOutcome = { kind: "failed", emitStarted: true, error: planningResult.error };
-      }
+      planningOutcome = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
     }
   }
 
