@@ -1607,19 +1607,19 @@ type PlanningOutcome =
 
 type ResolvedPlanningOutcome = Exclude<PlanningOutcome, { kind: "none" }>;
 
+const PLAN_CONSTRAINT_ERROR_PREFIX = "Plan constraint validation failed:";
+
 function assertPlanMeetsPromptConstraints(config: OrchestratorConfig, parsedTasks: TaskConfig[]): void {
   const constraints = extractConstraintsFromPrompt(config.prompt);
-  if (constraints.length === 0) {
-    return;
+  if (constraints.length > 0) {
+    const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+    if (!constraintValidation.valid) {
+      const detail = constraintValidation.violations
+        .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+        .join("; ");
+      throw new Error(`${PLAN_CONSTRAINT_ERROR_PREFIX} ${detail}. Re-plan with full constraint coverage.`);
+    }
   }
-  const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-  if (constraintValidation.valid) {
-    return;
-  }
-  const detail = constraintValidation.violations
-    .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-    .join("; ");
-  throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
 }
 
 async function persistPlanTasks(
@@ -1636,6 +1636,35 @@ async function persistPlanTasks(
   await repoStore.writeFile(runId, "config.yaml", toYaml(config));
 }
 
+async function applyParsedPlan(
+  config: OrchestratorConfig,
+  runId: string,
+  repoStore: RepoStoreClient,
+  planContent: string,
+  bootstrapUrl: string,
+): Promise<TaskConfig[]> {
+  config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+  const parsedTasks = parseTaskPlan(planContent, config);
+  assertPlanMeetsPromptConstraints(config, parsedTasks);
+  await persistPlanTasks(config, runId, repoStore, parsedTasks);
+  return parsedTasks;
+}
+
+async function readPlanFromAgentRuns(agentId: string, apiKey: string): Promise<string | null> {
+  const runs = await (await import("@cursor/sdk"))
+    .Agent.listRuns(agentId, { runtime: "cloud", apiKey })
+    .catch(() => null);
+  if (!runs) {
+    return null;
+  }
+  for (const run of runs.items) {
+    if (typeof run.result === "string" && run.result.trim()) {
+      return run.result;
+    }
+  }
+  return null;
+}
+
 async function tryReuseExistingPlan(
   config: OrchestratorConfig,
   runId: string,
@@ -1649,10 +1678,7 @@ async function tryReuseExistingPlan(
   try {
     const ghUser = await resolveGithubUsername(ghToken);
     const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-    const parsedTasks = parseTaskPlan(planContent, config);
-    assertPlanMeetsPromptConstraints(config, parsedTasks);
-    await persistPlanTasks(config, runId, repoStore, parsedTasks);
+    const parsedTasks = await applyParsedPlan(config, runId, repoStore, planContent, bootstrapUrl);
     return {
       kind: "ok",
       emitStarted: false,
@@ -1660,7 +1686,7 @@ async function tryReuseExistingPlan(
     };
   } catch (exc) {
     const message = String(exc);
-    if (message.startsWith("Plan constraint validation failed:")) {
+    if (message.startsWith(PLAN_CONSTRAINT_ERROR_PREFIX)) {
       return { kind: "failed", emitStarted: false, error: message };
     }
     return { kind: "none" };
@@ -1719,27 +1745,13 @@ async function runPlanningPhase(
   });
   try {
     await plannerAgent.send(plannerPrompt);
-    let planContent = await waitForPlan(repoStore, runId);
-    if (!planContent) {
-      const runs = await (await import("@cursor/sdk"))
-        .Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey })
-        .catch(() => null);
-      if (runs) {
-        for (const r of runs.items) {
-          if (typeof r.result === "string" && r.result.trim()) {
-            planContent = r.result;
-            break;
-          }
-        }
-      }
-    }
+    const planContent =
+      (await waitForPlan(repoStore, runId)) ??
+      (await readPlanFromAgentRuns(plannerAgent.agentId, apiKey));
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
     }
-    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-    const parsedTasks = parseTaskPlan(planContent, config);
-    assertPlanMeetsPromptConstraints(config, parsedTasks);
-    await persistPlanTasks(config, runId, repoStore, parsedTasks);
+    const parsedTasks = await applyParsedPlan(config, runId, repoStore, planContent, bootstrapUrl);
     return {
       kind: "ok",
       emitStarted: true,
