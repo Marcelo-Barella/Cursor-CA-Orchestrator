@@ -1898,13 +1898,14 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      try {
-        const ghUser = await resolveGithubUsername(ghToken);
-        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-        const taskCount = await applyTaskPlanContent(config, runId, repoStore, planContent, bootstrapUrl);
-        planningCompletedDetail = `Planning completed: ${taskCount} tasks (reused existing plan)`;
-      } catch {
-      }
+      planningCompletedDetail = await Promise.resolve()
+        .then(async () => {
+          const ghUser = await resolveGithubUsername(ghToken);
+          const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+          const taskCount = await applyTaskPlanContent(config, runId, repoStore, planContent, bootstrapUrl);
+          return `Planning completed: ${taskCount} tasks (reused existing plan)`;
+        })
+        .catch(() => null);
     }
     if (!planningCompletedDetail) {
       try {
