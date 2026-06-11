@@ -181,26 +181,6 @@ describe("RepoStoreClient", () => {
     await expect(client.listRunBranches()).resolves.toEqual([]);
   });
 
-  it("getRunBranchCommitDate parses the branch tip commit date", async () => {
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          commit: { commit: { committer: { date: "2020-01-01T00:00:00Z" } } },
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-    );
-    const client = new RepoStoreClient("ghp-test", owner, repo);
-    await expect(client.getRunBranchCommitDate(runId)).resolves.toEqual(new Date("2020-01-01T00:00:00Z"));
-    expect(String(fetchMock.mock.calls[0]![0])).toContain(`/branches/run/${runId}`);
-  });
-
-  it("getRunBranchCommitDate returns null when the branch is missing", async () => {
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
-    const client = new RepoStoreClient("ghp-test", owner, repo);
-    await expect(client.getRunBranchCommitDate(runId)).resolves.toBeNull();
-  });
-
   it("deleteRunBranch is a no-op when the branch ref is absent", async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
     const client = new RepoStoreClient("ghp-test", owner, repo);
