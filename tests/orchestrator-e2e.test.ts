@@ -1,6 +1,7 @@
 import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
+import * as planner from "../src/planner.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
 import { createInitialState, serialize } from "../src/state.js";
@@ -1075,6 +1076,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const updatedConfig = files.get("config.yaml")!;
     expect(updatedConfig).toContain("t1");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
     expect(
       events.some(
         (e: { event_type: string; detail?: string }) =>
@@ -1082,6 +1084,74 @@ describe("runOrchestration with SDK (happy path)", () => {
       ),
     ).toBe(true);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("rejects reused task-plan.json when task prompts miss prompt constraints", async () => {
+    const config = promptOnlyConfig();
+    config.prompt = "Every route must use your translation method.";
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Implement the home page.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [{ sendThrows: new Error("planner should not run") }],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    await expect(runOrchestration("run-reuse-constraint-fail", fake, store)).rejects.toThrow(
+      /Plan constraint validation failed/,
+    );
+    expect(fake.launches).toHaveLength(0);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
+    expect(events.some((e: { event_type: string }) => e.event_type === "planning_failed")).toBe(true);
+  });
+
+  it("falls back to full planning when task-plan.json is invalid", async () => {
+    const config = promptOnlyConfig();
+    const validPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(validPlan);
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
+        completedWorkerScript("t1", "run-invalid-plan-fallback"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": "{not valid json",
+    });
+    try {
+      await runOrchestration("run-invalid-plan-fallback", fake, store);
+      expect(fake.launches).toHaveLength(2);
+      expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+      expect(files.has("task-plan.json")).toBe(false);
+      const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+      expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(true);
+      expect(events.some((e: { event_type: string; detail?: string }) => e.event_type === "planning_completed" && !e.detail?.includes("reused"))).toBe(true);
+      expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    } finally {
+      waitSpy.mockRestore();
+    }
   });
 
   it("marks a task blocked when worker JSON reports blocked status", async () => {

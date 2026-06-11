@@ -1602,6 +1602,41 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
+class PlanConstraintError extends Error {
+  constructor(violations: { taskId: string; missingConstraint: string }[]) {
+    const detail = violations
+      .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+      .join("; ");
+    super(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+    this.name = "PlanConstraintError";
+  }
+}
+
+async function applyTaskPlanContent(
+  config: OrchestratorConfig,
+  planContent: string,
+  bootstrapUrl: string,
+  runId: string,
+  repoStore: RepoStoreClient,
+): Promise<number> {
+  config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+  const parsedTasks = parseTaskPlan(planContent, config);
+  const constraints = extractConstraintsFromPrompt(config.prompt);
+  if (constraints.length > 0) {
+    const constraintCheck = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+    if (!constraintCheck.valid) {
+      throw new PlanConstraintError(constraintCheck.violations);
+    }
+  }
+  config.tasks = parsedTasks;
+  const canonPlan = canonicalizeOrchestratorConfig(config);
+  config.repositories = canonPlan.repositories;
+  config.tasks = canonPlan.tasks;
+  config.delegation_map = canonPlan.delegation_map;
+  await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+  return parsedTasks.length;
+}
+
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
@@ -1647,24 +1682,7 @@ async function runPlanningPhase(
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
     }
-    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-    const parsedTasks = parseTaskPlan(planContent, config);
-    const constraints = extractConstraintsFromPrompt(config.prompt);
-    if (constraints.length > 0) {
-      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!result.valid) {
-        const detail = result.violations
-          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-          .join("; ");
-        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-      }
-    }
-    config.tasks = parsedTasks;
-    const canonPlan = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonPlan.repositories;
-    config.tasks = canonPlan.tasks;
-    config.delegation_map = canonPlan.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+    await applyTaskPlanContent(config, planContent, bootstrapUrl, runId, repoStore);
     return { ok: true };
   } catch (exc) {
     return { ok: false, error: String(exc) };
@@ -1900,22 +1918,26 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       try {
         const ghUser = await resolveGithubUsername(ghToken);
         const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-        config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-        const parsedTasks = parseTaskPlan(planContent, config);
-        config.tasks = parsedTasks;
-        const canonReuse = canonicalizeOrchestratorConfig(config);
-        config.repositories = canonReuse.repositories;
-        config.tasks = canonReuse.tasks;
-        config.delegation_map = canonReuse.delegation_map;
-        await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+        const taskCount = await applyTaskPlanContent(config, planContent, bootstrapUrl, runId, repoStore);
         planningEvents = {
           emitStarted: false,
-          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
+          completedDetail: `Planning completed: ${taskCount} tasks (reused existing plan)`,
         };
         planningOk = true;
-      } catch {}
+      } catch (exc) {
+        if (exc instanceof PlanConstraintError) {
+          planningFailedDetail = exc.message;
+        }
+      }
     }
-    if (!planningOk) {
+    if (!planningOk && planningFailedDetail === null) {
+      if (planContent) {
+        try {
+          await repoStore.deleteFile(runId, "task-plan.json");
+        } catch {
+          /* stale plan must not short-circuit waitForPlan during replan */
+        }
+      }
       planningUsedFullPhase = true;
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
