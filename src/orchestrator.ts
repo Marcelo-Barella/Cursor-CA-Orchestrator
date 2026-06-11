@@ -1640,12 +1640,10 @@ const PLANNING_PHASE_META = { phase_id: "planning", agent_kind: "phase" } as con
 
 type PlanningEvents =
   | { kind: "completed"; source: "reused" | "fresh"; taskCount: number }
-  | { kind: "failed"; detail: string; emitStarted: boolean };
+  | { kind: "failed"; detail: string };
 
 async function emitPlanningEvents(repoStore: RepoStoreClient, runId: string, events: PlanningEvents): Promise<void> {
-  const emitStarted =
-    events.kind === "failed" ? events.emitStarted : events.kind === "completed" && events.source === "fresh";
-  if (emitStarted) {
+  if (events.kind === "completed" && events.source === "fresh") {
     await appendEvent(
       repoStore,
       runId,
@@ -1664,6 +1662,11 @@ async function emitPlanningEvents(repoStore: RepoStoreClient, runId: string, eve
   await appendEvent(
     repoStore,
     runId,
+    makeEvent("planning_started", "Planning phase started", null, PLANNING_PHASE_META),
+  );
+  await appendEvent(
+    repoStore,
+    runId,
     makeEvent("planning_failed", events.detail, null, PLANNING_PHASE_META),
   );
 }
@@ -1673,7 +1676,7 @@ type PlanningPhaseResult = { ok: true } | { ok: false; detail: string };
 type PlanningOutcome =
   | { ran: false }
   | { ran: true; ok: true; source: "reused" | "fresh" }
-  | { ran: true; ok: false; detail: string; usedFullPhase: boolean };
+  | { ran: true; ok: false; detail: string };
 
 async function runPlanningPhase(
   config: OrchestratorConfig,
@@ -1947,9 +1950,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     const ghUser = await resolveGithubUsername(ghToken);
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      const reusedOk = await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false)
-        .then(() => true)
-        .catch(() => false);
+      let reusedOk = false;
+      try {
+        await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false);
+        reusedOk = true;
+      } catch {
+        reusedOk = false;
+      }
       if (reusedOk) {
         planning = { ran: true, ok: true, source: "reused" };
       }
@@ -1958,7 +1965,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
       planning = planningResult.ok
         ? { ran: true, ok: true, source: "fresh" }
-        : { ran: true, ok: false, detail: planningResult.detail, usedFullPhase: true };
+        : { ran: true, ok: false, detail: planningResult.detail };
     }
   }
 
@@ -2008,7 +2015,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       await emitPlanningEvents(repoStore, runId, {
         kind: "failed",
         detail: planning.detail,
-        emitStarted: planning.usedFullPhase,
       });
       state.status = "failed";
       state.error = planning.detail;
