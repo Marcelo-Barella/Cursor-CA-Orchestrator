@@ -1602,6 +1602,37 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
+async function applyTaskPlanToConfig(
+  config: OrchestratorConfig,
+  runId: string,
+  planContent: string,
+  ghUser: string,
+  repoStore: RepoStoreClient,
+  validateConstraints: boolean,
+): Promise<void> {
+  const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+  config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+  const parsedTasks = parseTaskPlan(planContent, config);
+  if (validateConstraints) {
+    const constraints = extractConstraintsFromPrompt(config.prompt);
+    if (constraints.length > 0) {
+      const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+      if (!constraintValidation.valid) {
+        const detail = constraintValidation.violations
+          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+          .join("; ");
+        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+      }
+    }
+  }
+  config.tasks = parsedTasks;
+  const canonical = canonicalizeOrchestratorConfig(config);
+  config.repositories = canonical.repositories;
+  config.tasks = canonical.tasks;
+  config.delegation_map = canonical.delegation_map;
+  await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+}
+
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
@@ -1639,32 +1670,13 @@ async function runPlanningPhase(
             break;
           }
         }
-      } catch {
-        /* no fallback available */
-      }
+      } catch {}
     }
     await safeDisposeAgent(plannerAgent);
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
     }
-    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-    const parsedTasks = parseTaskPlan(planContent, config);
-    const constraints = extractConstraintsFromPrompt(config.prompt);
-    if (constraints.length > 0) {
-      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!result.valid) {
-        const detail = result.violations
-          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-          .join("; ");
-        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-      }
-    }
-    config.tasks = parsedTasks;
-    const canonPlan = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonPlan.repositories;
-    config.tasks = canonPlan.tasks;
-    config.delegation_map = canonPlan.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, true);
     return { ok: true };
   } catch (exc) {
     return { ok: false, error: String(exc) };
@@ -1890,29 +1902,18 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningRan = false;
   let planningOk = false;
+  let planningSource: "reused" | "fresh" | null = null;
   let planningUsedFullPhase = false;
   let planningFailedDetail: string | null = null;
-  let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
       try {
         const ghUser = await resolveGithubUsername(ghToken);
-        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-        config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-        const parsedTasks = parseTaskPlan(planContent, config);
-        config.tasks = parsedTasks;
-        const canonReuse = canonicalizeOrchestratorConfig(config);
-        config.repositories = canonReuse.repositories;
-        config.tasks = canonReuse.tasks;
-        config.delegation_map = canonReuse.delegation_map;
-        await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-        planningEvents = {
-          emitStarted: false,
-          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
-        };
+        await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false);
         planningOk = true;
+        planningSource = "reused";
       } catch {}
     }
     if (!planningOk) {
@@ -1920,10 +1921,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
         planningOk = true;
-        planningEvents = {
-          emitStarted: true,
-          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
-        };
+        planningSource = "fresh";
       } else {
         planningFailedDetail = planningResult.error;
       }
@@ -1960,18 +1958,24 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
-    if (planningOk && planningEvents) {
-      if (planningEvents.emitStarted) {
+    if (planningOk && planningSource) {
+      if (planningSource === "fresh") {
         await appendEvent(
           repoStore,
           runId,
           makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
         );
       }
+      const planningSuffix = planningSource === "reused" ? " (reused existing plan)" : "";
       await appendEvent(
         repoStore,
         runId,
-        makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+        makeEvent(
+          "planning_completed",
+          `Planning completed: ${config.tasks.length} tasks${planningSuffix}`,
+          null,
+          { phase_id: "planning", agent_kind: "phase" },
+        ),
       );
     } else if (!planningOk && planningFailedDetail !== null) {
       if (planningUsedFullPhase) {
