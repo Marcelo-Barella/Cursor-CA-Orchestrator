@@ -1719,6 +1719,10 @@ async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): 
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
+async function rereadStateJsonIfEmpty(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<string> {
+  return stateContent.trim() ? stateContent : readStateJsonContent(repoStore, runId);
+}
+
 async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
   if (stateContent.trim()) {
     return;
@@ -1872,7 +1876,8 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const apiKey = process.env.CURSOR_API_KEY ?? "";
   const ghToken = process.env.GH_TOKEN ?? "";
 
-  const stateContent = await readStateJsonContent(repoStore, runId);
+  let stateContent = await readStateJsonContent(repoStore, runId);
+  stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
   await refuseResumeWithEmptyState(repoStore, runId, stateContent);
   let parsedState: OrchestrationState | null = null;
   if (stateContent.trim()) {
