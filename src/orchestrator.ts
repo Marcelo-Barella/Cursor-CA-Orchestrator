@@ -1607,12 +1607,24 @@ type PlanningOutcome =
   | { kind: "ok"; emitStarted: boolean; completedDetail: string }
   | { kind: "failed"; emitStarted: boolean; error: string };
 
+async function writeCanonicalConfig(
+  config: OrchestratorConfig,
+  runId: string,
+  repoStore: RepoStoreClient,
+): Promise<void> {
+  const canon = canonicalizeOrchestratorConfig(config);
+  config.repositories = canon.repositories;
+  config.tasks = canon.tasks;
+  config.delegation_map = canon.delegation_map;
+  await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+}
+
 async function tryReuseExistingPlan(
   config: OrchestratorConfig,
   runId: string,
   repoStore: RepoStoreClient,
   ghToken: string,
-): Promise<{ completedDetail: string } | null> {
+): Promise<string | null> {
   const planContent = await repoStore.readFile(runId, "task-plan.json");
   if (!planContent) {
     return null;
@@ -1623,12 +1635,8 @@ async function tryReuseExistingPlan(
     config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
     const parsedTasks = parseTaskPlan(planContent, config);
     config.tasks = parsedTasks;
-    const canonReuse = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonReuse.repositories;
-    config.tasks = canonReuse.tasks;
-    config.delegation_map = canonReuse.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-    return { completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)` };
+    await writeCanonicalConfig(config, runId, repoStore);
+    return `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`;
   } catch {
     return null;
   }
@@ -1722,11 +1730,7 @@ async function runPlanningPhase(
       }
     }
     config.tasks = parsedTasks;
-    const canonPlan = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonPlan.repositories;
-    config.tasks = canonPlan.tasks;
-    config.delegation_map = canonPlan.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+    await writeCanonicalConfig(config, runId, repoStore);
     return { ok: true };
   } catch (exc) {
     return { ok: false, error: String(exc) };
@@ -1952,9 +1956,9 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningOutcome: PlanningOutcome = { kind: "none" };
   if (config.prompt && !config.tasks.length) {
-    const reused = await tryReuseExistingPlan(config, runId, repoStore, ghToken);
-    if (reused) {
-      planningOutcome = { kind: "ok", emitStarted: false, completedDetail: reused.completedDetail };
+    const reusedDetail = await tryReuseExistingPlan(config, runId, repoStore, ghToken);
+    if (reusedDetail) {
+      planningOutcome = { kind: "ok", emitStarted: false, completedDetail: reusedDetail };
     } else {
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
