@@ -1615,11 +1615,10 @@ async function applyTaskPlanToConfig(
   config: OrchestratorConfig,
   runId: string,
   planContent: string,
-  ghToken: string,
+  ghUser: string,
   repoStore: RepoStoreClient,
   validateConstraints: boolean,
 ): Promise<void> {
-  const ghUser = await resolveGithubUsername(ghToken);
   const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
   config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
   const parsedTasks = parseTaskPlan(planContent, config);
@@ -1682,16 +1681,26 @@ async function emitPlanningFailedEvents(
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
+async function readPlanFromAgentRuns(agentId: string, apiKey: string): Promise<string | null> {
+  const runs = await (await import("@cursor/sdk")).Agent.listRuns(agentId, { runtime: "cloud", apiKey }).catch(() => null);
+  if (!runs) return null;
+  for (const r of runs.items) {
+    if (typeof r.result === "string" && r.result.trim()) {
+      return r.result;
+    }
+  }
+  return null;
+}
+
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
   agentClient: AgentClient,
   repoStore: RepoStoreClient,
   apiKey: string,
+  ghUser: string,
 ): Promise<PlanningPhaseResult> {
   try {
-    const ghToken = process.env.GH_TOKEN!;
-    const ghUser = await resolveGithubUsername(ghToken);
     const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
     const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
     const plannerAgent = await agentClient.createCloudAgent({
@@ -1711,22 +1720,13 @@ async function runPlanningPhase(
     }
     let planContent = await waitForPlan(repoStore, runId);
     if (!planContent) {
-      try {
-        const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
-        for (const r of runs.items) {
-          if (typeof r.result === "string" && r.result.trim()) {
-            planContent = r.result;
-            break;
-          }
-        }
-      } catch {
-      }
+      planContent = await readPlanFromAgentRuns(plannerAgent.agentId, apiKey);
     }
     await safeDisposeAgent(plannerAgent);
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
     }
-    await applyTaskPlanToConfig(config, runId, planContent, ghToken, repoStore, true);
+    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, true);
     return { ok: true };
   } catch (exc) {
     return { ok: false, error: String(exc) };
@@ -1957,18 +1957,20 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   let planningFailedDetail: string | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
+    const ghUser = await resolveGithubUsername(ghToken);
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      try {
-        await applyTaskPlanToConfig(config, runId, planContent, ghToken, repoStore, false);
+      const reused = await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false)
+        .then(() => true)
+        .catch(() => false);
+      if (reused) {
         planningOk = true;
         planningSource = "reused";
-      } catch {
       }
     }
     if (!planningOk) {
       planningUsedFullPhase = true;
-      const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
+      const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
       if (planningResult.ok) {
         planningOk = true;
         planningSource = "fresh";
