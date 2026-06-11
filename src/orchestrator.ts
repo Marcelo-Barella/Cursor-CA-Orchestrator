@@ -1719,27 +1719,6 @@ async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): 
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-function parseStateJsonContent(stateContent: string): {
-  parsedState: OrchestrationState | null;
-  stateParseDetail: string | null;
-} {
-  if (!stateContent.trim()) {
-    return { parsedState: null, stateParseDetail: null };
-  }
-  try {
-    return { parsedState: deserialize(stateContent), stateParseDetail: null };
-  } catch (parseErr) {
-    return {
-      parsedState: null,
-      stateParseDetail: parseErr instanceof Error ? parseErr.message : String(parseErr),
-    };
-  }
-}
-
-async function rereadStateJsonIfEmpty(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<string> {
-  return stateContent.trim() ? stateContent : repoStore.readFile(runId, "state.json");
-}
-
 async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
   if (stateContent.trim()) {
     return;
@@ -1893,10 +1872,17 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const apiKey = process.env.CURSOR_API_KEY ?? "";
   const ghToken = process.env.GH_TOKEN ?? "";
 
-  let stateContent = await readStateJsonContent(repoStore, runId);
-  stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
+  const stateContent = await readStateJsonContent(repoStore, runId);
   await refuseResumeWithEmptyState(repoStore, runId, stateContent);
-  let { parsedState, stateParseDetail } = parseStateJsonContent(stateContent);
+  let parsedState: OrchestrationState | null = null;
+  let stateParseDetail: string | null = null;
+  if (stateContent.trim()) {
+    try {
+      parsedState = deserialize(stateContent);
+    } catch (parseErr) {
+      stateParseDetail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    }
+  }
   if (parsedState?.status === "stopped") {
     console.info(`Run ${runId} is already stopped; skipping orchestration`);
     return;
@@ -1945,12 +1931,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   validateConfig(config);
-
-  if (!stateContent.trim()) {
-    stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
-    await refuseResumeWithEmptyState(repoStore, runId, stateContent);
-    ({ parsedState, stateParseDetail } = parseStateJsonContent(stateContent));
-  }
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {

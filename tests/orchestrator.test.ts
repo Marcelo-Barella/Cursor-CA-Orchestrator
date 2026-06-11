@@ -426,6 +426,26 @@ describe("orchestrator launch eligibility", () => {
     },
   );
 
+  it("treats a stopped task in the prior group as terminal for wave advancement", () => {
+    const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
+    config.delegation_map = {
+      phases: [
+        {
+          id: "phase-1",
+          groups: [
+            { id: "g1", task_ids: ["a"] },
+            { id: "g2", task_ids: ["b", "c"] },
+          ],
+        },
+      ],
+    };
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "stopped";
+    const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
+    expect(eligible).toEqual(["b", "c"]);
+    expect(state.delegation_group_index).toBe(1);
+  });
+
   it("after mapped waves complete, eligible ready tasks are only those not in the delegation map (defensive)", () => {
     const config = createConfig(["a", "b", "u"]);
     config.delegation_map = {
@@ -578,38 +598,6 @@ describe("runOrchestration validation gate", () => {
     } as unknown as RepoStoreClient;
     const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
     await expect(runOrchestration("run-corrupt-state", agentClient, repoStore)).rejects.toThrow(/Invalid state\.json/);
-  });
-
-  it("re-reads state.json before reset when the pre-planning read was empty", async () => {
-    const config = createConfig(["a"]);
-    const persisted = createInitialState(config, "run-reread");
-    persisted.status = "running";
-    persisted.agents.a!.status = "finished";
-    let stateReadCount = 0;
-    const repoStore = {
-      async readFile(_runId: string, filename: string): Promise<string> {
-        if (filename === "config.yaml") return toYaml(config);
-        if (filename === "state.json") {
-          stateReadCount += 1;
-          return stateReadCount === 1 ? "" : serialize(persisted);
-        }
-        if (filename === "events.jsonl") return "";
-        throw new Error(`unexpected read: ${filename}`);
-      },
-      async writeFile(): Promise<void> {},
-      async updateFile(): Promise<void> {},
-      async deleteFile(): Promise<void> {},
-    } as unknown as RepoStoreClient;
-    let launchCount = 0;
-    const agentClient = {
-      createCloudAgent: async () => {
-        launchCount += 1;
-        return { agentId: "x" };
-      },
-    } as unknown as AgentClient;
-    await runOrchestration("run-reread", agentClient, repoStore);
-    expect(stateReadCount).toBeGreaterThanOrEqual(2);
-    expect(launchCount).toBe(0);
   });
 
   it("rejects empty state.json when events.jsonl shows an in-progress run", async () => {

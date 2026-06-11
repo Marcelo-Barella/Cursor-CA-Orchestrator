@@ -42,22 +42,6 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
   return { store, files };
 }
 
-function createEmptyFirstStateReadStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
-  const { store: baseStore, files } = createInMemoryRepoStore(initial);
-  let stateReadCount = 0;
-  const store = {
-    ...baseStore,
-    async readFile(runId: string, filename: string): Promise<string> {
-      if (filename === "state.json") {
-        stateReadCount += 1;
-        if (stateReadCount === 1) return "";
-      }
-      return baseStore.readFile(runId, filename);
-    },
-  } as unknown as RepoStoreClient;
-  return { store, files };
-}
-
 function createTransientStateReadStore(
   initial: Record<string, string>,
   failCount = 2,
@@ -934,28 +918,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     const stoppedState = createInitialState(config, runId);
     stoppedState.status = "stopped";
     const { store, files } = createTransientStateReadStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(stoppedState),
-    });
-    await runOrchestration(runId, fake, store);
-    expect(fake.launches).toHaveLength(0);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
-  });
-
-  it("skips planning when stopped state loads after an empty pre-planning read (prompt-only)", async () => {
-    const config = promptOnlyConfig();
-    const runId = "run-stopped-empty-first-read";
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r1", status: "finished", result: "" },
-        },
-      ],
-    });
-    const stoppedState = createInitialState(config, runId);
-    stoppedState.status = "stopped";
-    const { store, files } = createEmptyFirstStateReadStore({
       "config.yaml": toYaml(config),
       "state.json": serialize(stoppedState),
     });
