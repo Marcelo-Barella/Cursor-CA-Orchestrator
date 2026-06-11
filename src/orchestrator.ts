@@ -663,12 +663,6 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
   }
 }
 
-function checkAllFinished(state: OrchestrationState): boolean {
-  const agents = Object.values(state.agents);
-  if (!agents.length) return false;
-  return agents.every((a) => a.status === "finished");
-}
-
 function checkTerminalFailure(state: OrchestrationState): boolean {
   const failedIds = new Set(Object.entries(state.agents).filter(([, a]) => a.status === "failed").map(([id]) => id));
   if (!failedIds.size) return false;
@@ -1564,19 +1558,33 @@ async function maybeFinalizePullRequests(
 
 async function checkCompletion(ctx: LoopContext): Promise<boolean> {
   if (ctx.activeWorkers.size > 0) return false;
-  if (!checkAllFinished(ctx.state)) return false;
-  if (ctx.config.target.auto_create_pr) {
+  const agents = Object.values(ctx.state.agents);
+  if (!agents.length) return false;
+  let allFinished = true;
+  let anyFailed = false;
+  for (const agent of agents) {
+    if (!isTerminalStatus(agent.status)) return false;
+    if (agent.status !== "finished") allFinished = false;
+    if (agent.status === "failed") anyFailed = true;
+  }
+  if (!allFinished && anyFailed) return false;
+  if (allFinished && ctx.config.target.auto_create_pr) {
     await maybeFinalizePullRequests(ctx.state, ctx.config, ctx.graph, ctx.runId, ctx.repoStore);
   }
-  ctx.state.status = "completed";
+  ctx.state.status = allFinished ? "completed" : "stopped";
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
   await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await appendEvent(
     ctx.repoStore,
     ctx.runId,
-    makeEvent("orchestration_completed", "All tasks completed", null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
+    allFinished
+      ? makeEvent("orchestration_completed", "All tasks completed", null, { agent_node_id: "main-orchestrator", agent_kind: "main" })
+      : makeEvent("orchestration_stopped", "Orchestration stopped after one or more tasks were stopped", null, {
+          agent_node_id: "main-orchestrator",
+          agent_kind: "main",
+        }),
   );
-  console.info("Orchestration completed successfully");
+  console.info(allFinished ? "Orchestration completed successfully" : "Orchestration stopped");
   return true;
 }
 
@@ -1934,6 +1942,12 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
+    const eventsContent = await repoStore.readFile(runId, "events.jsonl");
+    if (eventsContent.trim()) {
+      throw new Error(
+        `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
+      );
+    }
     state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
