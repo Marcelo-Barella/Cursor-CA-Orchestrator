@@ -48,6 +48,37 @@ describe("runCleanupCommand", () => {
     expect(text).toContain("CLEANUP-001");
   });
 
+  it("exits 1 when BOOTSTRAP_OWNER is missing", async () => {
+    delete process.env.BOOTSTRAP_OWNER;
+    const finish = vi.fn((code: number): never => {
+      throw new Error(`exit:${code}`);
+    });
+    await expect(runCleanupCommand({ olderThan: "7" }, { finish })).rejects.toThrow("exit:1");
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("ENV-001");
+    expect(text).toContain("BOOTSTRAP_OWNER");
+  });
+
+  it("exits 1 when BOOTSTRAP_REPO is missing", async () => {
+    delete process.env.BOOTSTRAP_REPO;
+    const finish = vi.fn((code: number): never => {
+      throw new Error(`exit:${code}`);
+    });
+    await expect(runCleanupCommand({ olderThan: "7" }, { finish })).rejects.toThrow("exit:1");
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("ENV-001");
+    expect(text).toContain("BOOTSTRAP_REPO");
+  });
+
+  it("exits 1 when --older-than is invalid", async () => {
+    const finish = vi.fn((code: number): never => {
+      throw new Error(`exit:${code}`);
+    });
+    await expect(runCleanupCommand({ olderThan: "bad" }, { finish })).rejects.toThrow("exit:1");
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("CLEANUP-002");
+  });
+
   it("dry run lists only branches older than the cutoff", async () => {
     const { store, deleted } = mockStore(["run/old", "run/new"], {
       old: new Date("2026-06-01T00:00:00.000Z"),

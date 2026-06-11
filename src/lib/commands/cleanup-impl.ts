@@ -134,11 +134,6 @@ export async function runCleanupCommand(
   } else {
     repoStore = new RepoStoreClient(env.GH_TOKEN, owner, repo);
   }
-  const branches = await repoStore.listRunBranches();
-  if (!branches.length) {
-    console.log("No run branches found.");
-    return;
-  }
   const days = parseInt(opts.olderThan, 10);
   if (!Number.isFinite(days) || days < 0) {
     failWithFinish({
@@ -151,6 +146,11 @@ export async function runCleanupCommand(
       example: "cursor-orch cleanup --older-than 7",
       exitCode: 1,
     });
+  }
+  const branches = await repoStore.listRunBranches();
+  if (!branches.length) {
+    console.log("No run branches found.");
+    return;
   }
   const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
   const eligible: string[] = [];
