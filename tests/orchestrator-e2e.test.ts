@@ -324,6 +324,56 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
+  it("falls back to assistant JSON when the artifact is valid JSON but missing a worker status", async () => {
+    const config = singleTaskConfig();
+    const workerJson = { task_id: "t1", status: "completed", summary: "from assistant after incomplete artifact", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [
+            statusMessage("RUNNING"),
+            assistantText(`\`\`\`json\n${JSON.stringify(workerJson)}\n\`\`\``),
+            statusMessage("FINISHED"),
+          ],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", summary: "incomplete artifact", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-incomplete-artifact-fallback", fake, store);
+    expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
+    expect(finishedEvent?.payload?.payload_source).toBe("assistant");
+  });
+
+  it("falls back to assistant JSON when the artifact exists but is not valid JSON", async () => {
+    const config = singleTaskConfig();
+    const workerJson = { task_id: "t1", status: "completed", summary: "from assistant after bad artifact", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [
+            statusMessage("RUNNING"),
+            assistantText(`\`\`\`json\n${JSON.stringify(workerJson)}\n\`\`\``),
+            statusMessage("FINISHED"),
+          ],
+          result: { id: "r1", status: "finished" },
+          artifacts: { "cursor-orch-output.json": "not-json {{{" },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-bad-artifact-fallback", fake, store);
+    expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
+    expect(finishedEvent?.payload?.payload_source).toBe("assistant");
+  });
+
   it("marks a task failed when the SDK run returns status=error", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({
@@ -954,6 +1004,86 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.status).toBe("finished");
     expect(state.agents.t2.status).toBe("finished");
   });
+
+  it("does not inject dependency outputs from agent files with empty JSON objects", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        completedWorkerScript("t1", "run-dep-empty-json", { upstream_token: "canonical-t1" }),
+        completedWorkerScript("t2", "run-dep-empty-json"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        await baseWrite(runId, filename, "{}");
+      }
+    };
+    await runOrchestration("run-dep-empty-json", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    const t2Prompt = fake.sentPrompts[1]!;
+    expect(t2Prompt).not.toContain("canonical-t1");
+    expect(t2Prompt).not.toContain("upstream_token");
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("ignores malformed JSON in agent files when gathering dependency outputs", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        completedWorkerScript("t1", "run-dep-bad-json", { upstream_token: "canonical-t1" }),
+        completedWorkerScript("t2", "run-dep-bad-json"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        await baseWrite(runId, filename, "{not valid json");
+      }
+    };
+    await runOrchestration("run-dep-bad-json", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    const t2Prompt = fake.sentPrompts[1]!;
+    expect(t2Prompt).not.toContain("canonical-t1");
+    expect(t2Prompt).not.toContain("upstream_token");
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("marks a completed worker stopped when stop is requested while the worker is running", async () => {
+    const config = singleTaskConfig();
+    const script = completedWorkerScript("t1", "run-stop-finalize");
+    script.waitDelayMs = 6_000;
+    const fake = new FakeAgentClient({
+      defaultScripts: [script],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "state.json") {
+        const state = JSON.parse(content) as { agents?: Record<string, { status?: string }> };
+        if (state.agents?.t1?.status === "running") {
+          await baseWrite(
+            runId,
+            "stop-requested.json",
+            JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
+          );
+        }
+      }
+    };
+    await runOrchestration("run-stop-finalize", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("stopped");
+    expect(state.agents.t1.status).toBe("stopped");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(
+      false,
+    );
+  }, 20_000);
 
   it("ignores non-canonical agent files when gathering dependency outputs", async () => {
     const config = twoTaskChainConfig();

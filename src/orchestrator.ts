@@ -17,6 +17,7 @@ import {
   createInitialState,
   deserialize,
   ensureLifecycleAgents,
+  readEvents,
   seedMainAgent,
   setPhaseStatus,
   syncToRepo,
@@ -255,6 +256,57 @@ export function extractDelegationPhases(config: OrchestratorConfig, knownTaskIds
 
 function isTerminalStatus(status: string): boolean {
   return status === "finished" || status === "failed" || status === "stopped";
+}
+
+const IN_FLIGHT_LAUNCH_TERMINAL_EVENTS = new Set(["task_finished", "task_failed", "task_stopped"]);
+
+export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
+  if (runs.length === 0) return null;
+  const running = runs.find((run) => run.status === "running");
+  if (running) return running;
+  let best = runs[0]!;
+  let bestCreated = best.createdAt ?? 0;
+  for (let i = 1; i < runs.length; i += 1) {
+    const run = runs[i]!;
+    const created = run.createdAt ?? 0;
+    if (created >= bestCreated) {
+      best = run;
+      bestCreated = created;
+    }
+  }
+  return best;
+}
+
+export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): boolean {
+  let changed = false;
+  for (const agent of Object.values(state.agents)) {
+    if (agent.agent_id || agent.status !== "pending") continue;
+    let lastLaunch: OrchestrationEvent | null = null;
+    for (const event of events) {
+      if (event.task_id !== agent.task_id) continue;
+      if (IN_FLIGHT_LAUNCH_TERMINAL_EVENTS.has(event.event_type)) {
+        lastLaunch = null;
+        continue;
+      }
+      if (event.event_type === "task_launched") {
+        lastLaunch = event;
+      }
+    }
+    if (!lastLaunch) continue;
+    const agentId = lastLaunch.payload.agent_id?.trim();
+    if (!agentId) continue;
+    agent.agent_id = agentId;
+    agent.status = "launching";
+    if (!agent.started_at) {
+      agent.started_at = lastLaunch.timestamp;
+    }
+    const branch = lastLaunch.payload.branch?.trim();
+    if (branch && !agent.branch_name) {
+      agent.branch_name = branch;
+    }
+    changed = true;
+  }
+  return changed;
 }
 
 function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
@@ -828,9 +880,16 @@ async function launchWorkerAgent(
       phase_id: "execution",
       agent_node_id: taskId,
       agent_kind: "task",
-      payload: { run_id: run.id, repository: repoUrl, ref: startingRefForSdk, branch: workerBranch },
+      payload: {
+        agent_id: sdkAgent.agentId,
+        run_id: run.id,
+        repository: repoUrl,
+        ref: startingRefForSdk,
+        branch: workerBranch,
+      },
     }),
   );
+  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
   const transcript = createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId });
   const handle: WorkerHandle = {
     taskId,
@@ -935,7 +994,7 @@ async function runWorkerStream(
   const resolveWorkerOutput = async (): Promise<{ raw: unknown | null; source: "artifact" | "assistant" | "conversation" | "none" }> => {
     try {
       const artifact = await tryDownloadJsonArtifact(sdkAgent, WORKER_OUTPUT_ARTIFACT_PATH);
-      if (artifact.value !== null) {
+      if (artifact.value !== null && normalizeWorkerPayload(artifact.value, taskId) !== null) {
         return { raw: artifact.value, source: "artifact" };
       }
     } catch {
@@ -1662,12 +1721,7 @@ async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: str
   if (stateContent.trim()) {
     return;
   }
-  let eventsContent = "";
-  try {
-    eventsContent = await repoStore.readFile(runId, "events.jsonl");
-  } catch {
-    return;
-  }
+  const eventsContent = await repoStore.readFile(runId, "events.jsonl");
   if (eventsContent.trim()) {
     throw new Error(
       `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
@@ -1692,8 +1746,8 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       }
       const sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
-      const latest = runs.items[0];
-      if (!latest) {
+      const reattachRun = pickReattachRun(runs.items);
+      if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
@@ -1702,7 +1756,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const handle: WorkerHandle = {
         taskId,
         sdkAgent,
-        run: latest,
+        run: reattachRun,
         assistantMessages: [],
         transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId }),
         done: Promise.resolve(),
@@ -1871,6 +1925,12 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
+    const eventsContent = await repoStore.readFile(runId, "events.jsonl");
+    if (eventsContent.trim()) {
+      throw new Error(
+        `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
+      );
+    }
     state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
@@ -1879,6 +1939,10 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   reconcileAgentsFromConfig(state, config);
+  const launchEvents = await readEvents(repoStore, runId);
+  if (reconcileInFlightLaunchesFromEvents(state, launchEvents)) {
+    await syncToRepo(repoStore, runId, state);
+  }
 
   if (state.status === "pending") {
     state.status = "running";
