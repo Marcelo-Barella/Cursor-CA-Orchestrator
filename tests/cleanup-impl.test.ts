@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const deleted: string[] = [];
-const store = {
+const repoStoreMock = {
   listRunBranches: vi.fn(async () => ["run/old", "run/new"]),
   getRunBranchCommitDate: vi.fn(async (runId: string) => {
     if (runId === "old") return new Date("2026-06-01T00:00:00.000Z");
@@ -13,7 +13,7 @@ const store = {
 };
 
 vi.mock("../src/api/repo-store.js", () => ({
-  RepoStoreClient: vi.fn(() => store),
+  RepoStoreClient: vi.fn(() => repoStoreMock),
 }));
 
 import { runCleanupCommand } from "../src/lib/commands/cleanup-impl.js";
@@ -47,6 +47,6 @@ describe("runCleanupCommand", () => {
     const output = logSpy.mock.calls.flat().join("\n");
     expect(output).toContain("run/old");
     expect(output).not.toContain("run/new");
-    expect(store.deleteRunBranch).not.toHaveBeenCalled();
+    expect(repoStoreMock.deleteRunBranch).not.toHaveBeenCalled();
   });
 });

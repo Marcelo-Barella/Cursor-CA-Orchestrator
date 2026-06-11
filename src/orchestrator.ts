@@ -604,11 +604,6 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
   }
 }
 
-export function allAgentsTerminal(state: OrchestrationState): boolean {
-  const agents = Object.values(state.agents);
-  return agents.length > 0 && agents.every((a) => isTerminalStatus(a.status));
-}
-
 function checkTerminalFailure(state: OrchestrationState): boolean {
   const failedIds = new Set(Object.entries(state.agents).filter(([, a]) => a.status === "failed").map(([id]) => id));
   if (!failedIds.size) return false;
@@ -1497,8 +1492,8 @@ async function maybeFinalizePullRequests(
 
 async function checkCompletion(ctx: LoopContext): Promise<boolean> {
   if (ctx.activeWorkers.size > 0) return false;
-  if (!allAgentsTerminal(ctx.state)) return false;
   const agents = Object.values(ctx.state.agents);
+  if (!agents.length || !agents.every((a) => isTerminalStatus(a.status))) return false;
   if (!agents.every((a) => a.status === "finished")) {
     const hasFailed = agents.some((a) => a.status === "failed");
     if (hasFailed) return false;

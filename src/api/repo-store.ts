@@ -377,10 +377,11 @@ export class RepoStoreClient implements RepoStoreReader {
       const branchPayload = (await resp.json()) as {
         commit?: { commit?: { committer?: { date?: string }; author?: { date?: string } } };
       };
-      const raw = branchPayload.commit?.commit?.committer?.date ?? branchPayload.commit?.commit?.author?.date;
-      if (!raw) return null;
-      const parsed = new Date(raw);
-      return Number.isNaN(parsed.getTime()) ? null : parsed;
+      const commitDateIso =
+        branchPayload.commit?.commit?.committer?.date ?? branchPayload.commit?.commit?.author?.date;
+      if (!commitDateIso) return null;
+      const commitDate = new Date(commitDateIso);
+      return Number.isNaN(commitDate.getTime()) ? null : commitDate;
     } catch (e) {
       if (e instanceof RepoStoreNotFound) {
         return null;
