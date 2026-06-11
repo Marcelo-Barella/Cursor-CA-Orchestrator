@@ -1680,6 +1680,11 @@ async function runPlanningPhase(
     await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, true);
     return { ok: true };
   } catch (exc) {
+    try {
+      await repoStore.deleteFile(runId, "task-plan.json");
+    } catch {
+      /* advisory */
+    }
     return { ok: false, error: String(exc) };
   }
 }

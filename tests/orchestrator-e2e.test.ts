@@ -1025,6 +1025,60 @@ describe("runOrchestration with SDK (happy path)", () => {
     }
   });
 
+  it("re-plans on retry after constraint validation rejects the planner output", async () => {
+    const config: OrchestratorConfig = {
+      ...promptOnlyConfig(),
+      prompt: "Every route must use your translation method.",
+    };
+    const compliantPrompt = "Every route must use your translation method in handlers.";
+    let planAttempts = 0;
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockImplementation(async (repoStore, runId) => {
+      planAttempts += 1;
+      const prompt = planAttempts === 1 ? "Planned work without constraint coverage." : compliantPrompt;
+      const plan = promptOnlyTaskPlan(prompt);
+      await repoStore.writeFile(runId, "task-plan.json", plan);
+      return plan;
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan-1", status: "finished", result: "" },
+        },
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan-2", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-constraint-retry"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    try {
+      await expect(runOrchestration("run-constraint-retry", fake, store)).rejects.toThrow(/Plan constraint validation failed/);
+      expect(planAttempts).toBe(1);
+      expect(files.has("task-plan.json")).toBe(false);
+
+      await runOrchestration("run-constraint-retry", fake, store);
+      expect(planAttempts).toBe(2);
+      expect(fake.launches).toHaveLength(3);
+      expect(fake.launches[1]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+      expect(fake.launches[2]!.prompt).toContain(compliantPrompt);
+      const events = eventsFromFiles(files);
+      const types = events.map((event) => event.event_type);
+      expect(types).toContain("planning_failed");
+      expect(types).toContain("planning_completed");
+      expect(types.filter((type) => type === "planning_completed")).toHaveLength(1);
+      const completed = events.find((event) => event.event_type === "planning_completed");
+      expect(completed?.detail).toBe("Planning completed: 1 tasks");
+      expect(completed?.detail).not.toContain("reused existing plan");
+      expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
   it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
