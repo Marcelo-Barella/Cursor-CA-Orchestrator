@@ -1892,7 +1892,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningRan = false;
   let planningOk = false;
-  let planningFailureDetail: string | null = null;
   let planningFailureCause: unknown = null;
   let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
@@ -1910,10 +1909,9 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         planningOk = true;
       } catch (reuseErr) {
         planningFailureCause = reuseErr;
-        planningFailureDetail = String(reuseErr);
       }
     }
-    if (!planningOk && !planningFailureDetail) {
+    if (!planningOk && !planningFailureCause) {
       try {
         await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
         planningOk = true;
@@ -1923,7 +1921,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         };
       } catch (planningExc) {
         planningFailureCause = planningExc;
-        planningFailureDetail = String(planningExc);
       }
     }
   }
@@ -1978,11 +1975,11 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
     }
-    if (planningFailureDetail) {
+    if (planningFailureCause) {
       await appendEvent(
         repoStore,
         runId,
-        makeEvent("planning_failed", planningFailureDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+        makeEvent("planning_failed", String(planningFailureCause), null, { phase_id: "planning", agent_kind: "phase" }),
       );
     }
     await syncToRepo(repoStore, runId, state);
