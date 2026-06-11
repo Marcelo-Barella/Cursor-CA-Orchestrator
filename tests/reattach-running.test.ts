@@ -57,13 +57,12 @@ describe("reattachWorkers running tasks", () => {
     process.env = { ...originalEnv };
   });
 
-  it.each([
-    { workerStatus: "running" as const, runId: "run-reattach-running", liveAgentId: "agent-live-1" },
-    { workerStatus: "launching" as const, runId: "run-reattach-launching", liveAgentId: "agent-live-launching" },
-  ])(
-    "reattaches $workerStatus workers via resumeCloudAgent without relaunching",
-    async ({ workerStatus, runId, liveAgentId }) => {
+  it.each(["running", "launching"] as const)(
+    "reattaches %s workers without relaunching",
+    async (workerStatus) => {
       const config = singleTaskConfig();
+      const runId = `run-reattach-${workerStatus}`;
+      const liveAgentId = `agent-live-${workerStatus}`;
       const state = createInitialState(config, runId);
       state.status = "running";
       state.started_at = new Date().toISOString();
