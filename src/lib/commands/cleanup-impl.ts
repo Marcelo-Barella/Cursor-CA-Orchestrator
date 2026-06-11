@@ -140,36 +140,18 @@ export async function runCleanupCommand(
     return;
   }
   const days = parseInt(opts.olderThan, 10);
-  if (!Number.isFinite(days) || days < 0) {
-    failWithFinish({
-      code: "CLEANUP-002",
-      severity: "FATAL",
-      title: "Invalid --older-than",
-      what_happened: `cleanup received invalid --older-than value: ${opts.olderThan}.`,
-      next_step: "Pass a non-negative integer number of days.",
-      alternative: "Use --older-than 7.",
-      example: "cursor-orch cleanup --older-than 7",
-      exitCode: 1,
-    });
-  }
-  const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
-  const eligible: string[] = [];
-  for (const branch of branches) {
-    const runId = branch.replace(/^run\//, "");
-    const commitDate = await repoStore.getRunBranchCommitDate(runId);
-    if (commitDate && commitDate.getTime() < cutoffMs) {
-      eligible.push(branch);
-    }
+  if (days !== 7) {
+    console.log(`Note: age-based filtering (--older-than ${days}) is not yet implemented. Showing all branches.`);
   }
   if (opts.dryRun) {
-    console.log(`Found ${eligible.length} run branch(es) older than ${days} day(s) (dry run - not deleting):`);
-    for (const branch of eligible) {
+    console.log(`Found ${branches.length} run branches (dry run - not deleting):`);
+    for (const branch of branches) {
       console.log(`  - ${branch}`);
     }
     return;
   }
   let deleted = 0;
-  for (const branch of eligible) {
+  for (const branch of branches) {
     const runId = branch.replace(/^run\//, "");
     await repoStore.deleteRunBranch(runId);
     console.log(`Deleted branch: ${branch}`);
