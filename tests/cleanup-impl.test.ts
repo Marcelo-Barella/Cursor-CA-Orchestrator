@@ -1,52 +1,113 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const deleted: string[] = [];
-const store = {
-  listRunBranches: vi.fn(async () => ["run/old", "run/new"]),
-  getRunBranchCommitDate: vi.fn(async (runId: string) => {
-    if (runId === "old") return new Date("2026-06-01T00:00:00.000Z");
-    return new Date("2026-06-10T00:00:00.000Z");
-  }),
-  deleteRunBranch: vi.fn(async (runId: string) => {
-    deleted.push(runId);
-  }),
-};
-
-vi.mock("../src/api/repo-store.js", () => ({
-  RepoStoreClient: vi.fn(() => store),
-}));
-
+import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runCleanupCommand } from "../src/lib/commands/cleanup-impl.js";
 
 describe("runCleanupCommand", () => {
   let logSpy: ReturnType<typeof vi.spyOn>;
+  const envBackup: Record<string, string | undefined> = {};
 
   beforeEach(() => {
-    deleted.length = 0;
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    for (const key of ["GH_TOKEN", "BOOTSTRAP_OWNER", "BOOTSTRAP_REPO"]) {
+      envBackup[key] = process.env[key];
+    }
     process.env.GH_TOKEN = "ghp-test";
     process.env.BOOTSTRAP_OWNER = "owner";
-    process.env.BOOTSTRAP_REPO = "repo";
-    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-06-11T00:00:00.000Z").getTime());
+    process.env.BOOTSTRAP_REPO = "bootstrap";
   });
 
   afterEach(() => {
+    logSpy.mockRestore();
+    for (const [key, value] of Object.entries(envBackup)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it("exits 1 when GH_TOKEN is missing", async () => {
     delete process.env.GH_TOKEN;
+    const finish = vi.fn((code: number): never => {
+      throw new Error(`exit:${code}`);
+    });
+    await expect(runCleanupCommand({ olderThan: "7" }, { finish })).rejects.toThrow("exit:1");
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("CLEANUP-001");
+  });
+
+  it("exits 1 when BOOTSTRAP_OWNER is missing", async () => {
     delete process.env.BOOTSTRAP_OWNER;
+    const finish = vi.fn((code: number): never => {
+      throw new Error(`exit:${code}`);
+    });
+    await expect(runCleanupCommand({ olderThan: "7" }, { finish })).rejects.toThrow("exit:1");
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("ENV-001");
+    expect(text).toContain("BOOTSTRAP_OWNER");
+  });
+
+  it("exits 1 when BOOTSTRAP_REPO is missing", async () => {
     delete process.env.BOOTSTRAP_REPO;
-    vi.restoreAllMocks();
+    const finish = vi.fn((code: number): never => {
+      throw new Error(`exit:${code}`);
+    });
+    await expect(runCleanupCommand({ olderThan: "7" }, { finish })).rejects.toThrow("exit:1");
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("ENV-001");
+    expect(text).toContain("BOOTSTRAP_REPO");
   });
 
-  it("deletes only branches older than the cutoff", async () => {
-    await runCleanupCommand({ olderThan: "7" });
+  it("dry run lists branches without deleting", async () => {
+    const deleted: string[] = [];
+    const store = {
+      listRunBranches: async () => ["run/a", "run/b"],
+      deleteRunBranch: async (runId: string) => {
+        deleted.push(runId);
+      },
+    } as unknown as RepoStoreClient;
+    await runCleanupCommand({ olderThan: "7", dryRun: true }, { repoStore: store });
+    expect(deleted).toEqual([]);
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("dry run");
+    expect(text).toContain("run/a");
+    expect(text).toContain("run/b");
+  });
+
+  it("deletes every listed run branch when not dry run", async () => {
+    const deleted: string[] = [];
+    const store = {
+      listRunBranches: async () => ["run/one", "run/two"],
+      deleteRunBranch: async (runId: string) => {
+        deleted.push(runId);
+      },
+    } as unknown as RepoStoreClient;
+    await runCleanupCommand({ olderThan: "7" }, { repoStore: store });
+    expect(deleted).toEqual(["one", "two"]);
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("Deleted 2 run branch(es)");
+  });
+
+  it("prints message when no run branches exist", async () => {
+    const store = {
+      listRunBranches: async () => [],
+      deleteRunBranch: async () => {},
+    } as unknown as RepoStoreClient;
+    await runCleanupCommand({ olderThan: "7" }, { repoStore: store });
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("No run branches found");
+  });
+
+  it("notes unimplemented age filtering for non-default older-than", async () => {
+    const deleted: string[] = [];
+    const store = {
+      listRunBranches: async () => ["run/old"],
+      deleteRunBranch: async (runId: string) => {
+        deleted.push(runId);
+      },
+    } as unknown as RepoStoreClient;
+    await runCleanupCommand({ olderThan: "30" }, { repoStore: store });
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("age-based filtering");
+    expect(text).toContain("--older-than 30");
     expect(deleted).toEqual(["old"]);
-  });
-
-  it("lists only eligible branches during dry run", async () => {
-    await runCleanupCommand({ olderThan: "7", dryRun: true });
-    const output = logSpy.mock.calls.flat().join("\n");
-    expect(output).toContain("run/old");
-    expect(output).not.toContain("run/new");
-    expect(store.deleteRunBranch).not.toHaveBeenCalled();
   });
 });

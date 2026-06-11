@@ -1,8 +1,9 @@
 import { UnsupportedRunOperationError } from "@cursor/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SDKAssistantMessage, SdkAgent } from "../src/sdk/agent-client.js";
+import type { SDKAssistantMessage, SdkAgent, SdkRun } from "../src/sdk/agent-client.js";
 import {
   buildCloudAgentOptions,
+  captureAssistantJson,
   fetchAgentConversationTextFromApi,
   parseAssistantJsonFromMessages,
   parseAssistantJsonFromText,
@@ -101,6 +102,28 @@ describe("fetchAgentConversationTextFromApi", () => {
     const text = await fetchAgentConversationTextFromApi("agent/with space", "secret");
     expect(requestedUrl).toBe("https://api.cursor.com/v0/agents/agent%2Fwith%20space/conversation");
     expect(text).toBe("line one\nline two");
+  });
+});
+
+describe("captureAssistantJson", () => {
+  it("falls back to run.result when the stream has no assistant messages", async () => {
+    const run = {
+      async *stream() {},
+      result: '{"status":"completed","task_id":"t1","outputs":{}}',
+    } as unknown as SdkRun;
+    await expect(captureAssistantJson(run)).resolves.toEqual({
+      status: "completed",
+      task_id: "t1",
+      outputs: {},
+    });
+  });
+
+  it("returns null when stream and run.result are both empty", async () => {
+    const run = {
+      async *stream() {},
+      result: "",
+    } as unknown as SdkRun;
+    await expect(captureAssistantJson(run)).resolves.toBeNull();
   });
 });
 
