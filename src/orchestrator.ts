@@ -284,8 +284,8 @@ export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   return best;
 }
 
-export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): boolean {
-  let changed = false;
+export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): string[] {
+  const recoveredTaskIds: string[] = [];
   for (const agent of Object.values(state.agents)) {
     if (agent.agent_id || agent.status !== "pending") continue;
     let lastLaunch: OrchestrationEvent | null = null;
@@ -311,9 +311,9 @@ export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, e
     if (branch && !agent.branch_name) {
       agent.branch_name = branch;
     }
-    changed = true;
+    recoveredTaskIds.push(agent.task_id);
   }
-  return changed;
+  return recoveredTaskIds;
 }
 
 function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
@@ -697,6 +697,7 @@ type LoopContext = {
   apiKey: string;
   ghToken: string;
   activeWorkers: Map<string, WorkerHandle>;
+  eventRecoveredTaskIds: Set<string>;
   dirty: { value: boolean };
   wakeup: { resolve: () => void; promise: Promise<void> };
   stopRequested: { value: boolean };
@@ -1602,6 +1603,21 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
+function validatePlanTaskConstraints(config: OrchestratorConfig, parsedTasks: TaskConfig[]): void {
+  const constraints = extractConstraintsFromPrompt(config.prompt);
+  if (constraints.length === 0) {
+    return;
+  }
+  const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+  if (result.valid) {
+    return;
+  }
+  const detail = result.violations
+    .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+    .join("; ");
+  throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+}
+
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
@@ -1610,6 +1626,7 @@ async function runPlanningPhase(
   apiKey: string,
 ): Promise<PlanningPhaseResult> {
   try {
+    await repoStore.deleteFile(runId, "task-plan.json");
     const ghToken = process.env.GH_TOKEN!;
     const ghUser = await resolveGithubUsername(ghToken);
     const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
@@ -1649,16 +1666,7 @@ async function runPlanningPhase(
     }
     config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
     const parsedTasks = parseTaskPlan(planContent, config);
-    const constraints = extractConstraintsFromPrompt(config.prompt);
-    if (constraints.length > 0) {
-      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!result.valid) {
-        const detail = result.violations
-          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-          .join("; ");
-        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-      }
-    }
+    validatePlanTaskConstraints(config, parsedTasks);
     config.tasks = parsedTasks;
     const canonPlan = canonicalizeOrchestratorConfig(config);
     config.repositories = canonPlan.repositories;
@@ -1731,6 +1739,13 @@ async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: str
   }
 }
 
+function resetEventRecoveredAgent(agent: AgentState, ctx: LoopContext): void {
+  agent.agent_id = null;
+  agent.status = "pending";
+  agent.started_at = null;
+  markStateDirty(ctx);
+}
+
 async function reattachWorkers(ctx: LoopContext): Promise<void> {
   const { Agent } = await import("@cursor/sdk");
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
@@ -1751,6 +1766,10 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
+        if (ctx.eventRecoveredTaskIds.has(taskId)) {
+          resetEventRecoveredAgent(agent, ctx);
+          continue;
+        }
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
         continue;
@@ -1784,6 +1803,10 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
+      if (ctx.eventRecoveredTaskIds.has(taskId)) {
+        resetEventRecoveredAgent(agent, ctx);
+        continue;
+      }
       agent.status = "failed";
       agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
       markStateDirty(ctx);
@@ -1902,6 +1925,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
         config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
         const parsedTasks = parseTaskPlan(planContent, config);
+        validatePlanTaskConstraints(config, parsedTasks);
         config.tasks = parsedTasks;
         const canonReuse = canonicalizeOrchestratorConfig(config);
         config.repositories = canonReuse.repositories;
@@ -1943,7 +1967,8 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   reconcileAgentsFromConfig(state, config);
   const launchEvents = await readEvents(repoStore, runId);
-  if (reconcileInFlightLaunchesFromEvents(state, launchEvents)) {
+  const eventRecoveredTaskIds = reconcileInFlightLaunchesFromEvents(state, launchEvents);
+  if (eventRecoveredTaskIds.length > 0) {
     await syncToRepo(repoStore, runId, state);
   }
 
@@ -2013,6 +2038,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     apiKey,
     ghToken,
     activeWorkers: new Map(),
+    eventRecoveredTaskIds: new Set(eventRecoveredTaskIds),
     dirty: { value: true },
     wakeup: createWakeup(),
     stopRequested: { value: false },

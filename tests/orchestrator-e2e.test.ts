@@ -1084,6 +1084,41 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
+  it("rejects constraint-violating task-plan.json on reuse instead of launching workers", async () => {
+    const config = {
+      ...promptOnlyConfig(),
+      prompt: "Every route must use your translation method.",
+    };
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Implement routes without translation coverage.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          sendThrows: new Error("planner should run after rejected reuse"),
+          result: { id: "r-plan", status: "finished" },
+        },
+      ],
+    });
+    const { store } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    await expect(runOrchestration("run-reuse-constraint-fail", fake, store)).rejects.toThrow(
+      /planner should run after rejected reuse/,
+    );
+    expect(fake.launches).toHaveLength(1);
+    expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+  });
+
   it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
