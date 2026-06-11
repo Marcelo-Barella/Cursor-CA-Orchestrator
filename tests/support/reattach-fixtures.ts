@@ -32,18 +32,26 @@ export function createInMemoryRepoStore(initial: Record<string, string>): { stor
   return { store, files };
 }
 
-export function promptOnlyConfig(): OrchestratorConfig {
+function fixtureConfig(
+  name: string,
+  prompt: string,
+  tasks: OrchestratorConfig["tasks"],
+): OrchestratorConfig {
   return {
-    name: "plan-demo",
+    name,
     model: { id: "composer-2" },
-    prompt: "Ship the feature across repos.",
+    prompt,
     repositories: {
       svc: { url: "https://github.com/acme/svc", ref: "main" },
     },
-    tasks: [],
+    tasks,
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
   };
+}
+
+export function promptOnlyConfig(): OrchestratorConfig {
+  return fixtureConfig("plan-demo", "Ship the feature across repos.", []);
 }
 
 export function validTaskPlanJson(): string {
@@ -58,6 +66,13 @@ export function validTaskPlanJson(): string {
       },
     ],
   });
+}
+
+export function plannerFinishedScript(): FakeRunScript {
+  return {
+    events: [statusMessage("FINISHED")],
+    result: { id: "r-plan", status: "finished", result: "" },
+  };
 }
 
 export function completedWorkerScript(
@@ -86,28 +101,18 @@ export function parseEvents(files: Map<string, string>): { event_type: string; d
 }
 
 export function singleTaskConfig(): OrchestratorConfig {
-  return {
-    name: "demo",
-    model: { id: "composer-2" },
-    prompt: "",
-    repositories: {
-      svc: { url: "https://github.com/acme/svc", ref: "main" },
+  return fixtureConfig("demo", "", [
+    {
+      id: "t1",
+      repo: "svc",
+      prompt: "Do the thing.",
+      model: null,
+      depends_on: [],
+      timeout_minutes: 30,
+      create_repo: false,
+      repo_config: null,
     },
-    tasks: [
-      {
-        id: "t1",
-        repo: "svc",
-        prompt: "Do the thing.",
-        model: null,
-        depends_on: [],
-        timeout_minutes: 30,
-        create_repo: false,
-        repo_config: null,
-      },
-    ],
-    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-    bootstrap_repo_name: "cursor-orch-bootstrap",
-  };
+  ]);
 }
 
 let unmockedFetch: typeof fetch;

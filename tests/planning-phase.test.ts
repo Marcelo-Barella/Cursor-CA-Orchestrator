@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
-import { FakeAgentClient, statusMessage } from "./support/fake-agent-client.js";
+import { FakeAgentClient } from "./support/fake-agent-client.js";
 import {
   completedWorkerScript,
   createInMemoryRepoStore,
   installGithubBranchPrepMock,
   parseEvents,
+  plannerFinishedScript,
   promptOnlyConfig,
   restoreGithubBranchPrepMock,
   validTaskPlanJson,
@@ -60,7 +61,7 @@ describe("planning phase", () => {
     listRunsMock.mockResolvedValue({ items: [{ result: taskPlan }] });
     const fake = new FakeAgentClient({
       defaultScripts: [
-        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
+        plannerFinishedScript(),
         completedWorkerScript("t1", "run-listruns-fallback"),
       ],
     });
@@ -76,7 +77,7 @@ describe("planning phase", () => {
     waitForPlanMock.mockResolvedValue(null);
     listRunsMock.mockRejectedValue(new Error("sdk listRuns down"));
     const fake = new FakeAgentClient({
-      defaultScripts: [{ events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } }],
+      defaultScripts: [plannerFinishedScript()],
     });
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
     await expect(runOrchestration("run-listruns-fail", fake, store)).rejects.toThrow(/Timed out waiting for task plan/);
@@ -107,7 +108,7 @@ describe("planning phase", () => {
     waitForPlanMock.mockResolvedValue(taskPlan);
     const freshFake = new FakeAgentClient({
       defaultScripts: [
-        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
+        plannerFinishedScript(),
         completedWorkerScript("t1", "run-fresh-plan"),
       ],
     });

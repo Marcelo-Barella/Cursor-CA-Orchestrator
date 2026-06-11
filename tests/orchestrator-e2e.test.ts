@@ -10,6 +10,7 @@ import {
   createInMemoryRepoStore,
   installGithubBranchPrepMock,
   parseEvents,
+  plannerFinishedScript,
   promptOnlyConfig,
   restoreGithubBranchPrepMock,
   runGit,
@@ -858,12 +859,7 @@ describe("runOrchestration with SDK (happy path)", () => {
   it("does not launch planning when resuming a stopped prompt-only run", async () => {
     const config = promptOnlyConfig();
     const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r-plan", status: "finished", result: "" },
-        },
-      ],
+      defaultScripts: [plannerFinishedScript()],
     });
     const stoppedState = createInitialState(config, "run-stopped-plan");
     stoppedState.status = "stopped";
