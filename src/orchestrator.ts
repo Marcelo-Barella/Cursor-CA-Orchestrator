@@ -295,10 +295,6 @@ export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, e
         lastLaunch = null;
         continue;
       }
-      if (event.event_type === "task_retried" && event.detail.includes("(re-launched)")) {
-        lastLaunch = null;
-        continue;
-      }
       if (event.event_type === "task_launched") {
         lastLaunch = event;
       }
@@ -1214,30 +1210,8 @@ async function runWorkerStream(
 }
 
 async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<void> {
-  const prompt = `Your previous attempt was blocked. Reason: ${agent.blocked_reason}. Please try a different approach or report blocked again with a specific reason. Remember to write the final JSON to cursor-orch-output.json and include it as a fenced \`\`\`json block in your last assistant message.`;
-  const existingHandle = ctx.activeWorkers.get(agent.task_id);
-  let sdkAgent: SdkAgent;
-  if (existingHandle) {
-    sdkAgent = existingHandle.sdkAgent;
-  } else if (agent.agent_id) {
-    try {
-      const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
-        apiKey: ctx.apiKey,
-        model: toSdkModelSelection(ctx.config.model),
-      };
-      const mcpServers = nonEmptyMcpServers(ctx.config.mcp_servers);
-      if (mcpServers) {
-        resumeOptions.mcpServers = mcpServers;
-      }
-      sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
-    } catch (error) {
-      agent.status = "failed";
-      agent.finished_at = nowIso();
-      agent.summary = `Blocked retry resume failed: ${error instanceof Error ? error.message : String(error)}`;
-      markStateDirty(ctx);
-      return;
-    }
-  } else {
+  const handle = ctx.activeWorkers.get(agent.task_id);
+  if (!handle) {
     agent.blocked_retry_count += 1;
     agent.status = "pending";
     agent.blocked_reason = null;
@@ -1246,18 +1220,17 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
     markStateDirty(ctx);
     return;
   }
+  const prompt = `Your previous attempt was blocked. Reason: ${agent.blocked_reason}. Please try a different approach or report blocked again with a specific reason. Remember to write the final JSON to cursor-orch-output.json and include it as a fenced \`\`\`json block in your last assistant message.`;
   let run: SdkRun;
   try {
-    run = await sdkAgent.send(prompt);
+    run = await handle.sdkAgent.send(prompt);
   } catch (error) {
     console.error(`Failed to send follow-up for blocked task ${agent.task_id}: ${error instanceof Error ? error.message : String(error)}`);
     agent.status = "failed";
     agent.finished_at = nowIso();
     agent.summary = agent.blocked_reason ?? "Blocked; follow-up dispatch failed";
-    if (existingHandle) {
-      ctx.activeWorkers.delete(agent.task_id);
-    }
-    await safeDisposeAgent(sdkAgent);
+    ctx.activeWorkers.delete(agent.task_id);
+    await safeDisposeAgent(handle.sdkAgent);
     await cascadeFailures(ctx.state, agent.task_id, ctx.graph, ctx.repoStore, ctx.runId);
     markStateDirty(ctx);
     return;
@@ -1273,7 +1246,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
   }
   const nextHandle: WorkerHandle = {
     taskId: agent.task_id,
-    sdkAgent,
+    sdkAgent: handle.sdkAgent,
     run,
     assistantMessages: [],
     transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId: agent.task_id }),
