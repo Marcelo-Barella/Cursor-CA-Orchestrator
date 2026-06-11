@@ -1561,12 +1561,14 @@ async function checkCompletion(ctx: LoopContext): Promise<boolean> {
   const agents = Object.values(ctx.state.agents);
   if (!agents.length) return false;
   let allFinished = true;
+  let hasFailed = false;
   for (const agent of agents) {
     if (!isTerminalStatus(agent.status)) return false;
+    if (agent.status === "failed") hasFailed = true;
     if (agent.status !== "finished") allFinished = false;
   }
   if (!allFinished) {
-    if (agents.some((a) => a.status === "failed")) return false;
+    if (hasFailed) return false;
     ctx.state.status = "stopped";
     await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
     await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
