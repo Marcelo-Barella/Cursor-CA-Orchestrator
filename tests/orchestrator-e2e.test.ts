@@ -1013,6 +1013,39 @@ describe("runOrchestration with SDK (happy path)", () => {
     }
   });
 
+  it("persists state before planning_failed so a retry is not blocked by the empty-state guard", async () => {
+    const config = promptOnlyConfig();
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(null);
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    try {
+      await expect(runOrchestration("run-plan-retry", fake, store)).rejects.toThrow(/Timed out waiting for task plan/);
+      expect(files.get("state.json")?.trim()).toBeTruthy();
+      const failedTypes = eventTypesFromFiles(files);
+      const startedIdx = failedTypes.indexOf("orchestration_started");
+      const planningFailedIdx = failedTypes.indexOf("planning_failed");
+      expect(startedIdx).toBeGreaterThanOrEqual(0);
+      expect(planningFailedIdx).toBeGreaterThan(startedIdx);
+      const failedState = JSON.parse(files.get("state.json")!);
+      expect(failedState.phase_agents.planning.status).toBe("failed");
+
+      await expect(runOrchestration("run-plan-retry", fake, store)).rejects.toThrow(/Timed out waiting for task plan/);
+      expect(files.get("state.json")?.trim()).toBeTruthy();
+      expect(eventTypesFromFiles(files).filter((t) => t === "planning_failed").length).toBeGreaterThanOrEqual(2);
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
   it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
