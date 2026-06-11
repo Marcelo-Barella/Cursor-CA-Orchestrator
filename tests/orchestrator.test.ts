@@ -861,6 +861,46 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover/t1");
   });
 
+  it("ignores stale launches cleared by task_retried (re-launched)", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-relaunch");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-old)",
+        payload: { agent_id: "agent-old", run_id: "run-old" },
+      },
+      {
+        timestamp: "2026-06-01T00:00:30.000Z",
+        event_type: "task_blocked",
+        task_id: "t1",
+        phase_id: null,
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Task t1 blocked",
+        payload: {},
+      },
+      {
+        timestamp: "2026-06-01T00:06:00.000Z",
+        event_type: "task_retried",
+        task_id: "t1",
+        phase_id: null,
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Task t1 retried (re-launched)",
+        payload: {},
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBeNull();
+    expect(state.agents.t1!.status).toBe("pending");
+  });
+
   it.each(["task_failed", "task_finished", "task_stopped"] as const)(
     "ignores stale launches cleared by %s",
     (terminalEvent) => {

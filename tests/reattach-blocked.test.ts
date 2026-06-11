@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
 import { createInitialState, seedMainAgent, serialize } from "../src/state.js";
-import { FakeAgentClient, FakeSdkRun, statusMessage } from "./support/fake-agent-client.js";
+import { FakeAgentClient, statusMessage } from "./support/fake-agent-client.js";
 import {
   createInMemoryRepoStore,
   installGithubBranchPrepMock,
@@ -42,7 +42,7 @@ describe("reattachWorkers blocked tasks", () => {
     process.env = { ...originalEnv };
   });
 
-  it("does not re-run finished SDK streams for blocked tasks on resume", async () => {
+  it("resumes blocked tasks with a follow-up send instead of launching a duplicate cloud agent", async () => {
     const config = singleTaskConfig();
     const runId = "run-reattach-blocked";
     const blockedAgentId = "blocked-agent-1";
@@ -59,12 +59,6 @@ describe("reattachWorkers blocked tasks", () => {
       summary: "blocked",
     };
 
-    const staleRun = new FakeSdkRun(blockedAgentId, {
-      events: [statusMessage("FINISHED")],
-      result: { id: "stale-run", status: "finished" },
-    });
-    listRunsMock.mockResolvedValue({ items: [staleRun] });
-
     const successScript = {
       events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
       result: { id: "r-retry", status: "finished" as const, git: runGit(`cursor-orch/${runId}/t1-retry-1`) },
@@ -80,14 +74,8 @@ describe("reattachWorkers blocked tasks", () => {
 
     const fake = new FakeAgentClient({
       runsByAgent: {
-        [blockedAgentId]: [
-          {
-            events: [statusMessage("FINISHED")],
-            result: { id: "stale-run", status: "finished" },
-          },
-        ],
+        [blockedAgentId]: [successScript],
       },
-      defaultScripts: [successScript],
       conversationText: null,
     });
 
@@ -101,6 +89,7 @@ describe("reattachWorkers blocked tasks", () => {
     const final = JSON.parse(files.get("state.json")!);
     expect(final.status).toBe("completed");
     expect(final.agents.t1.status).toBe("finished");
+    expect(fake.launches).toHaveLength(0);
     expect(listRunsMock).not.toHaveBeenCalled();
   });
 });
