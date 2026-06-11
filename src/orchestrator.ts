@@ -1226,26 +1226,28 @@ async function workerStreamInfoForTask(
   ctx: LoopContext,
   taskId: string,
 ): Promise<{ repoUrl: string; ref: string; runLine: boolean; planRef: string | null }> {
-  const info = { repoUrl: "", ref: "", runLine: false, planRef: null as string | null };
+  const empty = { repoUrl: "", ref: "", runLine: false, planRef: null as string | null };
   const task = ctx.config.tasks.find((t) => t.id === taskId);
   if (!task) {
-    return info;
+    return empty;
   }
   try {
     const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
     const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
-    info.repoUrl = repoUrl;
-    info.ref = ref;
-    info.planRef = planRefForConsolidatedRunLine(task, ref);
-    info.runLine =
-      Boolean(info.planRef) &&
-      !task.create_repo &&
-      ctx.config.target.branch_layout === "consolidated" &&
-      ctx.config.target.consolidate_prs;
+    const planRef = planRefForConsolidatedRunLine(task, ref);
+    return {
+      repoUrl,
+      ref,
+      planRef,
+      runLine:
+        Boolean(planRef) &&
+        !task.create_repo &&
+        ctx.config.target.branch_layout === "consolidated" &&
+        ctx.config.target.consolidate_prs,
+    };
   } catch {
-    return info;
+    return empty;
   }
-  return info;
 }
 
 async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<void> {
@@ -1295,9 +1297,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
   agent.blocked_since = null;
   try {
     await ctx.repoStore.deleteFile(ctx.runId, `agent-${agent.task_id}.json`);
-  } catch {
-    /* advisory */
-  }
+  } catch {}
   const nextHandle: WorkerHandle = {
     taskId: agent.task_id,
     sdkAgent,
