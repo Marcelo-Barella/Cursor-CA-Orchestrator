@@ -571,6 +571,39 @@ async function cascadeFailures(
   return cascaded;
 }
 
+async function cascadeStopped(
+  state: OrchestrationState,
+  stoppedTaskId: string,
+  graph: Record<string, Set<string>>,
+  repoStore: RepoStoreClient,
+  runId: string,
+): Promise<boolean> {
+  let changed = false;
+  const finishedAt = nowIso();
+  for (const [taskId, deps] of Object.entries(graph)) {
+    if (!deps.has(stoppedTaskId)) continue;
+    const agent = state.agents[taskId];
+    if (!agent || (agent.status !== "pending" && agent.status !== "blocked")) continue;
+    agent.status = "stopped";
+    agent.cascade_source_task_id = stoppedTaskId;
+    agent.summary = `Upstream task ${stoppedTaskId} stopped`;
+    agent.finished_at = finishedAt;
+    changed = true;
+    await appendEvent(repoStore, runId, makeEvent("task_stopped", `Task ${taskId} stopped: upstream ${stoppedTaskId} stopped`, taskId));
+    changed = (await cascadeStopped(state, taskId, graph, repoStore, runId)) || changed;
+  }
+  return changed;
+}
+
+async function cascadeFromStoppedAgents(ctx: LoopContext): Promise<void> {
+  let changed = false;
+  for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
+    if (agent.status !== "stopped") continue;
+    changed = (await cascadeStopped(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId)) || changed;
+  }
+  if (changed) markStateDirty(ctx);
+}
+
 async function resolveGithubUsername(ghToken: string): Promise<string> {
   const resp = await fetch("https://api.github.com/user", {
     headers: { Authorization: `Bearer ${ghToken}` },
@@ -666,6 +699,12 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
       };
     }
   }
+}
+
+export function allAgentsTerminal(state: OrchestrationState): boolean {
+  const agents = Object.values(state.agents);
+  if (!agents.length) return false;
+  return agents.every((a) => isTerminalStatus(a.status));
 }
 
 function checkAllFinished(state: OrchestrationState): boolean {
@@ -1090,8 +1129,10 @@ async function runWorkerStream(
   if (ctx.stopRequested.value) {
     agent.status = "stopped";
     agent.finished_at = finalizedAt;
+    await cascadeStopped(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
     ctx.activeWorkers.delete(taskId);
     await safeDisposeAgent(sdkAgent);
+    markStateDirty(ctx);
     return;
   }
 
@@ -1114,6 +1155,7 @@ async function runWorkerStream(
       ctx.runId,
       makeEvent("task_stopped", `Task ${taskId} stopped`, taskId),
     );
+    await cascadeStopped(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
   } else if (payloadStatus === "completed" && agentFilePersisted) {
     agent.status = "finished";
     agent.finished_at = finalizedAt;
@@ -1330,6 +1372,7 @@ async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
     await safeDisposeAgent(handle.sdkAgent);
   }
   ctx.activeWorkers.clear();
+  await cascadeFromStoppedAgents(ctx);
   ctx.state.status = "stopped";
   await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
@@ -1553,7 +1596,24 @@ async function maybeFinalizePullRequests(
 
 async function checkCompletion(ctx: LoopContext): Promise<boolean> {
   if (ctx.activeWorkers.size > 0) return false;
-  if (!checkAllFinished(ctx.state)) return false;
+  if (!allAgentsTerminal(ctx.state)) return false;
+  if (!checkAllFinished(ctx.state)) {
+    const hasFailed = Object.values(ctx.state.agents).some((a) => a.status === "failed");
+    if (hasFailed) return false;
+    ctx.state.status = "stopped";
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+    await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("orchestration_stopped", "Orchestration stopped after one or more tasks were stopped", null, {
+        agent_node_id: "main-orchestrator",
+        agent_kind: "main",
+      }),
+    );
+    console.info("Orchestration stopped");
+    return true;
+  }
   if (ctx.config.target.auto_create_pr) {
     await maybeFinalizePullRequests(ctx.state, ctx.config, ctx.graph, ctx.runId, ctx.repoStore);
   }
@@ -1971,6 +2031,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   try {
     await reattachWorkers(ctx);
+    await cascadeFromStoppedAgents(ctx);
     await orchestrationLoop(ctx);
   } catch (exc) {
     console.error("Orchestration loop failed", exc);

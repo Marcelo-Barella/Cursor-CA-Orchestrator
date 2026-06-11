@@ -6,6 +6,7 @@ import { toYaml } from "../src/config/parse.js";
 import type { TaskConfig } from "../src/config/types.js";
 import { buildRepoCreationPrompt } from "../src/prompt-builder.js";
 import {
+  allAgentsTerminal,
   extractDelegationPhases,
   filterEligibleReadyTasks,
   getBlockedTasks,
@@ -129,6 +130,24 @@ describe("getReadyTasks", () => {
         t1: agent("t1", "finished"),
       }),
     ).toEqual([]);
+  });
+});
+
+describe("allAgentsTerminal", () => {
+  it("returns true when every agent is finished, failed, or stopped", () => {
+    const config = createConfig(["a", "b", "c"]);
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "finished";
+    state.agents.b!.status = "failed";
+    state.agents.c!.status = "stopped";
+    expect(allAgentsTerminal(state)).toBe(true);
+  });
+
+  it("returns false while any agent is still pending or running", () => {
+    const config = createConfig(["a", "b"]);
+    const state = createInitialState(config, "run1");
+    state.agents.a!.status = "stopped";
+    expect(allAgentsTerminal(state)).toBe(false);
   });
 });
 
