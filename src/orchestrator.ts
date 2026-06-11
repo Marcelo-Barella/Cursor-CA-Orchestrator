@@ -1656,15 +1656,15 @@ async function runPlanningPhase(
   }
   let planContent = await waitForPlan(repoStore, runId);
   if (!planContent) {
-    try {
-      const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
+    const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey }).catch(() => null);
+    if (runs) {
       for (const r of runs.items) {
         if (typeof r.result === "string" && r.result.trim()) {
           planContent = r.result;
           break;
         }
       }
-    } catch {}
+    }
   }
   await safeDisposeAgent(plannerAgent);
   if (!planContent) {
@@ -1893,7 +1893,8 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   let planningRan = false;
   let planningOk = false;
   let planningFailureCause: unknown = null;
-  let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
+  let planningEmitStarted = false;
+  let planningCompletedDetail: string | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
@@ -1902,26 +1903,20 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         const ghUser = await resolveGithubUsername(ghToken);
         const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
         const taskCount = await applyTaskPlanContent(config, planContent, bootstrapUrl, runId, repoStore);
-        planningEvents = {
-          emitStarted: false,
-          completedDetail: `Planning completed: ${taskCount} tasks (reused existing plan)`,
-        };
+        planningCompletedDetail = `Planning completed: ${taskCount} tasks (reused existing plan)`;
         planningOk = true;
       } catch (reuseErr) {
         planningFailureCause = reuseErr;
       }
     }
     if (!planningOk && !planningFailureCause) {
+      planningEmitStarted = true;
       try {
         await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
         planningOk = true;
-        planningEvents = {
-          emitStarted: true,
-          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
-        };
+        planningCompletedDetail = `Planning completed: ${config.tasks.length} tasks`;
       } catch (planningExc) {
         planningFailureCause = planningExc;
-        planningEvents = { emitStarted: true, completedDetail: "" };
       }
     }
   }
@@ -1956,18 +1951,18 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
-    if (planningEvents?.emitStarted) {
+    if (planningEmitStarted) {
       await appendEvent(
         repoStore,
         runId,
         makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
       );
     }
-    if (planningOk && planningEvents) {
+    if (planningOk && planningCompletedDetail) {
       await appendEvent(
         repoStore,
         runId,
-        makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+        makeEvent("planning_completed", planningCompletedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
     }
     if (planningFailureCause) {
