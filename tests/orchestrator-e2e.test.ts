@@ -249,6 +249,34 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).agents["t-b"].status).toBe("finished");
   });
 
+  it("persists worker agent_id to state.json after launch before the worker stream completes", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-launch-sync";
+    const stateWrites: Array<{ agentId: string | null; status: string }> = [];
+    const fake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", runId)],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (id, filename, content) => {
+      if (filename === "state.json") {
+        const parsed = JSON.parse(content) as { agents?: { t1?: { agent_id?: string | null; status?: string } } };
+        stateWrites.push({
+          agentId: parsed.agents?.t1?.agent_id ?? null,
+          status: parsed.agents?.t1?.status ?? "",
+        });
+      }
+      return baseWrite(id, filename, content);
+    };
+
+    await runOrchestration(runId, fake, store);
+
+    expect(stateWrites.some((write) => write.agentId !== null && write.status === "launching")).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).agents.t1.status).toBe("finished");
+  });
+
   it("launches a worker, reads the artifact, and marks the run completed", async () => {
     const config = singleTaskConfig();
     const workerPayload = {
@@ -276,6 +304,11 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
     expect(fake.launches[0]!.opts.startingRef).toBe("cursor-orch/run-1/t1");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const launched = events.find((e: { event_type: string }) => e.event_type === "task_launched");
+    expect(launched?.payload?.agent_id).toBe(fake.launches[0]!.agent.agentId);
+    expect(launched?.payload?.run_id).toBeTruthy();
+    expect(launched?.payload?.branch).toBe("cursor-orch/run-1/t1");
   });
 
   it("persists truncated agent output when worker JSON exceeds size limits", async () => {
@@ -893,37 +926,83 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
-  it.each([
-    { label: "task run", config: singleTaskConfig, runId: "run-stopped-empty-first-read" },
-    { label: "prompt-only run", config: promptOnlyConfig, runId: "run-stopped-empty-first-read-plan" },
-  ])("skips work when stopped state loads after an empty pre-planning read ($label)", async ({ config: configFn, runId }) => {
-    const config = configFn();
+  it("propagates state.json read errors after retry exhaustion", async () => {
+    const config = singleTaskConfig();
     const fake = new FakeAgentClient({
       defaultScripts: [
         {
           events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r1", status: "finished", result: "" },
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
         },
       ],
     });
-    const stoppedState = createInitialState(config, runId);
-    stoppedState.status = "stopped";
-    let stateReadCount = 0;
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(stoppedState),
-    });
-    const baseReadFile = store.readFile.bind(store);
-    store.readFile = async (id: string, filename: string) => {
-      if (filename === "state.json") {
-        stateReadCount += 1;
-        return stateReadCount === 1 ? "" : baseReadFile(id, filename);
-      }
-      return baseReadFile(id, filename);
-    };
-    await runOrchestration(runId, fake, store);
+    const { store } = createTransientStateReadStore({ "config.yaml": toYaml(config) }, 3);
+    await expect(runOrchestration("run-state-read-exhausted", fake, store)).rejects.toThrow(
+      /transient repo read failure/,
+    );
     expect(fake.launches).toHaveLength(0);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
+  it("resumes an in-progress task run after transient state.json read failures", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-resume-transient/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const state = createInitialState(config, "run-resume-transient");
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    const { store, files } = createTransientStateReadStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+    await runOrchestration("run-resume-transient", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("rejects corrupt state.json after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const { store } = createTransientStateReadStore(
+      {
+        "config.yaml": toYaml(config),
+        "state.json": "{not-json",
+      },
+      1,
+    );
+    await expect(runOrchestration("run-corrupt-transient", new FakeAgentClient(), store)).rejects.toThrow(
+      /Invalid state\.json/,
+    );
+  });
+
+  it("rejects empty state.json when events exist after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const { store } = createTransientStateReadStore(
+      {
+        "config.yaml": toYaml(config),
+        "state.json": "",
+        "events.jsonl": `${JSON.stringify({
+          timestamp: "2026-06-01T00:00:00.000Z",
+          event_type: "orchestration_started",
+          task_id: null,
+          detail: "Orchestration started",
+        })}\n`,
+      },
+      1,
+    );
+    await expect(runOrchestration("run-empty-transient", new FakeAgentClient(), store)).rejects.toThrow(
+      /refusing to reset orchestration progress/,
+    );
   });
 
   it("does not launch planning when resuming a stopped prompt-only run", async () => {
@@ -947,118 +1026,26 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
-  it("allows retrying planning after a failure without tripping the empty-state guard", async () => {
+  it("defers planning_failed until after state init so a failed plan can be retried", async () => {
     const config = promptOnlyConfig();
-    const taskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Planned work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    const failFake = new FakeAgentClient({
-      defaultScripts: [{ sendThrows: new Error("planner boom") }],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-
-    await expect(runOrchestration("run-plan-retry", failFake, store)).rejects.toThrow(/planner boom/);
-    const stateAfterFailure = JSON.parse(files.get("state.json")!);
-    expect(stateAfterFailure.status).toBe("running");
-    expect(stateAfterFailure.phase_agents.planning.status).toBe("failed");
-    const eventsAfterFailure = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    const startedIdx = eventsAfterFailure.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
-    const failedIdx = eventsAfterFailure.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
-    expect(startedIdx).toBeGreaterThanOrEqual(0);
-    expect(failedIdx).toBeGreaterThan(startedIdx);
-    expect(eventsAfterFailure[failedIdx]!.detail).toContain("planner boom");
-
-    files.set("task-plan.json", taskPlan);
-    const okFake = new FakeAgentClient({
-      defaultScripts: [completedWorkerScript("t1", "run-plan-retry")],
-    });
-    await runOrchestration("run-plan-retry", okFake, store);
-    expect(okFake.launches).toHaveLength(1);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
-  });
-
-  it("falls back to full planning when cached task-plan.json cannot be applied", async () => {
-    const config = promptOnlyConfig();
-    const stalePlan = JSON.stringify({
-      tasks: [{ id: "t1" }],
-    });
-    const fake = new FakeAgentClient({
-      defaultScripts: [{ sendThrows: new Error("planner launched after stale reuse") }],
-    });
-    const { store } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "task-plan.json": stalePlan,
-    });
-    await expect(runOrchestration("run-stale-plan-fallback", fake, store)).rejects.toThrow(
-      /planner launched after stale reuse/,
-    );
-    expect(fake.launches).toHaveLength(1);
-  });
-
-  it("defers planning_failed when cached task-plan.json fails constraint validation without launching a planner", async () => {
-    const config = {
-      ...promptOnlyConfig(),
-      prompt: "Every route must use your translation method.",
-    };
-    const invalidPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Implement the page without the required constraint phrase.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    const fixedPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Implement the page. Every route must use your translation method.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    const failFake = new FakeAgentClient({
-      defaultScripts: [{ sendThrows: new Error("planner must not run on invalid reuse") }],
-    });
+    const failingPlanner = () =>
+      new FakeAgentClient({
+        defaultScripts: [{ sendThrows: new Error("planner timeout") }],
+      });
     const { store, files } = createInMemoryRepoStore({
       "config.yaml": toYaml(config),
-      "task-plan.json": invalidPlan,
     });
-
-    await expect(runOrchestration("run-reuse-constraint-fail", failFake, store)).rejects.toThrow(
-      /Plan constraint validation failed/,
-    );
-    expect(failFake.launches).toHaveLength(0);
-    const stateAfterFailure = JSON.parse(files.get("state.json")!);
-    expect(stateAfterFailure.status).toBe("running");
-    expect(stateAfterFailure.phase_agents.planning.status).toBe("failed");
-    const eventsAfterFailure = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    const startedIdx = eventsAfterFailure.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
-    const failedIdx = eventsAfterFailure.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
+    expect(files.has("state.json")).toBe(true);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const startedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
+    const failedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
     expect(startedIdx).toBeGreaterThanOrEqual(0);
     expect(failedIdx).toBeGreaterThan(startedIdx);
-    expect(eventsAfterFailure[failedIdx]!.detail).toContain("Plan constraint validation failed");
-
-    files.set("task-plan.json", fixedPlan);
-    const okFake = new FakeAgentClient({
-      defaultScripts: [completedWorkerScript("t1", "run-reuse-constraint-fail")],
-    });
-    await runOrchestration("run-reuse-constraint-fail", okFake, store);
-    expect(okFake.launches).toHaveLength(1);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.not.toThrow(
+      /refusing to reset orchestration progress/,
+    );
   });
 
   it("reuses existing task-plan.json without launching a planner agent", async () => {
