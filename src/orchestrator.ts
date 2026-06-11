@@ -1600,12 +1600,12 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
-type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
-
 type PlanningOutcome =
   | { kind: "none" }
   | { kind: "ok"; emitStarted: boolean; completedDetail: string }
   | { kind: "failed"; emitStarted: boolean; error: string };
+
+type ResolvedPlanningOutcome = Exclude<PlanningOutcome, { kind: "none" }>;
 
 async function persistPlanTasks(
   config: OrchestratorConfig,
@@ -1647,7 +1647,7 @@ async function emitPlanningOutcomeEvents(
   repoStore: RepoStoreClient,
   runId: string,
   state: OrchestrationState,
-  outcome: Exclude<PlanningOutcome, { kind: "none" }>,
+  outcome: ResolvedPlanningOutcome,
 ): Promise<void> {
   setPhaseStatus(state, "planning", outcome.kind === "ok" ? "finished" : "failed", { timestamp: nowIso() });
   if (outcome.emitStarted) {
@@ -1679,7 +1679,7 @@ async function runPlanningPhase(
   agentClient: AgentClient,
   repoStore: RepoStoreClient,
   apiKey: string,
-): Promise<PlanningPhaseResult> {
+): Promise<ResolvedPlanningOutcome> {
   try {
     const ghToken = process.env.GH_TOKEN!;
     const ghUser = await resolveGithubUsername(ghToken);
@@ -1731,9 +1731,13 @@ async function runPlanningPhase(
       }
     }
     await persistPlanTasks(config, runId, repoStore, parsedTasks);
-    return { ok: true };
+    return {
+      kind: "ok",
+      emitStarted: true,
+      completedDetail: `Planning completed: ${parsedTasks.length} tasks`,
+    };
   } catch (exc) {
-    return { ok: false, error: String(exc) };
+    return { kind: "failed", emitStarted: true, error: String(exc) };
   }
 }
 
@@ -1960,16 +1964,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     if (reusedDetail) {
       planningOutcome = { kind: "ok", emitStarted: false, completedDetail: reusedDetail };
     } else {
-      const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
-      if (planningResult.ok) {
-        planningOutcome = {
-          kind: "ok",
-          emitStarted: true,
-          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
-        };
-      } else {
-        planningOutcome = { kind: "failed", emitStarted: true, error: planningResult.error };
-      }
+      planningOutcome = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
     }
   }
 
