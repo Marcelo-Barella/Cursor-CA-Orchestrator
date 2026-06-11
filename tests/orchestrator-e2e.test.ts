@@ -1084,6 +1084,76 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
+  it("rejects constraint-violating task-plan.json and falls back to full planning", async () => {
+    const constraintPrompt = "Every route must use your translation method.";
+    const config: OrchestratorConfig = {
+      ...promptOnlyConfig(),
+      prompt: constraintPrompt,
+    };
+    const invalidPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Implement the home page only.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const validPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: `Implement the home page. ${constraintPrompt}`,
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const runId = "run-constraint-replan";
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": invalidPlan,
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-planner", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", runId),
+      ],
+    });
+    const origCreate = fake.createCloudAgent.bind(fake);
+    fake.createCloudAgent = async (opts) => {
+      const agent = await origCreate(opts);
+      if (opts.repoUrl?.includes("cursor-orch-bootstrap")) {
+        const innerSend = agent.send.bind(agent);
+        agent.send = async (message?: string) => {
+          await store.writeFile(runId, "task-plan.json", validPlan);
+          return innerSend(message);
+        };
+      }
+      return agent;
+    };
+    await runOrchestration(runId, fake, store);
+    expect(fake.launches).toHaveLength(2);
+    expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+    expect(fake.launches[1]!.opts.repoUrl).toBe("https://github.com/acme/svc");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const eventTypes = events.map((e: { event_type: string }) => e.event_type);
+    expect(eventTypes).toContain("planning_started");
+    expect(
+      events.some(
+        (e: { event_type: string; detail?: string }) =>
+          e.event_type === "planning_completed" && !e.detail?.includes("reused existing plan"),
+      ),
+    ).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
   it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
