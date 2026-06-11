@@ -1875,10 +1875,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const stateContent = await readStateJsonContent(repoStore, runId);
   await refuseResumeWithEmptyState(repoStore, runId, stateContent);
   let parsedState: OrchestrationState | null = null;
+  let stateParseDetail: string | null = null;
   if (stateContent.trim()) {
     try {
       parsedState = deserialize(stateContent);
-    } catch {}
+    } catch (parseErr) {
+      stateParseDetail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    }
   }
   if (parsedState?.status === "stopped") {
     console.info(`Run ${runId} is already stopped; skipping orchestration`);
@@ -1929,24 +1932,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   validateConfig(config);
 
-  let resumeStateContent = stateContent;
-  if (!resumeStateContent.trim()) {
-    resumeStateContent = await readStateJsonContent(repoStore, runId);
-    await refuseResumeWithEmptyState(repoStore, runId, resumeStateContent);
-  }
-
   let state: OrchestrationState;
-  if (!resumeStateContent.trim()) {
+  if (!stateContent.trim()) {
     state = createInitialState(config, runId);
-  } else if (resumeStateContent === stateContent && parsedState) {
+  } else if (parsedState) {
     state = parsedState;
   } else {
-    try {
-      state = deserialize(resumeStateContent);
-    } catch (parseErr) {
-      const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
-      throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
-    }
+    throw new Error(`Invalid state.json for run ${runId}: ${stateParseDetail ?? "parse failed"}`);
   }
 
   reconcileAgentsFromConfig(state, config);
