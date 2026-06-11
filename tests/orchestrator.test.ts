@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import type { AgentClient } from "../src/sdk/agent-client.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
@@ -584,6 +584,30 @@ describe("buildRepoCreationPrompt consolidated run line", () => {
 });
 
 describe("runOrchestration validation gate", () => {
+  const originalEnv = { ...process.env };
+  let unmockedFetch: typeof fetch;
+
+  beforeEach(() => {
+    process.env.CURSOR_API_KEY = "sk-fake";
+    process.env.GH_TOKEN = "ghp-fake";
+    unmockedFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url === "https://api.github.com/user") {
+        return new Response(JSON.stringify({ login: "acme-user" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return unmockedFetch(input);
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = unmockedFetch;
+    process.env = { ...originalEnv };
+  });
+
   it("rejects corrupt state.json instead of resetting orchestration progress", async () => {
     const config = createConfig(["a"]);
     const repoStore = {
@@ -689,6 +713,51 @@ describe("runOrchestration validation gate", () => {
       /transient events read failure/,
     );
     expect(eventsReadCount).toBe(1);
+  });
+
+  it("deletes stale task-plan and replans when cached plan violates prompt constraints", async () => {
+    const config: OrchestratorConfig = {
+      ...createConfig([]),
+      prompt: "Every route must use your translation method.",
+      tasks: [],
+    };
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Do unrelated work without mentioning translation.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    let deletedTaskPlan = false;
+    let createCloudAgentCalls = 0;
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "task-plan.json") return taskPlan;
+        if (filename === "state.json") return "";
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(_runId: string, filename: string): Promise<void> {
+        if (filename === "task-plan.json") deletedTaskPlan = true;
+      },
+    } as unknown as RepoStoreClient;
+    const agentClient = {
+      createCloudAgent: async () => {
+        createCloudAgentCalls += 1;
+        throw new Error(`createCloudAgent call ${createCloudAgentCalls}`);
+      },
+    } as unknown as AgentClient;
+    await expect(runOrchestration("run-stale-plan-constraints", agentClient, repoStore)).rejects.toThrow(
+      /createCloudAgent call 1/,
+    );
+    expect(deletedTaskPlan).toBe(true);
+    expect(createCloudAgentCalls).toBe(1);
   });
 
   it("aborts before repo writes when delegation_map fails validateConfig", async () => {
