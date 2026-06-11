@@ -1602,15 +1602,14 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
-const PLAN_CONSTRAINT_FAILED_PREFIX = "Plan constraint validation failed";
-
-function formatPlanConstraintFailure(
-  violations: { taskId: string; missingConstraint: string }[],
-): string {
-  const detail = violations
-    .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-    .join("; ");
-  return `${PLAN_CONSTRAINT_FAILED_PREFIX}: ${detail}. Re-plan with full constraint coverage.`;
+class PlanConstraintError extends Error {
+  constructor(violations: { taskId: string; missingConstraint: string }[]) {
+    const detail = violations
+      .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+      .join("; ");
+    super(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+    this.name = "PlanConstraintError";
+  }
 }
 
 async function applyTaskPlanContent(
@@ -1626,7 +1625,7 @@ async function applyTaskPlanContent(
   if (constraints.length > 0) {
     const constraintCheck = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
     if (!constraintCheck.valid) {
-      throw new Error(formatPlanConstraintFailure(constraintCheck.violations));
+      throw new PlanConstraintError(constraintCheck.violations);
     }
   }
   config.tasks = parsedTasks;
@@ -1913,7 +1912,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
-    let reuseConstraintFailed = false;
     if (planContent) {
       try {
         const ghUser = await resolveGithubUsername(ghToken);
@@ -1925,14 +1923,12 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         };
         planningOk = true;
       } catch (exc) {
-        const message = exc instanceof Error ? exc.message : String(exc);
-        if (message.startsWith(PLAN_CONSTRAINT_FAILED_PREFIX)) {
-          planningFailedDetail = message;
-          reuseConstraintFailed = true;
+        if (exc instanceof PlanConstraintError) {
+          planningFailedDetail = exc.message;
         }
       }
     }
-    if (!planningOk && !reuseConstraintFailed) {
+    if (!planningOk && planningFailedDetail === null) {
       planningUsedFullPhase = true;
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
