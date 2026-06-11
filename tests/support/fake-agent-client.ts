@@ -28,7 +28,6 @@ export interface FakeRunScript {
   throwOnStream?: unknown;
   /** When set, send() throws before starting the run (launch-time failure). */
   sendThrows?: unknown;
-  /** Delay before wait() resolves so background stop polling can observe stop-requested.json. */
   waitDelayMs?: number;
 }
 

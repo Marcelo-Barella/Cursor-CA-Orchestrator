@@ -1104,15 +1104,19 @@ describe("runOrchestration with SDK (happy path)", () => {
     });
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
     const baseWrite = store.writeFile.bind(store);
-    store.writeFile = async (runId, filename, content) => {
-      await baseWrite(runId, filename, content);
-      if (filename === "agent-t1.json") {
-        await baseWrite(
-          runId,
-          "stop-requested.json",
-          JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
-        );
-      }
+    const baseUpdate = store.updateFile.bind(store);
+    store.updateFile = async (runId, filename, updater) => {
+      await baseUpdate(runId, filename, async (current) => {
+        const next = await updater(current);
+        if (filename === "events.jsonl" && next.includes("task_blocked")) {
+          await baseWrite(
+            runId,
+            "stop-requested.json",
+            JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
+          );
+        }
+        return next;
+      });
     };
     await runOrchestration("run-blocked", fake, store);
     const agentPayload = JSON.parse(files.get("agent-t1.json")!);
@@ -1125,7 +1129,45 @@ describe("runOrchestration with SDK (happy path)", () => {
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.some((e: { event_type: string }) => e.event_type === "task_blocked" && e.task_id === "t1")).toBe(true);
     expect(state.status).toBe("stopped");
-  }, 20_000);
+  });
+
+  it("marks a worker stopped instead of blocked when stop sentinel exists at finalization", async () => {
+    const config = singleTaskConfig();
+    const blockedPayload = {
+      task_id: "t1",
+      status: "blocked",
+      summary: "needs credentials",
+      blocked_reason: "missing API key",
+      outputs: {},
+    };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-blocked-stop/t1") },
+          artifacts: { "cursor-orch-output.json": JSON.stringify(blockedPayload) },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        await baseWrite(
+          runId,
+          "stop-requested.json",
+          JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
+        );
+      }
+    };
+    await runOrchestration("run-blocked-stop", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.agents.t1.status).toBe("stopped");
+    expect(state.status).toBe("stopped");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "task_blocked" && e.task_id === "t1")).toBe(false);
+  });
 
   it("marks a task failed when worker JSON reports failed status", async () => {
     const config = singleTaskConfig();
@@ -1226,7 +1268,6 @@ describe("runOrchestration with SDK (happy path)", () => {
   it("marks a completed worker stopped when stop is requested while the worker is running", async () => {
     const config = singleTaskConfig();
     const script = completedWorkerScript("t1", "run-stop-finalize");
-    script.waitDelayMs = 6_000;
     const fake = new FakeAgentClient({
       defaultScripts: [script],
     });
@@ -1253,7 +1294,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(
       false,
     );
-  }, 20_000);
+  });
 
   it("ignores non-canonical agent files when gathering dependency outputs", async () => {
     const config = twoTaskChainConfig();
