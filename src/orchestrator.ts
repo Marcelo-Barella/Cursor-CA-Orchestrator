@@ -610,6 +610,12 @@ function checkAllFinished(state: OrchestrationState): boolean {
   return agents.every((a) => a.status === "finished");
 }
 
+export function allAgentsTerminal(state: OrchestrationState): boolean {
+  const agents = Object.values(state.agents);
+  if (!agents.length) return false;
+  return agents.every((a) => isTerminalStatus(a.status));
+}
+
 function checkTerminalFailure(state: OrchestrationState): boolean {
   const failedIds = new Set(Object.entries(state.agents).filter(([, a]) => a.status === "failed").map(([id]) => id));
   if (!failedIds.size) return false;
@@ -1498,7 +1504,24 @@ async function maybeFinalizePullRequests(
 
 async function checkCompletion(ctx: LoopContext): Promise<boolean> {
   if (ctx.activeWorkers.size > 0) return false;
-  if (!checkAllFinished(ctx.state)) return false;
+  if (!allAgentsTerminal(ctx.state)) return false;
+  if (!checkAllFinished(ctx.state)) {
+    const hasFailed = Object.values(ctx.state.agents).some((a) => a.status === "failed");
+    if (hasFailed) return false;
+    ctx.state.status = "stopped";
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+    await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("orchestration_stopped", "Orchestration stopped after one or more tasks were stopped", null, {
+        agent_node_id: "main-orchestrator",
+        agent_kind: "main",
+      }),
+    );
+    console.info("Orchestration stopped");
+    return true;
+  }
   if (ctx.config.target.auto_create_pr) {
     await maybeFinalizePullRequests(ctx.state, ctx.config, ctx.graph, ctx.runId, ctx.repoStore);
   }
