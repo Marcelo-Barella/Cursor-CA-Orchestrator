@@ -144,4 +144,26 @@ describe("runLogsCommand", () => {
     expect(text).toContain("[assistant t1]");
     expect(text).toContain("hello from worker");
   });
+
+  it("ignores malformed transcript lines when rendering --task", async () => {
+    const cfg = baseConfig();
+    const state = createInitialState(cfg, "run-tr-bad");
+    state.agents.t1.status = "finished";
+    const valid = JSON.stringify({
+      event: {
+        type: "assistant",
+        agent_id: "a1",
+        run_id: "r1",
+        message: { role: "assistant", content: [{ type: "text", text: "kept line" }] },
+      },
+    });
+    const store = mockRepoStore({
+      "state.json": serialize(state),
+      "transcripts/t1.jsonl": `${valid}\nnot valid json {{{\n`,
+    });
+    await runLogsCommand({ run: "run-tr-bad", task: "t1" }, { repoStore: store });
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("kept line");
+    expect(text).not.toContain("not valid json");
+  });
 });
