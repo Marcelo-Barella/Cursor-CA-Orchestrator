@@ -1136,6 +1136,49 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t2.status).toBe("pending");
   }, 20_000);
 
+  it("does not mark a completed worker finished when stop appears between finalize stop checks", async () => {
+    const config = singleTaskConfig();
+    const script = completedWorkerScript("t1", "run-stop-finalize-race");
+    const fake = new FakeAgentClient({
+      defaultScripts: [script],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    let agentFileWritten = false;
+    let stopReadsAfterAgentFile = 0;
+    const baseWrite = store.writeFile.bind(store);
+    const baseRead = store.readFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        agentFileWritten = true;
+      }
+    };
+    store.readFile = async (runId, filename) => {
+      if (filename === "stop-requested.json" && agentFileWritten) {
+        stopReadsAfterAgentFile += 1;
+        if (stopReadsAfterAgentFile === 1) {
+          queueMicrotask(() => {
+            void baseWrite(
+              runId,
+              "stop-requested.json",
+              JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
+            );
+          });
+          return "";
+        }
+      }
+      return baseRead(runId, filename);
+    };
+    await runOrchestration("run-stop-finalize-race", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("stopped");
+    expect(state.agents.t1.status).toBe("stopped");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(
+      false,
+    );
+  }, 20_000);
+
   it("does not mark a completed worker finished when stop is requested during finalization", async () => {
     const config = singleTaskConfig();
     const script = completedWorkerScript("t1", "run-stop-finalize-late");

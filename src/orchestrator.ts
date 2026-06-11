@@ -722,6 +722,13 @@ async function syncStopRequestedFromRepo(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
+async function shouldAbortWorkerFinalize(ctx: LoopContext): Promise<boolean> {
+  if (ctx.stopRequested.value) return true;
+  if (await syncStopRequestedFromRepo(ctx)) return true;
+  if (ctx.stopRequested.value) return true;
+  return syncStopRequestedFromRepo(ctx);
+}
+
 async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   try {
     await agent[Symbol.asyncDispose]();
@@ -1095,7 +1102,7 @@ async function runWorkerStream(
 
   const finalizedAt = nowIso();
 
-  if (await syncStopRequestedFromRepo(ctx)) {
+  if (await shouldAbortWorkerFinalize(ctx)) {
     agent.status = "stopped";
     agent.finished_at = finalizedAt;
     if (ctx.activeWorkers.get(taskId) === handle) {
