@@ -953,19 +953,17 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(fake.launches[0]!.prompt).toContain("Planned work.");
     const updatedConfig = files.get("config.yaml")!;
     expect(updatedConfig).toContain("t1");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(
-      events.some(
-        (e: { event_type: string; detail?: string }) =>
-          e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
-      ),
-    ).toBe(true);
-    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
     const types = eventTypesFromFiles(files);
-    const startedIdx = types.indexOf("orchestration_started");
-    const completedIdx = types.indexOf("planning_completed");
-    expect(startedIdx).toBeGreaterThanOrEqual(0);
-    expect(completedIdx).toBeGreaterThan(startedIdx);
+    expect(types).toContain("planning_completed");
+    expect(types).not.toContain("planning_started");
+    expect(types.indexOf("orchestration_started")).toBeLessThan(types.indexOf("planning_completed"));
+    const completedDetail = files
+      .get("events.jsonl")!
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { event_type: string; detail?: string })
+      .find((event) => event.event_type === "planning_completed")?.detail;
+    expect(completedDetail).toContain("reused existing plan");
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("completed");
     expect(state.phase_agents.planning.status).toBe("finished");
