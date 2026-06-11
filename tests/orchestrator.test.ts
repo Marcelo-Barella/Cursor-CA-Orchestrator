@@ -659,6 +659,50 @@ describe("runOrchestration validation gate", () => {
     );
   });
 
+  it("propagates events.jsonl read errors when state.json is whitespace-only", async () => {
+    const config = createConfig(["a"]);
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") return "  \n";
+        if (filename === "events.jsonl") {
+          throw new Error("GitHub API rate limited");
+        }
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
+    await expect(runOrchestration("run-events-read-fail-whitespace", agentClient, repoStore)).rejects.toThrow(
+      /GitHub API rate limited/,
+    );
+  });
+
+  it("propagates state.json read errors after exhausting retry attempts", async () => {
+    const config = createConfig(["a"]);
+    let stateReadAttempts = 0;
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") {
+          stateReadAttempts += 1;
+          throw new Error("persistent state read failure");
+        }
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
+    await expect(runOrchestration("run-state-read-fail", agentClient, repoStore)).rejects.toThrow(
+      /persistent state read failure/,
+    );
+    expect(stateReadAttempts).toBe(3);
+  });
+
   it("aborts before repo writes when delegation_map fails validateConfig", async () => {
     const bad: OrchestratorConfig = {
       name: "n",
@@ -719,6 +763,10 @@ describe("pickReattachRun", () => {
     const older = { status: "finished" as const, createdAt: 100 };
     const newer = { status: "finished" as const, createdAt: 200 };
     expect(pickReattachRun([older, newer] as never)).toBe(newer);
+  });
+
+  it("returns null when no runs exist", () => {
+    expect(pickReattachRun([])).toBeNull();
   });
 });
 
@@ -895,6 +943,36 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         agent_node_id: "t1",
         agent_kind: "task",
         detail: "Task t1 failed",
+        payload: {},
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBeNull();
+    expect(state.agents.t1!.status).toBe("pending");
+  });
+
+  it("ignores stale launches cleared by task_stopped", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-stopped");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-stopped)",
+        payload: { agent_id: "agent-stopped", run_id: "run-stopped" },
+      },
+      {
+        timestamp: "2026-06-01T00:01:00.000Z",
+        event_type: "task_stopped",
+        task_id: "t1",
+        phase_id: null,
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Task t1 stopped",
         payload: {},
       },
     ];

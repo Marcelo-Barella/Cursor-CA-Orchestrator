@@ -947,6 +947,71 @@ describe("runOrchestration with SDK (happy path)", () => {
           e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
       ),
     ).toBe(true);
+    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("emits planning_started after state.json exists when running full planning", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const writeOrder: string[] = [];
+    let taskPlanReads = 0;
+    const { store: baseStore, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const store = {
+      ...baseStore,
+      async writeFile(runId: string, filename: string, content: string): Promise<void> {
+        writeOrder.push(filename);
+        await baseStore.writeFile(runId, filename, content);
+      },
+      async updateFile(
+        runId: string,
+        filename: string,
+        updater: (current: string) => string | Promise<string>,
+      ): Promise<void> {
+        writeOrder.push(`update:${filename}`);
+        await baseStore.updateFile(runId, filename, updater);
+      },
+      async readFile(runId: string, filename: string): Promise<string> {
+        if (filename === "task-plan.json") {
+          taskPlanReads += 1;
+          if (taskPlanReads === 1) {
+            return "";
+          }
+          return taskPlan;
+        }
+        return baseStore.readFile(runId, filename);
+      },
+    } as unknown as RepoStoreClient;
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-fresh-plan"),
+      ],
+    });
+    await runOrchestration("run-fresh-plan", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const planningStartedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_started");
+    const planningCompletedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_completed");
+    expect(planningStartedIdx).toBeGreaterThanOrEqual(0);
+    expect(planningCompletedIdx).toBeGreaterThan(planningStartedIdx);
+    const firstStateWrite = writeOrder.findIndex((f) => f === "state.json");
+    const firstPlanningEventWrite = writeOrder.findIndex((f) => f === "update:events.jsonl");
+    expect(firstStateWrite).toBeGreaterThanOrEqual(0);
+    expect(firstStateWrite).toBeLessThan(firstPlanningEventWrite);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
