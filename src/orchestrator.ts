@@ -1656,15 +1656,15 @@ async function runPlanningPhase(
   }
   let planContent = await waitForPlan(repoStore, runId);
   if (!planContent) {
-    try {
-      const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
-      for (const plannerRun of runs.items) {
-        if (typeof plannerRun.result === "string" && plannerRun.result.trim()) {
-          planContent = plannerRun.result;
-          break;
-        }
+    const runs = await (await import("@cursor/sdk"))
+      .Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey })
+      .catch(() => ({ items: [] as { result?: unknown }[] }));
+    for (const plannerRun of runs.items) {
+      if (typeof plannerRun.result === "string" && plannerRun.result.trim()) {
+        planContent = plannerRun.result;
+        break;
       }
-    } catch {}
+    }
   }
   await safeDisposeAgent(plannerAgent);
   if (!planContent) {
