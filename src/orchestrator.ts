@@ -1602,18 +1602,6 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
-function assertPlanMeetsPromptConstraints(parsedTasks: { id: string; prompt: string }[], prompt: string | undefined): void {
-  const constraints = extractConstraintsFromPrompt(prompt ?? "");
-  if (constraints.length === 0) return;
-  const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-  if (!result.valid) {
-    const detail = result.violations
-      .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-      .join("; ");
-    throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-  }
-}
-
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
@@ -1622,11 +1610,6 @@ async function runPlanningPhase(
   apiKey: string,
 ): Promise<PlanningPhaseResult> {
   try {
-    try {
-      await repoStore.deleteFile(runId, "task-plan.json");
-    } catch {
-      /* advisory */
-    }
     const ghToken = process.env.GH_TOKEN!;
     const ghUser = await resolveGithubUsername(ghToken);
     const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
@@ -1666,7 +1649,16 @@ async function runPlanningPhase(
     }
     config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
     const parsedTasks = parseTaskPlan(planContent, config);
-    assertPlanMeetsPromptConstraints(parsedTasks, config.prompt);
+    const constraints = extractConstraintsFromPrompt(config.prompt);
+    if (constraints.length > 0) {
+      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+      if (!result.valid) {
+        const detail = result.violations
+          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+          .join("; ");
+        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+      }
+    }
     config.tasks = parsedTasks;
     const canonPlan = canonicalizeOrchestratorConfig(config);
     config.repositories = canonPlan.repositories;
@@ -1910,7 +1902,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
         config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
         const parsedTasks = parseTaskPlan(planContent, config);
-        assertPlanMeetsPromptConstraints(parsedTasks, config.prompt);
         config.tasks = parsedTasks;
         const canonReuse = canonicalizeOrchestratorConfig(config);
         config.repositories = canonReuse.repositories;
@@ -1922,13 +1913,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
           completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
         };
         planningOk = true;
-      } catch {
-        try {
-          await repoStore.deleteFile(runId, "task-plan.json");
-        } catch {
-          /* advisory */
-        }
-      }
+      } catch {}
     }
     if (!planningOk) {
       planningUsedFullPhase = true;

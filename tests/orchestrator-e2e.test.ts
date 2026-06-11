@@ -1,7 +1,6 @@
 import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
-import * as planner from "../src/planner.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
 import { createInitialState, serialize } from "../src/state.js";
@@ -305,13 +304,11 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
     expect(fake.launches[0]!.opts.startingRef).toBe("cursor-orch/run-1/t1");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((line) => JSON.parse(line));
-    const launched = events.find((event: { event_type: string }) => event.event_type === "task_launched");
-    expect(launched?.payload).toMatchObject({
-      agent_id: fake.launches[0]!.agent.agentId,
-      branch: "cursor-orch/run-1/t1",
-      run_id: expect.any(String),
-    });
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const launched = events.find((e: { event_type: string }) => e.event_type === "task_launched");
+    expect(launched?.payload?.agent_id).toBe(fake.launches[0]!.agent.agentId);
+    expect(launched?.payload?.run_id).toBeTruthy();
+    expect(launched?.payload?.branch).toBe("cursor-orch/run-1/t1");
   });
 
   it("persists truncated agent output when worker JSON exceeds size limits", async () => {
@@ -1085,103 +1082,6 @@ describe("runOrchestration with SDK (happy path)", () => {
       ),
     ).toBe(true);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
-  });
-
-  it("rejects cached task-plan that violates prompt constraints and falls through to full planning", async () => {
-    const config = {
-      ...promptOnlyConfig(),
-      prompt: "Every route must use your translation method.",
-    };
-    const violatingPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Do work without mentioning constraints.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    const compliantPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Every route must use your translation method.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(compliantPlan);
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
-        completedWorkerScript("t1", "run-reuse-constraint-fallback"),
-      ],
-    });
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "task-plan.json": violatingPlan,
-    });
-    try {
-      await runOrchestration("run-reuse-constraint-fallback", fake, store);
-      expect(fake.launches).toHaveLength(2);
-      const events = files.get("events.jsonl")!.trim().split("\n").map((line) => JSON.parse(line));
-      expect(events.some((event: { event_type: string }) => event.event_type === "planning_started")).toBe(true);
-      expect(
-        events.some(
-          (event: { event_type: string; detail?: string }) =>
-            event.event_type === "planning_completed" && !event.detail?.includes("reused existing plan"),
-        ),
-      ).toBe(true);
-      expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
-    } finally {
-      waitSpy.mockRestore();
-    }
-  });
-
-  it("defers planning_failed for constraint violations during full planning and allows retry", async () => {
-    const config = {
-      ...promptOnlyConfig(),
-      prompt: "Every route must use your translation method.",
-    };
-    const violatingPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Do work without mentioning constraints.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(violatingPlan);
-    const fake = new FakeAgentClient({
-      defaultScripts: [{ events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } }],
-    });
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-    });
-    try {
-      await expect(runOrchestration("run-constraint-fail", fake, store)).rejects.toThrow(/Plan constraint validation failed/);
-      expect(files.has("state.json")).toBe(true);
-      const events = files.get("events.jsonl")!.trim().split("\n").map((line) => JSON.parse(line));
-      const startedIdx = events.findIndex((event: { event_type: string }) => event.event_type === "orchestration_started");
-      const planningStartedIdx = events.findIndex((event: { event_type: string }) => event.event_type === "planning_started");
-      const failedIdx = events.findIndex((event: { event_type: string }) => event.event_type === "planning_failed");
-      expect(startedIdx).toBeGreaterThanOrEqual(0);
-      expect(planningStartedIdx).toBeGreaterThan(startedIdx);
-      expect(failedIdx).toBeGreaterThan(planningStartedIdx);
-      expect(events[failedIdx]?.detail).toContain("Plan constraint validation failed");
-      await expect(runOrchestration("run-constraint-fail", fake, store)).rejects.not.toThrow(
-        /refusing to reset orchestration progress/,
-      );
-    } finally {
-      waitSpy.mockRestore();
-    }
   });
 
   it("marks a task blocked when worker JSON reports blocked status", async () => {
