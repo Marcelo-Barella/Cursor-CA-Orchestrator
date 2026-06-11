@@ -895,17 +895,7 @@ describe("runOrchestration with SDK (happy path)", () => {
 
   it("propagates state.json read errors after retry exhaustion", async () => {
     const config = singleTaskConfig();
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r1", status: "finished" },
-          artifacts: {
-            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
-          },
-        },
-      ],
-    });
+    const fake = new FakeAgentClient();
     const { store } = createTransientStateReadStore({ "config.yaml": toYaml(config) }, 3);
     await expect(runOrchestration("run-state-read-exhausted", fake, store)).rejects.toThrow(
       /transient repo read failure/,
