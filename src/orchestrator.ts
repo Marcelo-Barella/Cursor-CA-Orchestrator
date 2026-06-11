@@ -1912,6 +1912,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       }
     }
     if (!planningOk) {
+      if (planContent) {
+        try {
+          await repoStore.deleteFile(runId, "task-plan.json");
+        } catch {
+          /* best effort — stale plan must not short-circuit waitForPlan during replan */
+        }
+      }
       try {
         await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
         planningOk = true;
@@ -1983,6 +1990,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     }
     await syncToRepo(repoStore, runId, state);
     if (planningFailureDetail) {
+      state.status = "failed";
+      state.error = planningFailureDetail;
+      if (state.main_agent) {
+        state.main_agent.status = "failed";
+        state.main_agent.finished_at = nowIso();
+      }
+      await syncToRepo(repoStore, runId, state);
       throw new Error(planningFailureDetail);
     }
   }

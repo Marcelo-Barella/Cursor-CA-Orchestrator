@@ -3,7 +3,7 @@ import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
-import { FakeAgentClient, statusMessage } from "./support/fake-agent-client.js";
+import { FakeAgentClient, statusMessage, type FakeRunScript } from "./support/fake-agent-client.js";
 import * as planner from "../src/planner.js";
 
 const listRunsMock = vi.hoisted(() => vi.fn());
@@ -41,6 +41,25 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
     },
   } as unknown as RepoStoreClient;
   return { store, files };
+}
+
+function completedWorkerScript(taskId: string, runId: string): FakeRunScript {
+  return {
+    events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+    result: {
+      id: `r-${taskId}`,
+      status: "finished",
+      git: { branches: [{ repoUrl: "https://github.com/acme/svc", branch: `cursor-orch/${runId}/${taskId}` }] },
+    },
+    artifacts: {
+      "cursor-orch-output.json": JSON.stringify({
+        task_id: taskId,
+        status: "completed",
+        summary: "ok",
+        outputs: {},
+      }),
+    },
+  };
 }
 
 function promptOnlyConfig(): OrchestratorConfig {
@@ -113,6 +132,44 @@ describe("planning reuse fallback", () => {
     vi.clearAllMocks();
   });
 
+  it("deletes stale task-plan.json before replanning when reuse fails", async () => {
+    const config = promptOnlyConfig();
+    let planDeleted = false;
+    const { store: baseStore, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": "{not-valid-json",
+    });
+    const store = {
+      ...baseStore,
+      async deleteFile(runId: string, filename: string): Promise<void> {
+        if (filename === "task-plan.json") {
+          planDeleted = true;
+        }
+        return baseStore.deleteFile(runId, filename);
+      },
+    } as RepoStoreClient;
+    listRunsMock.mockResolvedValue({
+      items: [
+        {
+          result: JSON.stringify({
+            tasks: [{ id: "t1", repo: "svc", prompt: "ok", depends_on: [], timeout_minutes: 30 }],
+          }),
+        },
+      ],
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
+        completedWorkerScript("t1", "run-delete-stale-plan"),
+      ],
+    });
+
+    await runOrchestration("run-delete-stale-plan", fake, store);
+
+    expect(planDeleted).toBe(true);
+    expect(files.has("task-plan.json")).toBe(false);
+  });
+
   it("falls back to full planning when task-plan.json cannot be reused", async () => {
     const config = promptOnlyConfig();
     const validPlan = JSON.stringify({
@@ -161,6 +218,7 @@ describe("planning reuse fallback", () => {
     await runOrchestration("run-reuse-fallback", fake, store);
 
     expect(fake.launches).toHaveLength(2);
+    expect(files.get("task-plan.json")).not.toBe("{not-valid-json");
     expect(listRunsMock).toHaveBeenCalled();
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));

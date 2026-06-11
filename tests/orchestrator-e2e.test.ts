@@ -934,6 +934,7 @@ describe("runOrchestration with SDK (happy path)", () => {
 
     await expect(runOrchestration("run-plan-retry", failFake, store)).rejects.toThrow(/planner boom/);
     expect(files.get("state.json")).toBeTruthy();
+    expect(JSON.parse(files.get("state.json")!).status).toBe("failed");
     const eventsAfterFailure = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(eventsAfterFailure.some((e: { event_type: string }) => e.event_type === "planning_failed")).toBe(true);
 
