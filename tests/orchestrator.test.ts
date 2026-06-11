@@ -580,12 +580,15 @@ describe("runOrchestration validation gate", () => {
     await expect(runOrchestration("run-corrupt-state", agentClient, repoStore)).rejects.toThrow(/Invalid state\.json/);
   });
 
-  it("rejects empty state.json when events.jsonl shows an in-progress run", async () => {
+  it.each([
+    { label: "empty", stateContent: "" },
+    { label: "whitespace-only", stateContent: "  \n" },
+  ])("rejects $label state.json when events.jsonl shows an in-progress run", async ({ stateContent }) => {
     const config = createConfig(["a"]);
     const repoStore = {
       async readFile(_runId: string, filename: string): Promise<string> {
         if (filename === "config.yaml") return toYaml(config);
-        if (filename === "state.json") return "";
+        if (filename === "state.json") return stateContent;
         if (filename === "events.jsonl") {
           return `${JSON.stringify({ timestamp: "2026-06-01T00:00:00.000Z", event_type: "orchestration_started", task_id: null, detail: "started" })}\n`;
         }
@@ -597,25 +600,6 @@ describe("runOrchestration validation gate", () => {
     } as unknown as RepoStoreClient;
     const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
     await expect(runOrchestration("run-empty-state", agentClient, repoStore)).rejects.toThrow(/refusing to reset orchestration progress/);
-  });
-
-  it("rejects whitespace-only state.json when events.jsonl shows an in-progress run", async () => {
-    const config = createConfig(["a"]);
-    const repoStore = {
-      async readFile(_runId: string, filename: string): Promise<string> {
-        if (filename === "config.yaml") return toYaml(config);
-        if (filename === "state.json") return "   \n";
-        if (filename === "events.jsonl") {
-          return `${JSON.stringify({ timestamp: "2026-06-01T00:00:00.000Z", event_type: "orchestration_started", task_id: null, detail: "started" })}\n`;
-        }
-        return "";
-      },
-      async writeFile(): Promise<void> {},
-      async updateFile(): Promise<void> {},
-      async deleteFile(): Promise<void> {},
-    } as unknown as RepoStoreClient;
-    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
-    await expect(runOrchestration("run-whitespace-state", agentClient, repoStore)).rejects.toThrow(/refusing to reset orchestration progress/);
   });
 
   it.each([
@@ -931,8 +915,8 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
   });
 
   it.each([
-  { label: "running agent", runId: "run-recover-existing", keptAgentId: "agent-kept", initialStatus: "running" as const },
-  { label: "pending agent", runId: "run-recover-skip", keptAgentId: "agent-existing", initialStatus: "pending" as const },
+    { label: "running agent", runId: "run-recover-existing", keptAgentId: "agent-kept", initialStatus: "running" as const },
+    { label: "pending agent", runId: "run-recover-skip", keptAgentId: "agent-existing", initialStatus: "pending" as const },
   ])("skips reconcile when agent already has agent_id ($label)", ({ runId, keptAgentId, initialStatus }) => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, runId);
