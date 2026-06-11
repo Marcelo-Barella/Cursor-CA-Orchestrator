@@ -750,6 +750,54 @@ describe("agentIdFromTaskLaunchedEvent", () => {
     };
     expect(agentIdFromTaskLaunchedEvent(event)).toBe("legacy-agent-7");
   });
+
+  it("returns null when detail does not match the launched-agent pattern", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 without agent id parens",
+      payload: { run_id: "run-legacy" },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBeNull();
+  });
+
+  it("falls back to detail when payload agent_id is whitespace-only", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 (legacy-agent-8)",
+      payload: { agent_id: "   ", run_id: "run-legacy" },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBe("legacy-agent-8");
+  });
+
+  it("trims whitespace from payload and detail captures", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 ( spaced-agent )",
+      payload: { agent_id: "  trimmed-payload  " },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBe("trimmed-payload");
+    expect(
+      agentIdFromTaskLaunchedEvent({
+        ...event,
+        payload: { run_id: "run-legacy" },
+      }),
+    ).toBe("spaced-agent");
+  });
 });
 
 describe("reconcileInFlightLaunchesFromEvents", () => {
@@ -803,6 +851,26 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("legacy-agent-9");
     expect(state.agents.t1!.status).toBe("launching");
+  });
+
+  it("leaves agent pending when task_launched detail cannot be parsed and payload omits agent_id", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-unparseable");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 without recoverable agent id",
+        payload: { run_id: "run-9" },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBeNull();
+    expect(state.agents.t1!.status).toBe("pending");
   });
 
   it("ignores stale launches cleared by a terminal task event", () => {
