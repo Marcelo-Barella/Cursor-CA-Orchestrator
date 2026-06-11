@@ -727,13 +727,25 @@ async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   }
 }
 
+async function disposeUnadoptedDeferredLaunchAgent(
+  ctx: LoopContext,
+  taskId: string,
+  existingSdkAgent?: SdkAgent,
+): Promise<void> {
+  if (existingSdkAgent && !ctx.activeWorkers.has(taskId)) {
+    await safeDisposeAgent(existingSdkAgent);
+  }
+}
+
 async function launchWorkerAgent(
   ctx: LoopContext,
   taskId: string,
   task: TaskConfig,
   depOutputs: Record<string, Record<string, unknown>>,
+  existingSdkAgent?: SdkAgent,
 ): Promise<void> {
   const agent = ctx.state.agents[taskId]!;
+  try {
   const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
   const planRef = planRefForConsolidatedRunLine(task, ref);
   const runLine =
@@ -820,41 +832,45 @@ async function launchWorkerAgent(
       });
   const model: ModelSelectionConfig = task.model != null ? { id: task.model } : ctx.config.model;
   let sdkAgent: SdkAgent;
-  try {
-    sdkAgent = await ctx.agentClient.createCloudAgent({
-      apiKey: ctx.apiKey,
-      model,
-      repoUrl,
-      startingRef: startingRefForSdk,
-      autoCreatePR: false,
-      skipReviewerRequest: true,
-      mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${startingRefForSdk})`;
-    console.error(summary);
-    const finishedAt = nowIso();
-    await handleTaskFailureWithOptionalRetry(
-      ctx,
-      taskId,
-      () =>
-        appendEvent(
-          ctx.repoStore,
-          ctx.runId,
-          makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
-            payload: { repository: repoUrl, ref: startingRefForSdk },
-          }),
-        ),
-      { finishedAt, summary },
-    );
-    return;
+  if (existingSdkAgent) {
+    sdkAgent = existingSdkAgent;
+  } else {
+    try {
+      sdkAgent = await ctx.agentClient.createCloudAgent({
+        apiKey: ctx.apiKey,
+        model,
+        repoUrl,
+        startingRef: startingRefForSdk,
+        autoCreatePR: false,
+        skipReviewerRequest: true,
+        mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${startingRefForSdk})`;
+      console.error(summary);
+      const finishedAt = nowIso();
+      await handleTaskFailureWithOptionalRetry(
+        ctx,
+        taskId,
+        () =>
+          appendEvent(
+            ctx.repoStore,
+            ctx.runId,
+            makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
+              payload: { repository: repoUrl, ref: startingRefForSdk },
+            }),
+          ),
+        { finishedAt, summary },
+      );
+      return;
+    }
+    agent.agent_id = sdkAgent.agentId;
+    agent.status = "launching";
+    agent.started_at = nowIso();
+    agent.branch_name = workerBranch;
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
   }
-  agent.agent_id = sdkAgent.agentId;
-  agent.status = "launching";
-  agent.started_at = nowIso();
-  agent.branch_name = workerBranch;
-  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
   let run: SdkRun;
   try {
     run = await sdkAgent.send(prompt);
@@ -908,6 +924,9 @@ async function launchWorkerAgent(
   handle.done = runWorkerStream(ctx, handle, { repoUrl, ref: startingRefForSdk, runLine, planRef });
   ctx.activeWorkers.set(taskId, handle);
   markStateDirty(ctx);
+  } finally {
+    await disposeUnadoptedDeferredLaunchAgent(ctx, taskId, existingSdkAgent);
+  }
 }
 
 async function runWorkerStream(
@@ -1767,6 +1786,14 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
+        if (agent.status === "launching") {
+          const task = ctx.config.tasks.find((t) => t.id === taskId);
+          if (task) {
+            const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+            await launchWorkerAgent(ctx, taskId, task, depOutputs, sdkAgent);
+            continue;
+          }
+        }
         await safeDisposeAgent(sdkAgent);
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
