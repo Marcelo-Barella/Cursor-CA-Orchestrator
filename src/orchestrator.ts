@@ -726,20 +726,23 @@ async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
 }
 
 async function resolveWorkerStreamInfo(ctx: LoopContext, task: TaskConfig): Promise<WorkerStreamInfo> {
-  const streamLaunch = { ...EMPTY_WORKER_STREAM_INFO };
   try {
     const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
     const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
-    streamLaunch.repoUrl = repoUrl;
-    streamLaunch.ref = ref;
-    streamLaunch.planRef = planRefForConsolidatedRunLine(task, ref);
-    streamLaunch.runLine =
-      Boolean(streamLaunch.planRef) &&
-      !task.create_repo &&
-      ctx.config.target.branch_layout === "consolidated" &&
-      ctx.config.target.consolidate_prs;
-  } catch {}
-  return streamLaunch;
+    const planRef = planRefForConsolidatedRunLine(task, ref);
+    return {
+      repoUrl,
+      ref,
+      planRef,
+      runLine:
+        Boolean(planRef) &&
+        !task.create_repo &&
+        ctx.config.target.branch_layout === "consolidated" &&
+        ctx.config.target.consolidate_prs,
+    };
+  } catch {
+    return EMPTY_WORKER_STREAM_INFO;
+  }
 }
 
 async function launchWorkerAgent(
@@ -1596,10 +1599,10 @@ async function applyTaskPlanContent(
     }
   }
   config.tasks = parsedTasks;
-  const canon = canonicalizeOrchestratorConfig(config);
-  config.repositories = canon.repositories;
-  config.tasks = canon.tasks;
-  config.delegation_map = canon.delegation_map;
+  const canonicalConfig = canonicalizeOrchestratorConfig(config);
+  config.repositories = canonicalConfig.repositories;
+  config.tasks = canonicalConfig.tasks;
+  config.delegation_map = canonicalConfig.delegation_map;
   await repoStore.writeFile(runId, "config.yaml", toYaml(config));
   return parsedTasks.length;
 }
