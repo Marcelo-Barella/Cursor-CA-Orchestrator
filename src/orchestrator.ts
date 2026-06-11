@@ -721,14 +721,6 @@ function createWakeup(): { resolve: () => void; promise: Promise<void> } {
   return { resolve: resolveFn, promise };
 }
 
-async function syncStopRequestedFromRepo(ctx: LoopContext): Promise<boolean> {
-  if (ctx.stopRequested.value) return true;
-  const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json").catch(() => "");
-  if (!stopContent) return false;
-  ctx.stopRequested.value = true;
-  return true;
-}
-
 async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   try {
     await agent[Symbol.asyncDispose]();
@@ -860,11 +852,6 @@ async function launchWorkerAgent(
     );
     return;
   }
-  agent.agent_id = sdkAgent.agentId;
-  agent.status = "launching";
-  agent.started_at = nowIso();
-  agent.branch_name = workerBranch;
-  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
   let run: SdkRun;
   try {
     run = await sdkAgent.send(prompt);
@@ -889,6 +876,10 @@ async function launchWorkerAgent(
     );
     return;
   }
+  agent.agent_id = sdkAgent.agentId;
+  agent.status = "launching";
+  agent.started_at = nowIso();
+  agent.branch_name = workerBranch;
   await appendEvent(
     ctx.repoStore,
     ctx.runId,
@@ -1103,12 +1094,11 @@ async function runWorkerStream(
 
   const finalizedAt = nowIso();
 
-  if (await syncStopRequestedFromRepo(ctx)) {
+  if (ctx.stopRequested.value) {
     agent.status = "stopped";
     agent.finished_at = finalizedAt;
     ctx.activeWorkers.delete(taskId);
     await safeDisposeAgent(sdkAgent);
-    markStateDirty(ctx);
     return;
   }
 
@@ -1220,30 +1210,8 @@ async function runWorkerStream(
 }
 
 async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<void> {
-  const prompt = `Your previous attempt was blocked. Reason: ${agent.blocked_reason}. Please try a different approach or report blocked again with a specific reason. Remember to write the final JSON to cursor-orch-output.json and include it as a fenced \`\`\`json block in your last assistant message.`;
-  const existingHandle = ctx.activeWorkers.get(agent.task_id);
-  let sdkAgent: SdkAgent;
-  if (existingHandle) {
-    sdkAgent = existingHandle.sdkAgent;
-  } else if (agent.agent_id) {
-    try {
-      const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
-        apiKey: ctx.apiKey,
-        model: toSdkModelSelection(ctx.config.model),
-      };
-      const mcpServers = nonEmptyMcpServers(ctx.config.mcp_servers);
-      if (mcpServers) {
-        resumeOptions.mcpServers = mcpServers;
-      }
-      sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
-    } catch (error) {
-      agent.status = "failed";
-      agent.finished_at = nowIso();
-      agent.summary = `Blocked retry resume failed: ${error instanceof Error ? error.message : String(error)}`;
-      markStateDirty(ctx);
-      return;
-    }
-  } else {
+  const handle = ctx.activeWorkers.get(agent.task_id);
+  if (!handle) {
     agent.blocked_retry_count += 1;
     agent.status = "pending";
     agent.blocked_reason = null;
@@ -1252,18 +1220,17 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
     markStateDirty(ctx);
     return;
   }
+  const prompt = `Your previous attempt was blocked. Reason: ${agent.blocked_reason}. Please try a different approach or report blocked again with a specific reason. Remember to write the final JSON to cursor-orch-output.json and include it as a fenced \`\`\`json block in your last assistant message.`;
   let run: SdkRun;
   try {
-    run = await sdkAgent.send(prompt);
+    run = await handle.sdkAgent.send(prompt);
   } catch (error) {
     console.error(`Failed to send follow-up for blocked task ${agent.task_id}: ${error instanceof Error ? error.message : String(error)}`);
     agent.status = "failed";
     agent.finished_at = nowIso();
     agent.summary = agent.blocked_reason ?? "Blocked; follow-up dispatch failed";
-    if (existingHandle) {
-      ctx.activeWorkers.delete(agent.task_id);
-    }
-    await safeDisposeAgent(sdkAgent);
+    ctx.activeWorkers.delete(agent.task_id);
+    await safeDisposeAgent(handle.sdkAgent);
     await cascadeFailures(ctx.state, agent.task_id, ctx.graph, ctx.repoStore, ctx.runId);
     markStateDirty(ctx);
     return;
@@ -1272,10 +1239,14 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
   agent.status = "running";
   agent.blocked_reason = null;
   agent.blocked_since = null;
-  await ctx.repoStore.deleteFile(ctx.runId, `agent-${agent.task_id}.json`).catch(() => {});
+  try {
+    await ctx.repoStore.deleteFile(ctx.runId, `agent-${agent.task_id}.json`);
+  } catch {
+    /* advisory */
+  }
   const nextHandle: WorkerHandle = {
     taskId: agent.task_id,
-    sdkAgent,
+    sdkAgent: handle.sdkAgent,
     run,
     assistantMessages: [],
     transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId: agent.task_id }),
@@ -1338,7 +1309,6 @@ async function handleBlockedTasks(ctx: LoopContext): Promise<void> {
 async function launchReadyTasks(ctx: LoopContext): Promise<void> {
   const taskMap = Object.fromEntries(ctx.config.tasks.map((t) => [t.id, t]));
   for (;;) {
-    if (await syncStopRequestedFromRepo(ctx)) return;
     const readyTasks = getReadyTasks(ctx.graph, ctx.state.agents);
     const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks).filter(
       (taskId) => !ctx.activeWorkers.has(taskId),
@@ -1358,7 +1328,9 @@ async function launchReadyTasks(ctx: LoopContext): Promise<void> {
 }
 
 async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
-  if (!ctx.stopRequested.value && !(await syncStopRequestedFromRepo(ctx))) return false;
+  const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+  if (!stopContent) return false;
+  ctx.stopRequested.value = true;
   console.info("Stop requested, halting orchestration");
   for (const [taskId, handle] of ctx.activeWorkers.entries()) {
     const agent = ctx.state.agents[taskId];
@@ -1825,7 +1797,14 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
     return;
   }
   ctx.wakeup = createWakeup();
-  await syncStopRequestedFromRepo(ctx);
+  try {
+    const existing = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+    if (existing) {
+      ctx.stopRequested.value = true;
+    }
+  } catch {
+    /* ignore; the poller will retry */
+  }
   const pollController = new AbortController();
   const stopPoller = (async () => {
     while (!ctx.stopRequested.value) {
@@ -1834,16 +1813,32 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
       } catch {
         return;
       }
-      if (await syncStopRequestedFromRepo(ctx)) {
-        triggerWakeup(ctx);
-        return;
+      if (ctx.stopRequested.value) return;
+      try {
+        const content = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+        if (content) {
+          ctx.stopRequested.value = true;
+          triggerWakeup(ctx);
+          return;
+        }
+      } catch {
+        /* retry next tick */
       }
     }
   })();
 
   try {
     while (true) {
-      await syncStopRequestedFromRepo(ctx);
+      if (!ctx.stopRequested.value) {
+        try {
+          const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+          if (stopContent) {
+            ctx.stopRequested.value = true;
+          }
+        } catch {
+          /* poller will retry */
+        }
+      }
       if (ctx.stopRequested.value) {
         await checkStopRequested(ctx);
         return;
@@ -1939,18 +1934,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    const lateStateContent = await readStateJsonContent(repoStore, runId);
-    await refuseResumeWithEmptyState(repoStore, runId, lateStateContent);
-    if (!lateStateContent.trim()) {
-      state = createInitialState(config, runId);
-    } else {
-      try {
-        state = deserialize(lateStateContent);
-      } catch (parseErr) {
-        const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
-        throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
-      }
-    }
+    state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
   } else {
