@@ -1612,7 +1612,7 @@ async function tryReuseExistingPlan(
   runId: string,
   repoStore: RepoStoreClient,
   ghToken: string,
-): Promise<{ completedDetail: string } | null> {
+): Promise<string | null> {
   const planContent = await repoStore.readFile(runId, "task-plan.json");
   if (!planContent) {
     return null;
@@ -1628,7 +1628,7 @@ async function tryReuseExistingPlan(
     config.tasks = canonReuse.tasks;
     config.delegation_map = canonReuse.delegation_map;
     await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-    return { completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)` };
+    return `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`;
   } catch {
     return null;
   }
@@ -1952,9 +1952,9 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningOutcome: PlanningOutcome = { kind: "none" };
   if (config.prompt && !config.tasks.length) {
-    const reused = await tryReuseExistingPlan(config, runId, repoStore, ghToken);
-    if (reused) {
-      planningOutcome = { kind: "ok", emitStarted: false, completedDetail: reused.completedDetail };
+    const reusedDetail = await tryReuseExistingPlan(config, runId, repoStore, ghToken);
+    if (reusedDetail) {
+      planningOutcome = { kind: "ok", emitStarted: false, completedDetail: reusedDetail };
     } else {
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
