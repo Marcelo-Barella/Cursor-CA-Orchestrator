@@ -1342,9 +1342,7 @@ async function launchReadyTasks(ctx: LoopContext): Promise<void> {
 }
 
 async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
-  const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-  if (!stopContent) return false;
-  ctx.stopRequested.value = true;
+  if (!ctx.stopRequested.value) return false;
   console.info("Stop requested, halting orchestration");
   for (const [taskId, handle] of ctx.activeWorkers.entries()) {
     const agent = ctx.state.agents[taskId];
