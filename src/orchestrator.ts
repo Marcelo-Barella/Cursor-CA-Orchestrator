@@ -95,9 +95,7 @@ async function handleTaskFailureWithOptionalRetry(
     resetAgentToSchedulableForRetry(agent);
     try {
       await ctx.repoStore.deleteFile(ctx.runId, `agent-${taskId}.json`);
-    } catch {
-      /* advisory */
-    }
+    } catch {}
     await appendEvent(
       ctx.repoStore,
       ctx.runId,
@@ -177,10 +175,6 @@ function toTaskIdList(value: unknown): string[] {
     out.push(id);
   }
   return out;
-}
-
-function taskIdsFromConfig(config: OrchestratorConfig): Set<string> {
-  return new Set(config.tasks.map((t) => t.id));
 }
 
 export function extractDelegationPhases(config: OrchestratorConfig, knownTaskIds: Set<string>): DelegationPhase[] | null {
@@ -391,7 +385,7 @@ function buildDelegationTaskIndex(phases: DelegationPhase[]): {
 }
 
 export function filterEligibleReadyTasks(state: OrchestrationState, config: OrchestratorConfig, readyTasks: string[]): string[] {
-  const phases = extractDelegationPhases(config, taskIdsFromConfig(config));
+  const phases = extractDelegationPhases(config, new Set(config.tasks.map((t) => t.id)));
   if (!phases) return readyTasks;
   const { mappedTaskIds, taskLocation } = buildDelegationTaskIndex(phases);
   const { phaseIndex, groupIndex } = normalizeDelegationCursors(state, phases);
@@ -725,9 +719,27 @@ function createWakeup(): { resolve: () => void; promise: Promise<void> } {
 async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   try {
     await agent[Symbol.asyncDispose]();
-  } catch {
-    /* advisory close */
-  }
+  } catch {}
+}
+
+async function resolveWorkerStreamInfo(
+  ctx: LoopContext,
+  task: TaskConfig,
+): Promise<{ repoUrl: string; ref: string; runLine: boolean; planRef: string | null }> {
+  const info = { repoUrl: "", ref: "", runLine: false, planRef: null as string | null };
+  try {
+    const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+    const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
+    info.repoUrl = repoUrl;
+    info.ref = ref;
+    info.planRef = planRefForConsolidatedRunLine(task, ref);
+    info.runLine =
+      Boolean(info.planRef) &&
+      !task.create_repo &&
+      ctx.config.target.branch_layout === "consolidated" &&
+      ctx.config.target.consolidate_prs;
+  } catch {}
+  return info;
 }
 
 async function launchWorkerAgent(
@@ -945,9 +957,7 @@ async function runWorkerStream(
               payload: { status: event.status, ...(event.message ? { message: event.message } : {}) },
             }),
           );
-        } catch {
-          /* ignore event append failures */
-        }
+        } catch {}
       },
       onToolCall: async (event) => {
         if (event.status === "running") return;
@@ -966,9 +976,7 @@ async function runWorkerStream(
               },
             ),
           );
-        } catch {
-          /* ignore */
-        }
+        } catch {}
       },
       onError: (err) => {
         streamError = err;
@@ -979,9 +987,7 @@ async function runWorkerStream(
   }
   try {
     await handle.transcript.flush();
-  } catch {
-    /* flush failures are non-fatal */
-  }
+  } catch {}
 
   let result: { status: "finished" | "error" | "cancelled" | "unknown"; durationMs?: number; git?: { branch?: string; prUrl?: string }; model?: string; resultText?: string } = { status: "unknown" };
   try {
@@ -1005,9 +1011,7 @@ async function runWorkerStream(
       if (artifact.value !== null && normalizeWorkerPayload(artifact.value, taskId) !== null) {
         return { raw: artifact.value, source: "artifact" };
       }
-    } catch {
-      /* handled as null below */
-    }
+    } catch {}
     const fallback = parseAssistantJsonFromMessages(handle.assistantMessages);
     if (fallback !== null) {
       return { raw: fallback, source: "assistant" };
@@ -1021,9 +1025,7 @@ async function runWorkerStream(
             return { raw: parsed, source: "conversation" };
           }
         }
-      } catch {
-        /* conversation fallback is best-effort */
-      }
+      } catch {}
     }
     return { raw: null, source: "none" };
   };
@@ -1242,9 +1244,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
   agent.blocked_since = null;
   try {
     await ctx.repoStore.deleteFile(ctx.runId, `agent-${agent.task_id}.json`);
-  } catch {
-    /* advisory */
-  }
+  } catch {}
   const nextHandle: WorkerHandle = {
     taskId: agent.task_id,
     sdkAgent: handle.sdkAgent,
@@ -1253,29 +1253,8 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
     transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId: agent.task_id }),
     done: Promise.resolve(),
   };
-  const info = {
-    repoUrl: "",
-    ref: "",
-    runLine: false,
-    planRef: null as string | null,
-  };
   const task = ctx.config.tasks.find((t) => t.id === agent.task_id);
-  if (task) {
-    try {
-      const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
-      const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
-      info.repoUrl = repoUrl;
-      info.ref = ref;
-      info.planRef = planRefForConsolidatedRunLine(task, ref);
-      info.runLine =
-        Boolean(info.planRef) &&
-        !task.create_repo &&
-        ctx.config.target.branch_layout === "consolidated" &&
-        ctx.config.target.consolidate_prs;
-    } catch {
-      /* fall through with empty info; branch_name will not update via run-line logic */
-    }
-  }
+  const info = task ? await resolveWorkerStreamInfo(ctx, task) : { repoUrl: "", ref: "", runLine: false, planRef: null };
   nextHandle.done = runWorkerStream(ctx, nextHandle, info);
   ctx.activeWorkers.set(agent.task_id, nextHandle);
   await appendEvent(ctx.repoStore, ctx.runId, makeEvent("task_retried", `Task ${agent.task_id} retried`, agent.task_id));
@@ -1766,23 +1745,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
         done: Promise.resolve(),
       };
       const task = ctx.config.tasks.find((t) => t.id === taskId);
-      const info = { repoUrl: "", ref: "", runLine: false, planRef: null as string | null };
-      if (task) {
-        try {
-          const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
-          const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
-          info.repoUrl = repoUrl;
-          info.ref = ref;
-          info.planRef = planRefForConsolidatedRunLine(task, ref);
-          info.runLine =
-            Boolean(info.planRef) &&
-            !task.create_repo &&
-            ctx.config.target.branch_layout === "consolidated" &&
-            ctx.config.target.consolidate_prs;
-        } catch {
-          /* ignore */
-        }
-      }
+      const info = task ? await resolveWorkerStreamInfo(ctx, task) : { repoUrl: "", ref: "", runLine: false, planRef: null };
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
@@ -1804,9 +1767,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
     if (existing) {
       ctx.stopRequested.value = true;
     }
-  } catch {
-    /* ignore; the poller will retry */
-  }
+  } catch {}
   const pollController = new AbortController();
   const stopPoller = (async () => {
     while (!ctx.stopRequested.value) {
@@ -1823,9 +1784,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
           triggerWakeup(ctx);
           return;
         }
-      } catch {
-        /* retry next tick */
-      }
+      } catch {}
     }
   })();
 
@@ -1837,9 +1796,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
           if (stopContent) {
             ctx.stopRequested.value = true;
           }
-        } catch {
-          /* poller will retry */
-        }
+        } catch {}
       }
       if (ctx.stopRequested.value) {
         await checkStopRequested(ctx);
@@ -1929,12 +1886,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    const eventsContent = await repoStore.readFile(runId, "events.jsonl");
-    if (eventsContent.trim()) {
-      throw new Error(
-        `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
-      );
-    }
     state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
