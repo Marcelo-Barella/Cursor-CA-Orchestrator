@@ -706,6 +706,29 @@ describe("runOrchestration validation gate", () => {
     await expect(runOrchestration("run-gate-1", agentClient, repoStore)).rejects.toThrow(/unknown task/);
     expect(writeCount).toBe(0);
   });
+
+  it("retries state.json reads and propagates the error when all attempts fail", async () => {
+    const config = createConfig(["a"]);
+    let stateReadAttempts = 0;
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") {
+          stateReadAttempts += 1;
+          throw new Error("transient repo read failure");
+        }
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
+    await expect(runOrchestration("run-state-read-exhausted", agentClient, repoStore)).rejects.toThrow(
+      /transient repo read failure/,
+    );
+    expect(stateReadAttempts).toBe(3);
+  });
 });
 
 describe("pickReattachRun", () => {

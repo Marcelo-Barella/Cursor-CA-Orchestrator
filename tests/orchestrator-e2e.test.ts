@@ -926,6 +926,85 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("propagates state.json read errors after retry exhaustion", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const { store } = createTransientStateReadStore({ "config.yaml": toYaml(config) }, 3);
+    await expect(runOrchestration("run-state-read-exhausted", fake, store)).rejects.toThrow(
+      /transient repo read failure/,
+    );
+    expect(fake.launches).toHaveLength(0);
+  });
+
+  it("resumes an in-progress task run after transient state.json read failures", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-resume-transient/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const state = createInitialState(config, "run-resume-transient");
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    const { store, files } = createTransientStateReadStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+    await runOrchestration("run-resume-transient", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("rejects corrupt state.json after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const { store } = createTransientStateReadStore(
+      {
+        "config.yaml": toYaml(config),
+        "state.json": "{not-json",
+      },
+      1,
+    );
+    await expect(runOrchestration("run-corrupt-transient", new FakeAgentClient(), store)).rejects.toThrow(
+      /Invalid state\.json/,
+    );
+  });
+
+  it("rejects empty state.json when events exist after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const { store } = createTransientStateReadStore(
+      {
+        "config.yaml": toYaml(config),
+        "state.json": "",
+        "events.jsonl": `${JSON.stringify({
+          timestamp: "2026-06-01T00:00:00.000Z",
+          event_type: "orchestration_started",
+          task_id: null,
+          detail: "Orchestration started",
+        })}\n`,
+      },
+      1,
+    );
+    await expect(runOrchestration("run-empty-transient", new FakeAgentClient(), store)).rejects.toThrow(
+      /refusing to reset orchestration progress/,
+    );
+  });
+
   it("does not launch planning when resuming a stopped prompt-only run", async () => {
     const config = promptOnlyConfig();
     const fake = new FakeAgentClient({
