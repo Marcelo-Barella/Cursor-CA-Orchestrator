@@ -1025,6 +1025,42 @@ describe("runOrchestration with SDK (happy path)", () => {
     }
   });
 
+  it("rejects a cached task-plan that violates prompt constraints instead of reusing it", async () => {
+    const config: OrchestratorConfig = {
+      ...promptOnlyConfig(),
+      prompt: "Every route must use your translation method.",
+    };
+    const compliantPlan = promptOnlyTaskPlan("Every route must use your translation method in handlers.");
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockImplementation(async (repoStore, runId) => {
+      await repoStore.writeFile(runId, "task-plan.json", compliantPlan);
+      return compliantPlan;
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-reuse-constraint"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": promptOnlyTaskPlan("Planned work without constraint coverage."),
+    });
+    try {
+      await runOrchestration("run-reuse-constraint", fake, store);
+      expect(fake.launches).toHaveLength(2);
+      expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+      expect(fake.launches[1]!.prompt).toContain("Every route must use your translation method in handlers.");
+      const events = eventsFromFiles(files);
+      expect(events.map((event) => event.event_type)).toContain("planning_completed");
+      expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
   it("re-plans on retry after constraint validation rejects the planner output", async () => {
     const config: OrchestratorConfig = {
       ...promptOnlyConfig(),

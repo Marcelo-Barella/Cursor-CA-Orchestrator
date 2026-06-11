@@ -1602,27 +1602,40 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
+function shouldDeleteStaleTaskPlan(error: unknown): boolean {
+  if (error instanceof SyntaxError) return true;
+  const message = String(error);
+  return (
+    message.includes("Plan constraint validation failed") ||
+    message.includes("Task plan must be") ||
+    message.includes("'tasks' must be") ||
+    message.includes("Each task must be") ||
+    message.includes("Task missing required field") ||
+    message.includes("Duplicate task ID") ||
+    message.includes("depends on unknown task") ||
+    message.includes("Delegation map") ||
+    message.includes("delegation_map")
+  );
+}
+
 async function applyTaskPlanToConfig(
   config: OrchestratorConfig,
   runId: string,
   planContent: string,
   ghUser: string,
   repoStore: RepoStoreClient,
-  validateConstraints: boolean,
 ): Promise<void> {
   const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
   config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
   const parsedTasks = parseTaskPlan(planContent, config);
-  if (validateConstraints) {
-    const constraints = extractConstraintsFromPrompt(config.prompt);
-    if (constraints.length > 0) {
-      const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!constraintValidation.valid) {
-        const detail = constraintValidation.violations
-          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-          .join("; ");
-        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-      }
+  const constraints = extractConstraintsFromPrompt(config.prompt);
+  if (constraints.length > 0) {
+    const constraintValidation = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+    if (!constraintValidation.valid) {
+      const detail = constraintValidation.violations
+        .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+        .join("; ");
+      throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
     }
   }
   config.tasks = parsedTasks;
@@ -1677,13 +1690,15 @@ async function runPlanningPhase(
     if (!planContent) {
       throw new Error("Timed out waiting for task plan from planner agent");
     }
-    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, true);
+    await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore);
     return { ok: true };
   } catch (exc) {
-    try {
-      await repoStore.deleteFile(runId, "task-plan.json");
-    } catch {
-      /* advisory */
+    if (shouldDeleteStaleTaskPlan(exc)) {
+      try {
+        await repoStore.deleteFile(runId, "task-plan.json");
+      } catch {
+        /* advisory */
+      }
     }
     return { ok: false, error: String(exc) };
   }
@@ -1913,13 +1928,24 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
+    let deleteStaleCachedPlan = false;
     if (planContent) {
       try {
         const ghUser = await resolveGithubUsername(ghToken);
-        await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false);
+        await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore);
         planningOk = true;
         planningSource = "reused";
+      } catch (err) {
+        if (shouldDeleteStaleTaskPlan(err)) {
+          deleteStaleCachedPlan = true;
+        }
+      }
+    }
+    if (!planningOk && deleteStaleCachedPlan) {
+      try {
+        await repoStore.deleteFile(runId, "task-plan.json");
       } catch {
+        /* advisory */
       }
     }
     if (!planningOk) {
