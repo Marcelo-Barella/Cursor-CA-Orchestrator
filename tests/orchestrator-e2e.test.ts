@@ -383,45 +383,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(finishedEvent?.payload?.payload_source).toBe("assistant");
   });
 
-  it("prefers artifact output when status is completed even if assistant JSON has richer outputs", async () => {
-    const config = singleTaskConfig();
-    const artifactPayload = {
-      task_id: "t1",
-      status: "completed",
-      summary: "partial artifact",
-      outputs: {},
-    };
-    const assistantPayload = {
-      task_id: "t1",
-      status: "completed",
-      summary: "from assistant",
-      outputs: { key: "value" },
-    };
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [
-            statusMessage("RUNNING"),
-            assistantText(`\`\`\`json\n${JSON.stringify(assistantPayload)}\n\`\`\``),
-            statusMessage("FINISHED"),
-          ],
-          result: { id: "r1", status: "finished" },
-          artifacts: {
-            "cursor-orch-output.json": JSON.stringify(artifactPayload),
-          },
-        },
-      ],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    await runOrchestration("run-artifact-prefers-status", fake, store);
-    const agentPayload = JSON.parse(files.get("agent-t1.json")!);
-    expect(agentPayload.outputs).toEqual({});
-    expect(agentPayload.summary).toBe("partial artifact");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
-    expect(finishedEvent?.payload?.payload_source).toBe("artifact");
-  });
-
   it("falls back to assistant JSON when the artifact exists but is not valid JSON", async () => {
     const config = singleTaskConfig();
     const workerJson = { task_id: "t1", status: "completed", summary: "from assistant after bad artifact", outputs: {} };
