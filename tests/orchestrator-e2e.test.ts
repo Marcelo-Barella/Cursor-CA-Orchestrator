@@ -938,6 +938,44 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("clears stale planning failure state when a retry succeeds and completes", async () => {
+    const config = promptOnlyConfig();
+    const plan = promptOnlyTaskPlan();
+    let attempt = 0;
+    const makeClient = () => {
+      attempt += 1;
+      if (attempt === 1) {
+        return new FakeAgentClient({ defaultScripts: [{ sendThrows: new Error("planner timeout") }] });
+      }
+      return new FakeAgentClient({
+        defaultScripts: [
+          {
+            events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+            result: { id: "r-plan", status: "finished", result: "" },
+          },
+          completedWorkerScript("t1", "run-plan-retry-ok"),
+        ],
+      });
+    };
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockImplementation(async () => {
+      if (attempt >= 2) return plan;
+      return null;
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    try {
+      await expect(runOrchestration("run-plan-retry-ok", makeClient(), store)).rejects.toThrow(/planner timeout/);
+      await runOrchestration("run-plan-retry-ok", makeClient(), store);
+      const state = JSON.parse(files.get("state.json")!);
+      expect(state.status).toBe("completed");
+      expect(state.error).toBeNull();
+      expect(state.main_agent?.status).toBe("running");
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
   it("defers planning_failed until after state init so a failed plan can be retried", async () => {
     const config = promptOnlyConfig();
     const failingPlanner = () =>

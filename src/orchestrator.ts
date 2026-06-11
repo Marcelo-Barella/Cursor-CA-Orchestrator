@@ -1569,6 +1569,7 @@ async function checkCompletion(ctx: LoopContext): Promise<boolean> {
     await maybeFinalizePullRequests(ctx.state, ctx.config, ctx.graph, ctx.runId, ctx.repoStore);
   }
   ctx.state.status = "completed";
+  ctx.state.error = null;
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
   await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await appendEvent(
@@ -2005,6 +2006,16 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     }
     await syncToRepo(repoStore, runId, state);
     throw new Error(failureMessage);
+  }
+
+  if (planningRan && planningOk && (state.status === "failed" || state.error !== null)) {
+    state.status = "running";
+    state.error = null;
+    if (state.main_agent?.status === "failed") {
+      state.main_agent.status = "running";
+      state.main_agent.finished_at = null;
+    }
+    await syncToRepo(repoStore, runId, state);
   }
 
   const graph = buildDependencyGraph(config.tasks);
