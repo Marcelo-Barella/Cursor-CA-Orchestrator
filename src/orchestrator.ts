@@ -260,6 +260,13 @@ function isTerminalStatus(status: string): boolean {
 
 const IN_FLIGHT_LAUNCH_TERMINAL_EVENTS = new Set(["task_finished", "task_failed", "task_stopped"]);
 
+export function agentIdFromTaskLaunchedEvent(event: OrchestrationEvent): string | null {
+  const fromPayload = event.payload.agent_id?.trim();
+  if (fromPayload) return fromPayload;
+  const match = /^Launched\s+\S+\s+\(([^)]+)\)\s*$/.exec(event.detail);
+  return match?.[1]?.trim() ?? null;
+}
+
 export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   if (runs.length === 0) return null;
   const running = runs.find((run) => run.status === "running");
@@ -293,7 +300,7 @@ export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, e
       }
     }
     if (!lastLaunch) continue;
-    const agentId = lastLaunch.payload.agent_id?.trim();
+    const agentId = agentIdFromTaskLaunchedEvent(lastLaunch);
     if (!agentId) continue;
     agent.agent_id = agentId;
     agent.status = "launching";

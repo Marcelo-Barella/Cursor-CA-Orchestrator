@@ -10,6 +10,7 @@ import {
   filterEligibleReadyTasks,
   getBlockedTasks,
   getReadyTasks,
+  agentIdFromTaskLaunchedEvent,
   pickReattachRun,
   planRefForConsolidatedRunLine,
   reconcileInFlightLaunchesFromEvents,
@@ -682,6 +683,36 @@ describe("pickReattachRun", () => {
   });
 });
 
+describe("agentIdFromTaskLaunchedEvent", () => {
+  it("reads agent_id from payload when present", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 (from-detail)",
+      payload: { agent_id: "from-payload" },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBe("from-payload");
+  });
+
+  it("falls back to detail when legacy events omit payload agent_id", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 (legacy-agent-7)",
+      payload: { run_id: "run-legacy" },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBe("legacy-agent-7");
+  });
+});
+
 describe("reconcileInFlightLaunchesFromEvents", () => {
   it("restores agent_id for pending tasks with a later task_launched event", () => {
     const config = createConfig(["t1"]);
@@ -708,6 +739,31 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     expect(state.agents.t1!.agent_id).toBe("agent-live-9");
     expect(state.agents.t1!.status).toBe("launching");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover/t1");
+  });
+
+  it("restores agent_id from legacy task_launched detail when payload omits agent_id", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-legacy");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (legacy-agent-9)",
+        payload: {
+          run_id: "run-9",
+          repository: "https://github.com/acme/svc",
+          ref: "main",
+          branch: "cursor-orch/run-recover-legacy/t1",
+        },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(state.agents.t1!.agent_id).toBe("legacy-agent-9");
+    expect(state.agents.t1!.status).toBe("launching");
   });
 
   it("ignores stale launches cleared by a terminal task event", () => {
