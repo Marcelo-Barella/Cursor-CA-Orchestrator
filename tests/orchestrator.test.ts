@@ -593,6 +593,7 @@ describe("runOrchestration validation gate", () => {
           stateReadCount += 1;
           return stateReadCount === 1 ? "" : serialize(persisted);
         }
+        if (filename === "events.jsonl") return "";
         throw new Error(`unexpected read: ${filename}`);
       },
       async writeFile(): Promise<void> {},
