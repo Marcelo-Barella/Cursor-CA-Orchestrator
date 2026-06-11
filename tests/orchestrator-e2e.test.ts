@@ -926,37 +926,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
-  it("skips planning when stopped state loads after an empty pre-planning read (prompt-only)", async () => {
-    const config = promptOnlyConfig();
-    const runId = "run-stopped-empty-first-read";
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r1", status: "finished", result: "" },
-        },
-      ],
-    });
-    const stoppedState = createInitialState(config, runId);
-    stoppedState.status = "stopped";
-    let stateReadCount = 0;
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(stoppedState),
-    });
-    const baseReadFile = store.readFile.bind(store);
-    store.readFile = async (id: string, filename: string) => {
-      if (filename === "state.json") {
-        stateReadCount += 1;
-        return stateReadCount === 1 ? "" : baseReadFile(id, filename);
-      }
-      return baseReadFile(id, filename);
-    };
-    await runOrchestration(runId, fake, store);
-    expect(fake.launches).toHaveLength(0);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
-  });
-
   it("propagates state.json read errors after retry exhaustion", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({

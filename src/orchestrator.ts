@@ -1719,13 +1719,6 @@ async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): 
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-async function rereadStateJsonIfEmpty(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<string> {
-  if (stateContent.trim()) {
-    return stateContent;
-  }
-  return repoStore.readFile(runId, "state.json");
-}
-
 async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
   if (stateContent.trim()) {
     return;
@@ -1879,8 +1872,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const apiKey = process.env.CURSOR_API_KEY ?? "";
   const ghToken = process.env.GH_TOKEN ?? "";
 
-  let stateContent = await readStateJsonContent(repoStore, runId);
-  stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
+  const stateContent = await readStateJsonContent(repoStore, runId);
   await refuseResumeWithEmptyState(repoStore, runId, stateContent);
   let parsedState: OrchestrationState | null = null;
   let stateParseDetail: string | null = null;
@@ -1942,18 +1934,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
-    await refuseResumeWithEmptyState(repoStore, runId, stateContent);
-    if (!stateContent.trim()) {
-      state = createInitialState(config, runId);
-    } else {
-      try {
-        state = deserialize(stateContent);
-      } catch (parseErr) {
-        const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
-        throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
-      }
-    }
+    state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
   } else {
