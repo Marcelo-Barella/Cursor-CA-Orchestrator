@@ -85,6 +85,12 @@ export function installGithubBranchPrepMock(): void {
         headers: { "Content-Type": "application/json" },
       });
     }
+    if (url === "https://api.github.com/user") {
+      return new Response(JSON.stringify({ login: "acme-user" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     return unmockedFetch(input, init);
   }) as typeof fetch;
 }
