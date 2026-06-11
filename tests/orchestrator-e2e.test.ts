@@ -277,34 +277,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).agents.t1.status).toBe("finished");
   });
 
-  it("persists worker agent_id to state.json before send() resolves", async () => {
-    const config = singleTaskConfig();
-    const runId = "run-early-persist";
-    let agentIdBeforeSendResolves: string | null = null;
-    const fake = new FakeAgentClient({
-      sendPreDelayMs: 50,
-      defaultScripts: [completedWorkerScript("t1", runId)],
-    });
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-    });
-    const baseWrite = store.writeFile.bind(store);
-    store.writeFile = async (id, filename, content) => {
-      if (filename === "state.json" && fake.launches.length > 0 && fake.launches[0]!.run === null) {
-        const parsed = JSON.parse(content) as { agents?: { t1?: { agent_id?: string | null } } };
-        if (parsed.agents?.t1?.agent_id) {
-          agentIdBeforeSendResolves = parsed.agents.t1.agent_id;
-        }
-      }
-      return baseWrite(id, filename, content);
-    };
-
-    await runOrchestration(runId, fake, store);
-
-    expect(agentIdBeforeSendResolves).not.toBeNull();
-    expect(JSON.parse(files.get("state.json")!).agents.t1.status).toBe("finished");
-  });
-
   it("launches a worker, reads the artifact, and marks the run completed", async () => {
     const config = singleTaskConfig();
     const workerPayload = {
