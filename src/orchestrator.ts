@@ -1600,6 +1600,30 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
+async function tryReuseExistingTaskPlan(
+  config: OrchestratorConfig,
+  runId: string,
+  planContent: string,
+  ghToken: string,
+  repoStore: RepoStoreClient,
+): Promise<string | null> {
+  try {
+    const ghUser = await resolveGithubUsername(ghToken);
+    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+    const parsedTasks = parseTaskPlan(planContent, config);
+    config.tasks = parsedTasks;
+    const canonReuse = canonicalizeOrchestratorConfig(config);
+    config.repositories = canonReuse.repositories;
+    config.tasks = canonReuse.tasks;
+    config.delegation_map = canonReuse.delegation_map;
+    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+    return `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`;
+  } catch {
+    return null;
+  }
+}
+
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
@@ -1889,36 +1913,22 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningRan = false;
   let planningOk = false;
-  let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
+  let planningCompletedDetail: string | null = null;
+  let emitPlanningStarted = false;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      try {
-        const ghUser = await resolveGithubUsername(ghToken);
-        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-        config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-        const parsedTasks = parseTaskPlan(planContent, config);
-        config.tasks = parsedTasks;
-        const canonReuse = canonicalizeOrchestratorConfig(config);
-        config.repositories = canonReuse.repositories;
-        config.tasks = canonReuse.tasks;
-        config.delegation_map = canonReuse.delegation_map;
-        await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-        planningEvents = {
-          emitStarted: false,
-          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
-        };
+      planningCompletedDetail = await tryReuseExistingTaskPlan(config, runId, planContent, ghToken, repoStore);
+      if (planningCompletedDetail) {
         planningOk = true;
-      } catch {}
+      }
     }
     if (!planningOk) {
       planningOk = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningOk) {
-        planningEvents = {
-          emitStarted: true,
-          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
-        };
+        emitPlanningStarted = true;
+        planningCompletedDetail = `Planning completed: ${config.tasks.length} tasks`;
       }
     }
   }
@@ -1959,8 +1969,8 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
-    if (planningOk && planningEvents) {
-      if (planningEvents.emitStarted) {
+    if (planningOk && planningCompletedDetail) {
+      if (emitPlanningStarted) {
         await appendEvent(
           repoStore,
           runId,
@@ -1970,7 +1980,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       await appendEvent(
         repoStore,
         runId,
-        makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+        makeEvent("planning_completed", planningCompletedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
     }
     await syncToRepo(repoStore, runId, state);
