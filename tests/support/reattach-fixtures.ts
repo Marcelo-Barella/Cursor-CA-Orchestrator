@@ -73,7 +73,7 @@ export function singleTaskConfig(): OrchestratorConfig {
       },
     ],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-    bootstrap_repo_name: "b",
+    bootstrap_repo_name: "cursor-orch-bootstrap",
   };
 }
 
@@ -103,6 +103,12 @@ export function installGithubBranchPrepMock(): void {
     if (url.includes("/git/refs") && init?.method === "POST") {
       return new Response(JSON.stringify({ ref: "refs/heads/x" }), {
         status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "https://api.github.com/user") {
+      return new Response(JSON.stringify({ login: "acme-user" }), {
+        status: 200,
         headers: { "Content-Type": "application/json" },
       });
     }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
@@ -13,33 +13,11 @@ import {
 import {
   createInMemoryRepoStore,
   createTransientStateReadStore,
+  installGithubBranchPrepMock,
+  restoreGithubBranchPrepMock,
   runGit,
+  singleTaskConfig,
 } from "./support/reattach-fixtures.js";
-
-function singleTaskConfig(): OrchestratorConfig {
-  return {
-    name: "demo",
-    model: { id: "composer-2" },
-    prompt: "",
-    repositories: {
-      svc: { url: "https://github.com/acme/svc", ref: "main" },
-    },
-    tasks: [
-      {
-        id: "t1",
-        repo: "svc",
-        prompt: "Do the thing.",
-        model: null,
-        depends_on: [],
-        timeout_minutes: 30,
-        create_repo: false,
-        repo_config: null,
-      },
-    ],
-    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-    bootstrap_repo_name: "cursor-orch-bootstrap",
-  };
-}
 
 function promptOnlyConfig(): OrchestratorConfig {
   return {
@@ -99,45 +77,6 @@ function completedWorkerScript(taskId: string, runId: string, outputs: Record<st
   };
 }
 
-let unmockedFetch: typeof fetch;
-
-function installGithubBranchPrepMock(): void {
-  unmockedFetch = globalThis.fetch;
-  globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (!url.startsWith("https://api.github.com/")) {
-      return unmockedFetch(input, init);
-    }
-    if (url.includes("/git/ref/heads/")) {
-      const tail = url.split("/git/ref/heads/")[1] ?? "";
-      const decoded = decodeURIComponent(tail);
-      if (decoded === "main" || decoded.endsWith("/main")) {
-        return new Response(JSON.stringify({ object: { sha: "0123456789abcdef0123456789abcdef01234567" } }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify({ message: "Not Found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    if (url.includes("/git/refs") && init?.method === "POST") {
-      return new Response(JSON.stringify({ ref: "refs/heads/x" }), {
-        status: 201,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    if (url === "https://api.github.com/user") {
-      return new Response(JSON.stringify({ login: "acme-user" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    return unmockedFetch(input, init);
-  }) as typeof fetch;
-}
-
 function twoRepoParallelTaskConfig(): OrchestratorConfig {
   const mk = (id: string, repo: "svc" | "svc2") => ({
     id,
@@ -177,7 +116,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     installGithubBranchPrepMock();
   });
   afterEach(() => {
-    globalThis.fetch = unmockedFetch;
+    restoreGithubBranchPrepMock();
     process.env = { ...originalEnv };
   });
 
