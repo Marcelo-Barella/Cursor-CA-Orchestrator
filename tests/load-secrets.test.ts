@@ -66,14 +66,16 @@ describe("loadSecretsFromRepo", () => {
     expect(() => loadSecretsFromRepo("run-1")).toThrow(/must be a JSON object/);
   });
 
-  it("throws when GH_TOKEN or CURSOR_API_KEY is missing or empty", () => {
+  it("throws when GH_TOKEN is missing or empty", () => {
     execSyncMock.mockImplementation((cmd: string) => {
       if (cmd.includes("git fetch")) return "";
       if (cmd.includes("secrets.json")) return JSON.stringify({ GH_TOKEN: "", CURSOR_API_KEY: "sk_x" });
       throw new Error(`unexpected: ${cmd}`);
     });
     expect(() => loadSecretsFromRepo("run-1")).toThrow(/missing or empty GH_TOKEN/);
+  });
 
+  it("throws when CURSOR_API_KEY is missing or empty", () => {
     execSyncMock.mockImplementation((cmd: string) => {
       if (cmd.includes("git fetch")) return "";
       if (cmd.includes("secrets.json")) return JSON.stringify({ GH_TOKEN: "ghp_x" });
