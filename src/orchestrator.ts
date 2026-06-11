@@ -1944,21 +1944,28 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planning: PlanningOutcome = { ran: false };
   if (config.prompt && !config.tasks.length) {
-    const ghUser = await resolveGithubUsername(ghToken);
-    const planContent = await repoStore.readFile(runId, "task-plan.json");
-    if (planContent) {
-      const reusedOk = await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false)
-        .then(() => true)
-        .catch(() => false);
-      if (reusedOk) {
-        planning = { ran: true, ok: true, source: "reused" };
+    const ghUserResult = await resolveGithubUsername(ghToken)
+      .then((user) => ({ ok: true as const, user }))
+      .catch((exc) => ({ ok: false as const, detail: String(exc) }));
+    if (!ghUserResult.ok) {
+      planning = { ran: true, ok: false, detail: ghUserResult.detail, usedFullPhase: true };
+    } else {
+      const ghUser = ghUserResult.user;
+      const planContent = await repoStore.readFile(runId, "task-plan.json");
+      if (planContent) {
+        const reusedOk = await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false)
+          .then(() => true)
+          .catch(() => false);
+        if (reusedOk) {
+          planning = { ran: true, ok: true, source: "reused" };
+        }
       }
-    }
-    if (!planning.ran || !planning.ok) {
-      const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
-      planning = planningResult.ok
-        ? { ran: true, ok: true, source: "fresh" }
-        : { ran: true, ok: false, detail: planningResult.detail, usedFullPhase: true };
+      if (!planning.ran || !planning.ok) {
+        const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
+        planning = planningResult.ok
+          ? { ran: true, ok: true, source: "fresh" }
+          : { ran: true, ok: false, detail: planningResult.detail, usedFullPhase: true };
+      }
     }
   }
 

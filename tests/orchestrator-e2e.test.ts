@@ -938,6 +938,34 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("defers planning_failed when GitHub user resolution fails so the run can be retried", async () => {
+    const config = promptOnlyConfig();
+    const failingFetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url === "https://api.github.com/user") {
+        return new Response(JSON.stringify({ message: "Bad credentials" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return unmockedFetch(input, init);
+    }) as typeof fetch;
+    globalThis.fetch = failingFetch;
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    await expect(runOrchestration("run-gh-user-fail", new FakeAgentClient(), store)).rejects.toThrow(/GitHub user: 401/);
+    expect(files.has("state.json")).toBe(true);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const startedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
+    const failedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(failedIdx).toBeGreaterThan(startedIdx);
+    await expect(runOrchestration("run-gh-user-fail", new FakeAgentClient(), store)).rejects.not.toThrow(
+      /refusing to reset orchestration progress/,
+    );
+  });
+
   it("defers planning_failed until after state init so a failed plan can be retried", async () => {
     const config = promptOnlyConfig();
     const failingPlanner = () =>
