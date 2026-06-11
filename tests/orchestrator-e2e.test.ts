@@ -1046,6 +1046,73 @@ describe("runOrchestration with SDK (happy path)", () => {
     }
   });
 
+  it("does not persist invalid planned tasks and can replan on retry", async () => {
+    const config: OrchestratorConfig = {
+      ...promptOnlyConfig(),
+      target: { auto_create_pr: false, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+    };
+    const invalidPlan = JSON.stringify({
+      tasks: [
+        { id: "t1", repo: "svc", prompt: "first", depends_on: [], timeout_minutes: 30 },
+        { id: "t2", repo: "svc", prompt: "second", depends_on: [], timeout_minutes: 30 },
+      ],
+    });
+    let planAttempt = 0;
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockImplementation(async () => {
+      planAttempt += 1;
+      return planAttempt === 1 ? invalidPlan : promptOnlyTaskPlan("Replanned after validation failure.");
+    });
+    const plannerScript = {
+      events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+      result: { id: "r-plan", status: "finished" as const, result: "" },
+    };
+    const fake = new FakeAgentClient({
+      defaultScripts: [plannerScript, plannerScript, completedWorkerScript("t1", "run-invalid-planned-config")],
+    });
+    const originalConfig = toYaml(config);
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": originalConfig,
+    });
+    try {
+      await expect(runOrchestration("run-invalid-planned-config", fake, store)).rejects.toThrow(/delegation_map/);
+      expect(files.get("config.yaml")).toBe(originalConfig);
+      await runOrchestration("run-invalid-planned-config", fake, store);
+      expect(files.get("config.yaml")).toContain("t1");
+      expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("recovers when planning succeeds on retry after a planning failure", async () => {
+    const config = promptOnlyConfig();
+    let planAttempt = 0;
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockImplementation(async () => {
+      planAttempt += 1;
+      return planAttempt === 1 ? null : promptOnlyTaskPlan();
+    });
+    const plannerScript = {
+      events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+      result: { id: "r-plan", status: "finished" as const, result: "" },
+    };
+    const fake = new FakeAgentClient({
+      defaultScripts: [plannerScript, plannerScript, completedWorkerScript("t1", "run-plan-recover")],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    try {
+      await expect(runOrchestration("run-plan-recover", fake, store)).rejects.toThrow(/Timed out waiting for task plan/);
+      await runOrchestration("run-plan-recover", fake, store);
+      const state = JSON.parse(files.get("state.json")!);
+      expect(state.status).toBe("completed");
+      expect(state.phase_agents.planning.status).toBe("finished");
+      expect(fake.launches.some((l) => l.opts.repoUrl === "https://github.com/acme/svc")).toBe(true);
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
   it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {

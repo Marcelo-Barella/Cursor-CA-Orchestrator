@@ -1617,6 +1617,7 @@ async function tryReuseExistingTaskPlan(
     config.repositories = canonReuse.repositories;
     config.tasks = canonReuse.tasks;
     config.delegation_map = canonReuse.delegation_map;
+    validateConfig(config);
     await repoStore.writeFile(runId, "config.yaml", toYaml(config));
     return `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`;
   } catch {
@@ -1688,6 +1689,7 @@ async function runPlanningPhase(
     config.repositories = canonPlan.repositories;
     config.tasks = canonPlan.tasks;
     config.delegation_map = canonPlan.delegation_map;
+    validateConfig(config);
     await repoStore.writeFile(runId, "config.yaml", toYaml(config));
     return { ok: true };
   } catch (exc) {
