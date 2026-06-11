@@ -102,6 +102,31 @@ describe("getReadyTasks", () => {
       }),
     ).toEqual(["t2"]);
   });
+
+  it("excludes pending tasks that have no agent entry", () => {
+    const graph = { t1: new Set<string>(), t2: new Set(["t1"]) };
+    const agent = (taskId: string, status: string): AgentState => ({
+      task_id: taskId,
+      agent_id: null,
+      status,
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    });
+    expect(getReadyTasks(graph, {})).toEqual([]);
+    expect(
+      getReadyTasks(graph, {
+        t1: agent("t1", "finished"),
+      }),
+    ).toEqual([]);
+  });
 });
 
 describe("orchestrator launch eligibility", () => {
