@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
+import * as planner from "../src/planner.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
 import { createInitialState, serialize } from "../src/state.js";
@@ -74,6 +75,33 @@ function promptOnlyConfig(): OrchestratorConfig {
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
   };
+}
+
+function promptOnlyConfigWithConstraints(): OrchestratorConfig {
+  return {
+    ...promptOnlyConfig(),
+    prompt: "Every route must use your translation method.",
+  };
+}
+
+function taskPlanJson(taskPrompt: string): string {
+  return JSON.stringify({
+    tasks: [
+      {
+        id: "t1",
+        repo: "svc",
+        prompt: taskPrompt,
+        depends_on: [],
+        timeout_minutes: 30,
+      },
+    ],
+  });
+}
+
+function parseEventsFromStore(files: FileStore): Array<{ event_type: string; detail?: string }> {
+  const raw = files.get("events.jsonl");
+  if (!raw?.trim()) return [];
+  return raw.trim().split("\n").map((line) => JSON.parse(line));
 }
 
 function twoTaskChainConfig(): OrchestratorConfig {
@@ -979,6 +1007,39 @@ describe("runOrchestration with SDK (happy path)", () => {
     );
   });
 
+  it.each([
+    { label: "task run", config: singleTaskConfig, runId: "run-stopped-empty-first-read" },
+    { label: "prompt-only run", config: promptOnlyConfig, runId: "run-stopped-empty-first-read-plan" },
+  ])("skips work when stopped state loads after an empty pre-planning read ($label)", async ({ config: configFn, runId }) => {
+    const config = configFn();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", result: "" },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, runId);
+    stoppedState.status = "stopped";
+    let stateReadCount = 0;
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(stoppedState),
+    });
+    const baseReadFile = store.readFile.bind(store);
+    store.readFile = async (id: string, filename: string) => {
+      if (filename === "state.json") {
+        stateReadCount += 1;
+        return stateReadCount === 1 ? "" : baseReadFile(id, filename);
+      }
+      return baseReadFile(id, filename);
+    };
+    await runOrchestration(runId, fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
   it("does not launch planning when resuming a stopped prompt-only run", async () => {
     const config = promptOnlyConfig();
     const fake = new FakeAgentClient({
@@ -1024,23 +1085,12 @@ describe("runOrchestration with SDK (happy path)", () => {
 
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
-    const taskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Planned work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
     const fake = new FakeAgentClient({
       defaultScripts: [completedWorkerScript("t1", "run-reuse-plan")],
     });
     const { store, files } = createInMemoryRepoStore({
       "config.yaml": toYaml(config),
-      "task-plan.json": taskPlan,
+      "task-plan.json": taskPlanJson("Planned work."),
     });
     await runOrchestration("run-reuse-plan", fake, store);
     expect(fake.launches).toHaveLength(1);
@@ -1048,14 +1098,69 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(fake.launches[0]!.prompt).toContain("Planned work.");
     const updatedConfig = files.get("config.yaml")!;
     expect(updatedConfig).toContain("t1");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const events = parseEventsFromStore(files);
     expect(
       events.some(
-        (e: { event_type: string; detail?: string }) =>
-          e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
+        (e) => e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
       ),
     ).toBe(true);
+    expect(events.some((e) => e.event_type === "planning_started")).toBe(false);
+    expect(JSON.parse(files.get("state.json")!).phase_agents.planning.status).toBe("finished");
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("falls back to full planning when task-plan.json is invalid", async () => {
+    const config = promptOnlyConfig();
+    const validPlan = taskPlanJson("Planned work.");
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(validPlan);
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
+        completedWorkerScript("t1", "run-invalid-plan-fallback"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": "{not valid json",
+    });
+    try {
+      await runOrchestration("run-invalid-plan-fallback", fake, store);
+      expect(fake.launches).toHaveLength(2);
+      expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+      const events = parseEventsFromStore(files);
+      expect(events.some((e) => e.event_type === "planning_started")).toBe(true);
+      expect(events.some((e) => e.event_type === "planning_completed" && !e.detail?.includes("reused"))).toBe(true);
+      expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    } finally {
+      waitSpy.mockRestore();
+    }
+  });
+
+  it("rejects constraint-violating reused task-plan and falls back to full planning", async () => {
+    const config = promptOnlyConfigWithConstraints();
+    const validPlan = taskPlanJson("Implement the home page. Every route must use your translation method.");
+    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(validPlan);
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        { events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } },
+        completedWorkerScript("t1", "run-constraint-replan"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlanJson("Implement the home page without translation."),
+    });
+    try {
+      await runOrchestration("run-constraint-replan", fake, store);
+      expect(fake.launches).toHaveLength(2);
+      expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+      const events = parseEventsFromStore(files);
+      expect(events.some((e) => e.event_type === "planning_started")).toBe(true);
+      expect(events.some((e) => e.event_type === "planning_completed" && !e.detail?.includes("reused"))).toBe(true);
+      expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    } finally {
+      waitSpy.mockRestore();
+    }
   });
 
   it("marks a task blocked when worker JSON reports blocked status", async () => {
