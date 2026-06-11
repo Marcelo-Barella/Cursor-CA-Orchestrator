@@ -39,6 +39,25 @@ function completedResumeScript(runId: string) {
   };
 }
 
+function seedResumedWorker(
+  runId: string,
+  agentId: string,
+  task: { status: "running" | "launching"; summary?: string },
+) {
+  const config = singleTaskConfig();
+  const state = createInitialState(config, runId);
+  state.status = "running";
+  state.started_at = new Date().toISOString();
+  seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+  state.agents.t1 = {
+    ...state.agents.t1!,
+    agent_id: agentId,
+    status: task.status,
+    ...(task.summary === undefined ? {} : { summary: task.summary }),
+  };
+  return { config, state };
+}
+
 describe("reattachWorkers running tasks", () => {
   const originalEnv = { ...process.env };
 
@@ -58,19 +77,9 @@ describe("reattachWorkers running tasks", () => {
   });
 
   it("reattaches running workers via resumeCloudAgent and listRuns without relaunching", async () => {
-    const config = singleTaskConfig();
     const runId = "run-reattach-running";
     const liveAgentId = "agent-live-1";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
-      agent_id: liveAgentId,
-      status: "running",
-      summary: "in flight",
-    };
+    const { config, state } = seedResumedWorker(runId, liveAgentId, { status: "running", summary: "in flight" });
 
     const resumeScript = completedResumeScript(runId);
     const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
@@ -98,18 +107,9 @@ describe("reattachWorkers running tasks", () => {
   });
 
   it("marks the task failed when resume finds no SDK runs", async () => {
-    const config = singleTaskConfig();
     const runId = "run-reattach-no-runs";
     const liveAgentId = "agent-live-2";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
-      agent_id: liveAgentId,
-      status: "running",
-    };
+    const { config, state } = seedResumedWorker(runId, liveAgentId, { status: "running" });
 
     listRunsMock.mockResolvedValue({ items: [] });
 
@@ -132,18 +132,9 @@ describe("reattachWorkers running tasks", () => {
   });
 
   it("marks the task failed when resumeCloudAgent throws", async () => {
-    const config = singleTaskConfig();
     const runId = "run-reattach-resume-fail";
     const liveAgentId = "agent-live-3";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
-      agent_id: liveAgentId,
-      status: "launching",
-    };
+    const { config, state } = seedResumedWorker(runId, liveAgentId, { status: "launching" });
 
     const fake = new FakeAgentClient({ conversationText: null });
     vi.spyOn(fake, "resumeCloudAgent").mockRejectedValue(new Error("resume boom"));

@@ -52,7 +52,7 @@ export function singleTaskConfig(): OrchestratorConfig {
       },
     ],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-    bootstrap_repo_name: "b",
+    bootstrap_repo_name: "cursor-orch-bootstrap",
   };
 }
 
