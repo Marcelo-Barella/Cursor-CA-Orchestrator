@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
-import type { OrchestratorConfig } from "../src/config/types.js";
 import { FakeAgentClient, statusMessage } from "./support/fake-agent-client.js";
 import {
+  completedWorkerScript,
   createInMemoryRepoStore,
   installGithubBranchPrepMock,
+  promptOnlyConfig,
   restoreGithubBranchPrepMock,
-  runGit,
 } from "./support/reattach-fixtures.js";
 
 const waitForPlanMock = vi.hoisted(() => vi.fn());
@@ -32,20 +32,6 @@ vi.mock("@cursor/sdk", async (importOriginal) => {
   };
 });
 
-function promptOnlyConfig(): OrchestratorConfig {
-  return {
-    name: "plan-demo",
-    model: { id: "composer-2" },
-    prompt: "Ship the feature across repos.",
-    repositories: {
-      svc: { url: "https://github.com/acme/svc", ref: "main" },
-    },
-    tasks: [],
-    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-    bootstrap_repo_name: "cursor-orch-bootstrap",
-  };
-}
-
 function validTaskPlanJson(): string {
   return JSON.stringify({
     tasks: [
@@ -58,21 +44,6 @@ function validTaskPlanJson(): string {
       },
     ],
   });
-}
-
-function completedWorkerScript(taskId: string, runId: string) {
-  return {
-    events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-    result: { id: `r-${taskId}`, status: "finished" as const, git: runGit(`cursor-orch/${runId}/${taskId}`) },
-    artifacts: {
-      "cursor-orch-output.json": JSON.stringify({
-        task_id: taskId,
-        status: "completed",
-        summary: "ok",
-        outputs: {},
-      }),
-    },
-  };
 }
 
 function parseEvents(files: Map<string, string>): { event_type: string; detail?: string }[] {

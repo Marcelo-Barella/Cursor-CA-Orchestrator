@@ -1,3 +1,4 @@
+import { Agent } from "@cursor/sdk";
 import { execSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { RepoStoreClient } from "./api/repo-store.js";
@@ -1656,9 +1657,9 @@ async function runPlanningPhase(
   }
   let planContent = await waitForPlan(repoStore, runId);
   if (!planContent) {
-    const runs = await (await import("@cursor/sdk"))
-      .Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey })
-      .catch(() => ({ items: [] as { result?: unknown }[] }));
+    const runs = await Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey }).catch(() => ({
+      items: [] as { result?: unknown }[],
+    }));
     for (const plannerRun of runs.items) {
       if (typeof plannerRun.result === "string" && plannerRun.result.trim()) {
         planContent = plannerRun.result;
@@ -1734,7 +1735,6 @@ async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: str
 }
 
 async function reattachWorkers(ctx: LoopContext): Promise<void> {
-  const { Agent } = await import("@cursor/sdk");
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
     if (!agent.agent_id) continue;
     if (agent.status !== "launching" && agent.status !== "running") continue;

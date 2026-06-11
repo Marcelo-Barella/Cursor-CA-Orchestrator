@@ -2,6 +2,7 @@ import { vi } from "vitest";
 import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import type { RepoStoreClient } from "../../src/api/repo-store.js";
 import type { OrchestratorConfig } from "../../src/config/types.js";
+import { statusMessage, type FakeRunScript } from "./fake-agent-client.js";
 
 export type FileStore = Map<string, string>;
 
@@ -29,6 +30,39 @@ export function createInMemoryRepoStore(initial: Record<string, string>): { stor
     },
   } as unknown as RepoStoreClient;
   return { store, files };
+}
+
+export function promptOnlyConfig(): OrchestratorConfig {
+  return {
+    name: "plan-demo",
+    model: { id: "composer-2" },
+    prompt: "Ship the feature across repos.",
+    repositories: {
+      svc: { url: "https://github.com/acme/svc", ref: "main" },
+    },
+    tasks: [],
+    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
+    bootstrap_repo_name: "cursor-orch-bootstrap",
+  };
+}
+
+export function completedWorkerScript(
+  taskId: string,
+  runId: string,
+  outputs: Record<string, unknown> = {},
+): FakeRunScript {
+  return {
+    events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+    result: { id: `r-${taskId}`, status: "finished", git: runGit(`cursor-orch/${runId}/${taskId}`) },
+    artifacts: {
+      "cursor-orch-output.json": JSON.stringify({
+        task_id: taskId,
+        status: "completed",
+        summary: "ok",
+        outputs,
+      }),
+    },
+  };
 }
 
 export function singleTaskConfig(): OrchestratorConfig {
