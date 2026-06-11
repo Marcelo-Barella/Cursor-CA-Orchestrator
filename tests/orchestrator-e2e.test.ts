@@ -11,33 +11,10 @@ import {
   assistantText,
   statusMessage,
 } from "./support/fake-agent-client.js";
-
-type FileStore = Map<string, string>;
+import { createInMemoryRepoStore, type FileStore } from "./support/reattach-fixtures.js";
 
 function runGit(branch: string, repoUrl = "https://github.com/acme/svc"): NonNullable<SdkRunResult["git"]> {
   return { branches: [{ repoUrl, branch }] };
-}
-
-function createInMemoryRepoStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
-  const files: FileStore = new Map(Object.entries(initial));
-  const store = {
-    rateLimitRemaining: null,
-    rateLimitLimit: null,
-    async readFile(_runId: string, filename: string): Promise<string> {
-      return files.get(filename) ?? "";
-    },
-    async writeFile(_runId: string, filename: string, content: string): Promise<void> {
-      files.set(filename, content);
-    },
-    async updateFile(_runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
-      const current = files.get(filename) ?? "";
-      files.set(filename, await updater(current));
-    },
-    async deleteFile(_runId: string, filename: string): Promise<void> {
-      files.delete(filename);
-    },
-  } as unknown as RepoStoreClient;
-  return { store, files };
 }
 
 function createTransientStateReadStore(
