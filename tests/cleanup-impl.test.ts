@@ -95,4 +95,19 @@ describe("runCleanupCommand", () => {
     const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(text).toContain("No run branches found");
   });
+
+  it("notes unimplemented age filtering for non-default older-than", async () => {
+    const deleted: string[] = [];
+    const store = {
+      listRunBranches: async () => ["run/old"],
+      deleteRunBranch: async (runId: string) => {
+        deleted.push(runId);
+      },
+    } as unknown as RepoStoreClient;
+    await runCleanupCommand({ olderThan: "30" }, { repoStore: store });
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("age-based filtering");
+    expect(text).toContain("--older-than 30");
+    expect(deleted).toEqual(["old"]);
+  });
 });
