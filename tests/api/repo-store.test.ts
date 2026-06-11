@@ -151,19 +151,18 @@ describe("RepoStoreClient", () => {
     expect(body.branch).toBe(`run/${runId}`);
   });
 
-  it("listRunBranches parses run branch refs from the GitHub refs API", async () => {
+  it("listRunBranches returns branch names without refs/heads prefix", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(
         JSON.stringify([
-          { ref: "refs/heads/run/run-1" },
-          { ref: "refs/heads/run/run-2" },
-          { ref: "refs/heads/other-branch" },
+          { ref: "refs/heads/run/a" },
+          { ref: "refs/heads/run/b" },
         ]),
         { status: 200, headers: { "Content-Type": "application/json" } },
       ),
     );
     const client = new RepoStoreClient("ghp-test", owner, repo);
-    await expect(client.listRunBranches()).resolves.toEqual(["run/run-1", "run/run-2", "other-branch"]);
+    await expect(client.listRunBranches()).resolves.toEqual(["run/a", "run/b"]);
     const url = String(fetchMock.mock.calls[0]![0]);
     expect(url).toContain("/git/refs/heads/run/");
   });

@@ -9,6 +9,8 @@ import type {
   ConfigResolution,
   DelegationMapConfig,
   DiagnosticFinding,
+  InventoryManifestV1,
+  McpServerConfig,
   ModelSelectionConfig,
   OrchestratorConfig,
   RepoConfig,
@@ -860,6 +862,70 @@ function resolveDelegationMap(
   return [null, { value: 0, source: "default", source_ref: "default:delegation_map" }];
 }
 
+function resolveMcpServers(
+  projectConfig: OrchestratorConfig | null,
+  projectRaw: Record<string, unknown> | null,
+  sessionConfig: OrchestratorConfig | null,
+  sessionRaw: Record<string, unknown> | null,
+  projectSourceRef: string,
+): [Record<string, McpServerConfig> | undefined, ResolvedValue] {
+  if (projectConfig && projectRaw && ("mcp_servers" in projectRaw || "mcpServers" in projectRaw)) {
+    const servers = projectConfig.mcp_servers;
+    return [
+      servers,
+      {
+        value: servers ? Object.keys(servers).length : 0,
+        source: "project",
+        source_ref: `${projectSourceRef}:mcp_servers`,
+      },
+    ];
+  }
+  if (sessionConfig && sessionRaw && ("mcp_servers" in sessionRaw || "mcpServers" in sessionRaw)) {
+    const servers = sessionConfig.mcp_servers;
+    return [
+      servers,
+      {
+        value: servers ? Object.keys(servers).length : 0,
+        source: "session",
+        source_ref: "~/.cursor-orch/session.yaml:mcp_servers",
+      },
+    ];
+  }
+  return [undefined, { value: 0, source: "default", source_ref: "default:mcp_servers" }];
+}
+
+function resolveInventory(
+  projectConfig: OrchestratorConfig | null,
+  projectRaw: Record<string, unknown> | null,
+  sessionConfig: OrchestratorConfig | null,
+  sessionRaw: Record<string, unknown> | null,
+  projectSourceRef: string,
+): [InventoryManifestV1 | null | undefined, ResolvedValue] {
+  if (projectConfig && projectRaw && ("inventory" in projectRaw || "inventory_file" in projectRaw)) {
+    const inv = projectConfig.inventory ?? null;
+    return [
+      inv,
+      {
+        value: inv ? inv.layers.length : 0,
+        source: "project",
+        source_ref: `${projectSourceRef}:inventory`,
+      },
+    ];
+  }
+  if (sessionConfig && sessionRaw && ("inventory" in sessionRaw || "inventory_file" in sessionRaw)) {
+    const inv = sessionConfig.inventory ?? null;
+    return [
+      inv,
+      {
+        value: inv ? inv.layers.length : 0,
+        source: "session",
+        source_ref: "~/.cursor-orch/session.yaml:inventory",
+      },
+    ];
+  }
+  return [undefined, { value: 0, source: "default", source_ref: "default:inventory" }];
+}
+
 export function resolveConfigPrecedence(configPathFlag: string | null | undefined, bootstrapRepoFlag: string | null | undefined): ConfigResolution {
   const findings: DiagnosticFinding[] = [];
   const provenance: Record<string, ResolvedValue> = {};
@@ -1012,6 +1078,24 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
   );
   provenance.delegation_map = delegationMapSource;
 
+  const [mcp_servers, mcpServersSource] = resolveMcpServers(
+    projectConfig,
+    projectRaw,
+    sessionConfig,
+    sessionRaw,
+    configPathRef,
+  );
+  provenance.mcp_servers = mcpServersSource;
+
+  const [inventory, inventorySource] = resolveInventory(
+    projectConfig,
+    projectRaw,
+    sessionConfig,
+    sessionRaw,
+    configPathRef,
+  );
+  provenance.inventory = inventorySource;
+
   const cursorApiKey = resolveRequiredSecret("CURSOR_API_KEY", findings);
   const ghToken = resolveRequiredSecret("GH_TOKEN", findings);
   provenance["secrets.CURSOR_API_KEY"] = cursorApiKey;
@@ -1031,6 +1115,8 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
       branch_layout: String(branchLayout.value) as BranchLayout,
     },
     bootstrap_repo_name: String(bootstrapRepo.value),
+    ...(mcp_servers !== undefined ? { mcp_servers } : {}),
+    ...(inventory !== undefined ? { inventory } : {}),
   };
 
   try {
