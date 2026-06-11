@@ -1,4 +1,3 @@
-import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
@@ -11,11 +10,7 @@ import {
   assistantText,
   statusMessage,
 } from "./support/fake-agent-client.js";
-import { createInMemoryRepoStore, type FileStore } from "./support/reattach-fixtures.js";
-
-function runGit(branch: string, repoUrl = "https://github.com/acme/svc"): NonNullable<SdkRunResult["git"]> {
-  return { branches: [{ repoUrl, branch }] };
-}
+import { createInMemoryRepoStore, runGit, type FileStore } from "./support/reattach-fixtures.js";
 
 function createTransientStateReadStore(
   initial: Record<string, string>,
