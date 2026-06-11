@@ -1,4 +1,3 @@
-import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
@@ -11,57 +10,11 @@ import {
   assistantText,
   statusMessage,
 } from "./support/fake-agent-client.js";
-
-type FileStore = Map<string, string>;
-
-function runGit(branch: string, repoUrl = "https://github.com/acme/svc"): NonNullable<SdkRunResult["git"]> {
-  return { branches: [{ repoUrl, branch }] };
-}
-
-function createInMemoryRepoStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
-  const files: FileStore = new Map(Object.entries(initial));
-  const ghCalls: string[] = [];
-  const store = {
-    rateLimitRemaining: null,
-    rateLimitLimit: null,
-    async readFile(_runId: string, filename: string): Promise<string> {
-      ghCalls.push(`read ${filename}`);
-      return files.get(filename) ?? "";
-    },
-    async writeFile(_runId: string, filename: string, content: string): Promise<void> {
-      files.set(filename, content);
-    },
-    async updateFile(_runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
-      const current = files.get(filename) ?? "";
-      files.set(filename, await updater(current));
-    },
-    async deleteFile(_runId: string, filename: string): Promise<void> {
-      files.delete(filename);
-    },
-  } as unknown as RepoStoreClient;
-  return { store, files };
-}
-
-function createTransientStateReadStore(
-  initial: Record<string, string>,
-  failCount = 2,
-): { store: RepoStoreClient; files: FileStore } {
-  const { store: baseStore, files } = createInMemoryRepoStore(initial);
-  let stateReadCount = 0;
-  const store = {
-    ...baseStore,
-    async readFile(runId: string, filename: string): Promise<string> {
-      if (filename === "state.json") {
-        stateReadCount += 1;
-        if (stateReadCount <= failCount) {
-          throw new Error("transient repo read failure");
-        }
-      }
-      return baseStore.readFile(runId, filename);
-    },
-  } as unknown as RepoStoreClient;
-  return { store, files };
-}
+import {
+  createInMemoryRepoStore,
+  createTransientStateReadStore,
+  runGit,
+} from "./support/reattach-fixtures.js";
 
 function singleTaskConfig(): OrchestratorConfig {
   return {
@@ -1081,6 +1034,71 @@ describe("runOrchestration with SDK (happy path)", () => {
           e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
       ),
     ).toBe(true);
+    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("emits planning_started after state.json exists when running full planning", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const writeOrder: string[] = [];
+    let taskPlanReads = 0;
+    const { store: baseStore, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const store = {
+      ...baseStore,
+      async writeFile(runId: string, filename: string, content: string): Promise<void> {
+        writeOrder.push(filename);
+        await baseStore.writeFile(runId, filename, content);
+      },
+      async updateFile(
+        runId: string,
+        filename: string,
+        updater: (current: string) => string | Promise<string>,
+      ): Promise<void> {
+        writeOrder.push(`update:${filename}`);
+        await baseStore.updateFile(runId, filename, updater);
+      },
+      async readFile(runId: string, filename: string): Promise<string> {
+        if (filename === "task-plan.json") {
+          taskPlanReads += 1;
+          if (taskPlanReads === 1) {
+            return "";
+          }
+          return taskPlan;
+        }
+        return baseStore.readFile(runId, filename);
+      },
+    } as unknown as RepoStoreClient;
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-fresh-plan"),
+      ],
+    });
+    await runOrchestration("run-fresh-plan", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const planningStartedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_started");
+    const planningCompletedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_completed");
+    expect(planningStartedIdx).toBeGreaterThanOrEqual(0);
+    expect(planningCompletedIdx).toBeGreaterThan(planningStartedIdx);
+    const firstStateWrite = writeOrder.findIndex((f) => f === "state.json");
+    const firstPlanningEventWrite = writeOrder.findIndex((f) => f === "update:events.jsonl");
+    expect(firstStateWrite).toBeGreaterThanOrEqual(0);
+    expect(firstStateWrite).toBeLessThan(firstPlanningEventWrite);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 

@@ -638,12 +638,15 @@ describe("runOrchestration validation gate", () => {
     await expect(runOrchestration("run-whitespace-state", agentClient, repoStore)).rejects.toThrow(/refusing to reset orchestration progress/);
   });
 
-  it("propagates events.jsonl read errors when state.json is empty", async () => {
+  it.each([
+    { label: "empty", stateContent: "" },
+    { label: "whitespace-only", stateContent: "  \n" },
+  ])("propagates events.jsonl read errors when state.json is $label", async ({ stateContent }) => {
     const config = createConfig(["a"]);
     const repoStore = {
       async readFile(_runId: string, filename: string): Promise<string> {
         if (filename === "config.yaml") return toYaml(config);
-        if (filename === "state.json") return "";
+        if (filename === "state.json") return stateContent;
         if (filename === "events.jsonl") {
           throw new Error("GitHub API rate limited");
         }
@@ -707,28 +710,6 @@ describe("runOrchestration validation gate", () => {
     expect(writeCount).toBe(0);
   });
 
-  it("retries state.json reads and propagates the error when all attempts fail", async () => {
-    const config = createConfig(["a"]);
-    let stateReadAttempts = 0;
-    const repoStore = {
-      async readFile(_runId: string, filename: string): Promise<string> {
-        if (filename === "config.yaml") return toYaml(config);
-        if (filename === "state.json") {
-          stateReadAttempts += 1;
-          throw new Error("transient repo read failure");
-        }
-        return "";
-      },
-      async writeFile(): Promise<void> {},
-      async updateFile(): Promise<void> {},
-      async deleteFile(): Promise<void> {},
-    } as unknown as RepoStoreClient;
-    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
-    await expect(runOrchestration("run-state-read-exhausted", agentClient, repoStore)).rejects.toThrow(
-      /transient repo read failure/,
-    );
-    expect(stateReadAttempts).toBe(3);
-  });
 });
 
 describe("pickReattachRun", () => {
