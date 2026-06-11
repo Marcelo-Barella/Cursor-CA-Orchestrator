@@ -102,6 +102,16 @@ describe("runCleanupCommand", () => {
     expect(text).toContain("Deleted 1 run branch(es)");
   });
 
+  it("skips branches whose commit date cannot be resolved", async () => {
+    const { store, deleted } = mockStore(["run/old", "run/unknown"], {
+      old: new Date("2026-06-01T00:00:00.000Z"),
+    });
+    await runCleanupCommand({ olderThan: "7" }, { repoStore: store });
+    expect(deleted).toEqual(["old"]);
+    const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).not.toContain("run/unknown");
+  });
+
   it("prints message when no run branches exist", async () => {
     const { store } = mockStore([], {});
     await runCleanupCommand({ olderThan: "7" }, { repoStore: store });
