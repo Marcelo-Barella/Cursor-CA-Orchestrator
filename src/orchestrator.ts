@@ -1824,24 +1824,16 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
         return;
       }
       if (ctx.stopRequested.value) return;
-      try {
-        const content = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-        if (content) {
-          ctx.stopRequested.value = true;
-          triggerWakeup(ctx);
-          return;
-        }
-      } catch {
-        /* retry next tick */
+      if (await syncStopRequestedFromRepo(ctx)) {
+        triggerWakeup(ctx);
+        return;
       }
     }
   })();
 
   try {
     while (true) {
-      if (!ctx.stopRequested.value) {
-        await syncStopRequestedFromRepo(ctx);
-      }
+      await syncStopRequestedFromRepo(ctx);
       if (ctx.stopRequested.value) {
         await checkStopRequested(ctx);
         return;

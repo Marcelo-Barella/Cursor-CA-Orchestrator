@@ -916,7 +916,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
-  it("marks a task blocked when worker JSON reports blocked status", async () => {
+  it("marks a blocked worker stopped when stop is requested during finalization", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
       task_id: "t1",
