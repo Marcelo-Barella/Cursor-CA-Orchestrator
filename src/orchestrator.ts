@@ -1719,13 +1719,6 @@ async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): 
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-async function rereadStateJsonIfEmpty(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<string> {
-  if (stateContent.trim()) {
-    return stateContent;
-  }
-  return repoStore.readFile(runId, "state.json");
-}
-
 async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
   if (stateContent.trim()) {
     return;
@@ -1741,6 +1734,14 @@ async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: str
       `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
     );
   }
+}
+
+async function refreshEmptyStateContent(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<string> {
+  if (!stateContent.trim()) {
+    stateContent = await repoStore.readFile(runId, "state.json");
+  }
+  await refuseResumeWithEmptyState(repoStore, runId, stateContent);
+  return stateContent;
 }
 
 async function reattachWorkers(ctx: LoopContext): Promise<void> {
@@ -1885,8 +1886,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const ghToken = process.env.GH_TOKEN ?? "";
 
   let stateContent = await readStateJsonContent(repoStore, runId);
-  stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
-  await refuseResumeWithEmptyState(repoStore, runId, stateContent);
+  stateContent = await refreshEmptyStateContent(repoStore, runId, stateContent);
   let parsedState: OrchestrationState | null = null;
   let stateParseDetail: string | null = null;
   if (stateContent.trim()) {
@@ -1945,20 +1945,20 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   validateConfig(config);
 
-  let state: OrchestrationState;
   if (!stateContent.trim()) {
-    stateContent = await rereadStateJsonIfEmpty(repoStore, runId, stateContent);
-    await refuseResumeWithEmptyState(repoStore, runId, stateContent);
-    if (!stateContent.trim()) {
-      state = createInitialState(config, runId);
-    } else {
+    stateContent = await refreshEmptyStateContent(repoStore, runId, stateContent);
+    if (stateContent.trim()) {
       try {
-        state = deserialize(stateContent);
+        parsedState = deserialize(stateContent);
       } catch (parseErr) {
-        const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
-        throw new Error(`Invalid state.json for run ${runId}: ${detail}`);
+        stateParseDetail = parseErr instanceof Error ? parseErr.message : String(parseErr);
       }
     }
+  }
+
+  let state: OrchestrationState;
+  if (!stateContent.trim()) {
+    state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
   } else {
