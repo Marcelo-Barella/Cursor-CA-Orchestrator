@@ -13,7 +13,7 @@ describe("readTaskFailureRetryCap", () => {
     process.env = env;
   });
 
-  it("uses default 0 when env var is unset", () => {
+  it("defaults to zero when env var is unset", () => {
     expect(readTaskFailureRetryCap()).toBe(0);
   });
 
@@ -31,6 +31,8 @@ describe("readTaskFailureRetryCap", () => {
 
   it("ignores out-of-range or non-numeric values", () => {
     process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "33";
+    expect(readTaskFailureRetryCap()).toBe(0);
+    process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "99";
     expect(readTaskFailureRetryCap()).toBe(0);
     process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES = "-1";
     expect(readTaskFailureRetryCap()).toBe(0);
