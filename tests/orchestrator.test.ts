@@ -48,30 +48,27 @@ function createConfig(
   };
 }
 
-function agentState(taskId: string, status: string): AgentState {
-  return {
-    task_id: taskId,
-    agent_id: null,
-    status,
-    started_at: null,
-    finished_at: null,
-    branch_name: null,
-    pr_url: null,
-    summary: null,
-    blocked_reason: status === "blocked" ? "stuck" : null,
-    blocked_since: status === "blocked" ? "2026-05-28T00:00:00.000Z" : null,
-    retry_count: 0,
-    blocked_retry_count: 0,
-    cascade_source_task_id: null,
-  };
-}
-
 describe("getBlockedTasks", () => {
   it("returns only agents in blocked status", () => {
+    const agent = (taskId: string, status: string): AgentState => ({
+      task_id: taskId,
+      agent_id: null,
+      status,
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: status === "blocked" ? "stuck" : null,
+      blocked_since: status === "blocked" ? "2026-05-28T00:00:00.000Z" : null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    });
     const blocked = getBlockedTasks({
-      a: agentState("a", "blocked"),
-      b: agentState("b", "running"),
-      c: agentState("c", "pending"),
+      a: agent("a", "blocked"),
+      b: agent("b", "running"),
+      c: agent("c", "pending"),
     });
     expect(blocked.map((a) => a.task_id)).toEqual(["a"]);
   });
@@ -80,26 +77,56 @@ describe("getBlockedTasks", () => {
 describe("getReadyTasks", () => {
   it("exposes a dependent task only after upstream tasks are finished", () => {
     const graph = { t1: new Set<string>(), t2: new Set(["t1"]) };
+    const agent = (taskId: string, status: string): AgentState => ({
+      task_id: taskId,
+      agent_id: null,
+      status,
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    });
     expect(
       getReadyTasks(graph, {
-        t1: agentState("t1", "pending"),
-        t2: agentState("t2", "pending"),
+        t1: agent("t1", "pending"),
+        t2: agent("t2", "pending"),
       }),
     ).toEqual(["t1"]);
     expect(
       getReadyTasks(graph, {
-        t1: agentState("t1", "finished"),
-        t2: agentState("t2", "pending"),
+        t1: agent("t1", "finished"),
+        t2: agent("t2", "pending"),
       }),
     ).toEqual(["t2"]);
   });
 
   it("excludes pending tasks that have no agent entry", () => {
     const graph = { t1: new Set<string>(), t2: new Set(["t1"]) };
+    const agent = (taskId: string, status: string): AgentState => ({
+      task_id: taskId,
+      agent_id: null,
+      status,
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    });
     expect(getReadyTasks(graph, {})).toEqual([]);
     expect(
       getReadyTasks(graph, {
-        t1: agentState("t1", "finished"),
+        t1: agent("t1", "finished"),
       }),
     ).toEqual([]);
   });
@@ -828,7 +855,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("agent-live-9");
     expect(state.agents.t1!.status).toBe("launching");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover/t1");
@@ -861,7 +888,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
           payload: {},
         },
       ];
-      expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+      expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
       expect(state.agents.t1!.agent_id).toBeNull();
       expect(state.agents.t1!.status).toBe("pending");
     },
@@ -887,7 +914,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("legacy-agent-9");
     expect(state.agents.t1!.status).toBe("launching");
   });
@@ -907,7 +934,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { run_id: "run-9" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
   });
@@ -937,7 +964,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "agent-new", run_id: "run-new", branch: "cursor-orch/run-recover-latest/t1" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("agent-new");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover-latest/t1");
   });
@@ -959,7 +986,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "agent-other", run_id: "run-other" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBe("agent-kept");
     expect(state.agents.t1!.status).toBe("running");
   });
@@ -980,7 +1007,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "agent-other", run_id: "run-other" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBe("agent-existing");
     expect(state.agents.t1!.status).toBe("pending");
   });
@@ -1000,7 +1027,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "   ", run_id: "run-blank" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
   });
@@ -1020,7 +1047,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "   ", run_id: "run-blank" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
   });
 
@@ -1063,7 +1090,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("agent-retry");
     expect(state.agents.t1!.status).toBe("launching");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover-retry/t1-retry-1");
@@ -1090,7 +1117,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.started_at).toBe("2026-05-01T00:00:00.000Z");
     expect(state.agents.t1!.branch_name).toBe("existing-branch");
   });

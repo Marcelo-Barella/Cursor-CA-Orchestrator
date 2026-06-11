@@ -1,3 +1,4 @@
+import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
@@ -10,7 +11,36 @@ import {
   assistantText,
   statusMessage,
 } from "./support/fake-agent-client.js";
-import { createInMemoryRepoStore, runGit, type FileStore } from "./support/reattach-fixtures.js";
+
+type FileStore = Map<string, string>;
+
+function runGit(branch: string, repoUrl = "https://github.com/acme/svc"): NonNullable<SdkRunResult["git"]> {
+  return { branches: [{ repoUrl, branch }] };
+}
+
+function createInMemoryRepoStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
+  const files: FileStore = new Map(Object.entries(initial));
+  const ghCalls: string[] = [];
+  const store = {
+    rateLimitRemaining: null,
+    rateLimitLimit: null,
+    async readFile(_runId: string, filename: string): Promise<string> {
+      ghCalls.push(`read ${filename}`);
+      return files.get(filename) ?? "";
+    },
+    async writeFile(_runId: string, filename: string, content: string): Promise<void> {
+      files.set(filename, content);
+    },
+    async updateFile(_runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
+      const current = files.get(filename) ?? "";
+      files.set(filename, await updater(current));
+    },
+    async deleteFile(_runId: string, filename: string): Promise<void> {
+      files.delete(filename);
+    },
+  } as unknown as RepoStoreClient;
+  return { store, files };
+}
 
 function createTransientStateReadStore(
   initial: Record<string, string>,
