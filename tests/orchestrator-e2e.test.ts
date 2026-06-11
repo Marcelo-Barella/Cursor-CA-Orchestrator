@@ -6,7 +6,12 @@ import { toYaml } from "../src/config/parse.js";
 import { createInitialState, serialize } from "../src/state.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import { FakeAgentClient, assistantText, statusMessage } from "./support/fake-agent-client.js";
-import { completedWorkerScript, promptOnlyConfig } from "./support/reattach-fixtures.js";
+import {
+  completedWorkerScript,
+  parseEvents,
+  promptOnlyConfig,
+  validTaskPlanJson,
+} from "./support/reattach-fixtures.js";
 
 type FileStore = Map<string, string>;
 
@@ -962,17 +967,7 @@ describe("runOrchestration with SDK (happy path)", () => {
 
   it("allows retrying planning after a failure without tripping the empty-state guard", async () => {
     const config = promptOnlyConfig();
-    const taskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Planned work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
+    const taskPlan = validTaskPlanJson();
     const failFake = new FakeAgentClient({
       defaultScripts: [{ sendThrows: new Error("planner boom") }],
     });
@@ -980,8 +975,7 @@ describe("runOrchestration with SDK (happy path)", () => {
 
     await expect(runOrchestration("run-plan-retry", failFake, store)).rejects.toThrow(/planner boom/);
     expect(files.get("state.json")).toBeTruthy();
-    const eventsAfterFailure = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(eventsAfterFailure.some((e: { event_type: string }) => e.event_type === "planning_failed")).toBe(true);
+    expect(parseEvents(files).some((e) => e.event_type === "planning_failed")).toBe(true);
 
     files.set("task-plan.json", taskPlan);
     const okFake = new FakeAgentClient({
@@ -994,17 +988,7 @@ describe("runOrchestration with SDK (happy path)", () => {
 
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
-    const taskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Planned work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
+    const taskPlan = validTaskPlanJson();
     const fake = new FakeAgentClient({
       defaultScripts: [completedWorkerScript("t1", "run-reuse-plan")],
     });
@@ -1018,11 +1002,9 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(fake.launches[0]!.prompt).toContain("Planned work.");
     const updatedConfig = files.get("config.yaml")!;
     expect(updatedConfig).toContain("t1");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(
-      events.some(
-        (e: { event_type: string; detail?: string }) =>
-          e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
+      parseEvents(files).some(
+        (e) => e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
       ),
     ).toBe(true);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
