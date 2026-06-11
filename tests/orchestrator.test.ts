@@ -706,7 +706,6 @@ describe("runOrchestration validation gate", () => {
     await expect(runOrchestration("run-gate-1", agentClient, repoStore)).rejects.toThrow(/unknown task/);
     expect(writeCount).toBe(0);
   });
-
 });
 
 describe("pickReattachRun", () => {
