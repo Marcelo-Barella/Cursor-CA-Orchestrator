@@ -78,13 +78,15 @@ describe("runCleanupCommand", () => {
 
   it("exits 1 when --older-than is not a valid day count", async () => {
     const store = makeStore(["run/old"], { old: new Date("2026-06-01T00:00:00.000Z") });
-    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
-      throw new Error("exit:1");
-    }) as typeof process.exit);
-    await expect(runCleanupCommand({ olderThan: "not-a-number" }, { repoStore: store })).rejects.toThrow("exit:1");
+    const finish = vi.fn((code: number): never => {
+      throw new Error(`exit:${code}`);
+    });
+    await expect(
+      runCleanupCommand({ olderThan: "not-a-number" }, { repoStore: store, finish }),
+    ).rejects.toThrow("exit:1");
     const text = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(text).toContain("CLEANUP-002");
-    exitSpy.mockRestore();
+    expect(finish).toHaveBeenCalledWith(1);
   });
 
   it("prints message when no run branches exist", async () => {

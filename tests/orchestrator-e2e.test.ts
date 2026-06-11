@@ -1330,6 +1330,35 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("stopped");
   });
 
+  it("cascades user stop to dependent pending tasks in a dependency chain", async () => {
+    const config = twoTaskChainConfig();
+    const script = completedWorkerScript("t1", "run-user-stop-chain");
+    script.waitDelayMs = 6_000;
+    const fake = new FakeAgentClient({ defaultScripts: [script] });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "state.json") {
+        const state = JSON.parse(content) as { agents?: Record<string, { status?: string }> };
+        if (state.agents?.t1?.status === "running") {
+          await baseWrite(
+            runId,
+            "stop-requested.json",
+            JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
+          );
+        }
+      }
+    };
+    await runOrchestration("run-user-stop-chain", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("stopped");
+    expect(state.agents.t1.status).toBe("stopped");
+    expect(state.agents.t2.status).toBe("stopped");
+    expect(state.agents.t2.cascade_source_task_id).toBe("t1");
+  }, 20_000);
+
   it("finalizes orchestration as stopped when SDK cancels without a stop sentinel", async () => {
     const config = singleTaskConfig();
     const fake = new FakeAgentClient({

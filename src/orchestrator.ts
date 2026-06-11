@@ -1341,18 +1341,29 @@ async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
   if (!stopContent) return false;
   ctx.stopRequested.value = true;
   console.info("Stop requested, halting orchestration");
+  const stoppedSources: string[] = [];
   for (const [taskId, handle] of ctx.activeWorkers.entries()) {
     const agent = ctx.state.agents[taskId];
     if (agent && (agent.status === "running" || agent.status === "launching")) {
       agent.status = "stopped";
       agent.finished_at = nowIso();
+      stoppedSources.push(taskId);
     }
     await safeDisposeAgent(handle.sdkAgent);
   }
   ctx.activeWorkers.clear();
+  for (const sourceId of stoppedSources) {
+    await cascadeDependents(ctx.state, sourceId, ctx.graph, ctx.repoStore, ctx.runId, "stopped", true);
+  }
+  for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
+    if (agent.status !== "pending") continue;
+    agent.status = "stopped";
+    agent.finished_at = nowIso();
+    await appendEvent(ctx.repoStore, ctx.runId, makeEvent("task_stopped", `Task ${taskId} stopped`, taskId));
+  }
   ctx.state.status = "stopped";
-  await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+  await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await appendEvent(
     ctx.repoStore,
     ctx.runId,

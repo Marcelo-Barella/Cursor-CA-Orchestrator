@@ -141,7 +141,7 @@ export async function runCleanupCommand(
   }
   const days = parseInt(opts.olderThan, 10);
   if (!Number.isFinite(days) || days < 0) {
-    fail({
+    failWithFinish({
       code: "CLEANUP-002",
       severity: "FATAL",
       title: "Invalid --older-than",
