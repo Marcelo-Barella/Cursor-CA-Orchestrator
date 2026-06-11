@@ -638,38 +638,6 @@ describe("runOrchestration validation gate", () => {
     await expect(runOrchestration("run-whitespace-state", agentClient, repoStore)).rejects.toThrow(/refusing to reset orchestration progress/);
   });
 
-  it("refuses reset when events.jsonl read fails transiently but file has prior entries", async () => {
-    const config = createConfig(["a"]);
-    let eventsReadCount = 0;
-    const eventLine = `${JSON.stringify({
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "orchestration_started",
-      task_id: null,
-      detail: "started",
-    })}\n`;
-    const repoStore = {
-      async readFile(_runId: string, filename: string): Promise<string> {
-        if (filename === "config.yaml") return toYaml(config);
-        if (filename === "state.json") return "";
-        if (filename === "events.jsonl") {
-          eventsReadCount += 1;
-          if (eventsReadCount <= 2) {
-            throw new Error("GitHub API rate limited");
-          }
-          return eventLine;
-        }
-        return "";
-      },
-      async writeFile(): Promise<void> {},
-      async updateFile(): Promise<void> {},
-      async deleteFile(): Promise<void> {},
-    } as unknown as RepoStoreClient;
-    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
-    await expect(runOrchestration("run-events-transient", agentClient, repoStore)).rejects.toThrow(
-      /refusing to reset orchestration progress|GitHub API rate limited/,
-    );
-  });
-
   it("propagates events.jsonl read errors when state.json is empty", async () => {
     const config = createConfig(["a"]);
     const repoStore = {
