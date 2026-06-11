@@ -54,10 +54,6 @@ function eventsFromFiles(files: Map<string, string>): Array<{ event_type: string
   return raw.trim().split("\n").map((line) => JSON.parse(line) as { event_type: string; detail?: string });
 }
 
-function eventTypesFromFiles(files: Map<string, string>): string[] {
-  return eventsFromFiles(files).map((event) => event.event_type);
-}
-
 function twoTaskChainConfig(): OrchestratorConfig {
   const base = singleTaskConfig();
   return {
@@ -954,9 +950,9 @@ describe("runOrchestration with SDK (happy path)", () => {
     });
     await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
     expect(files.has("state.json")).toBe(true);
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    const startedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
-    const failedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
+    const events = eventsFromFiles(files);
+    const startedIdx = events.findIndex((e) => e.event_type === "orchestration_started");
+    const failedIdx = events.findIndex((e) => e.event_type === "planning_failed");
     expect(startedIdx).toBeGreaterThanOrEqual(0);
     expect(failedIdx).toBeGreaterThan(startedIdx);
     await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
@@ -1012,7 +1008,7 @@ describe("runOrchestration with SDK (happy path)", () => {
       expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
       expect(fake.launches[1]!.opts.repoUrl).toBe("https://github.com/acme/svc");
       expect(fake.launches[1]!.prompt).toContain("Replanned work.");
-      const types = eventTypesFromFiles(files);
+      const types = eventsFromFiles(files).map((e) => e.event_type);
       expect(types).toContain("planning_started");
       expect(types).toContain("planning_completed");
       expect(types.indexOf("planning_started")).toBeLessThan(types.indexOf("planning_completed"));
@@ -1048,7 +1044,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     try {
       await expect(runOrchestration("run-constraint-fail", fake, store)).rejects.toThrow(/Plan constraint validation failed/);
       expect(files.has("state.json")).toBe(true);
-      const types = eventTypesFromFiles(files);
+      const types = eventsFromFiles(files).map((e) => e.event_type);
       const startedIdx = types.indexOf("orchestration_started");
       const planningStartedIdx = types.indexOf("planning_started");
       const failedIdx = types.indexOf("planning_failed");
