@@ -35,6 +35,7 @@ import { parseGithubOwnerRepo, resolveRepoTarget } from "./lib/repo-target.js";
 import { toSdkModelSelection } from "./lib/model-selection.js";
 import {
   type AgentClient,
+  CursorAgentError,
   type SDKAssistantMessage,
   type SDKStatusMessage,
   type SdkAgent,
@@ -78,6 +79,16 @@ function resetAgentToSchedulableForRetry(agent: AgentState): void {
   agent.blocked_reason = null;
   agent.blocked_since = null;
   agent.cascade_source_task_id = null;
+}
+
+function resetAgentForStaleLaunchRelaunch(agent: AgentState): void {
+  agent.agent_id = null;
+  agent.status = "pending";
+  agent.started_at = null;
+}
+
+export function isRecoveredAgentGoneError(err: unknown): boolean {
+  return err instanceof CursorAgentError && err.status === 404;
 }
 
 async function handleTaskFailureWithOptionalRetry(
@@ -284,8 +295,8 @@ export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   return best;
 }
 
-export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): boolean {
-  let changed = false;
+export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): string[] {
+  const recoveredTaskIds: string[] = [];
   for (const agent of Object.values(state.agents)) {
     if (agent.agent_id || agent.status !== "pending") continue;
     let lastLaunch: OrchestrationEvent | null = null;
@@ -311,9 +322,9 @@ export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, e
     if (branch && !agent.branch_name) {
       agent.branch_name = branch;
     }
-    changed = true;
+    recoveredTaskIds.push(agent.task_id);
   }
-  return changed;
+  return recoveredTaskIds;
 }
 
 function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
@@ -697,6 +708,7 @@ type LoopContext = {
   apiKey: string;
   ghToken: string;
   activeWorkers: Map<string, WorkerHandle>;
+  eventRecoveredTaskIds: Set<string>;
   dirty: { value: boolean };
   wakeup: { resolve: () => void; promise: Promise<void> };
   stopRequested: { value: boolean };
@@ -734,6 +746,7 @@ async function launchWorkerAgent(
   taskId: string,
   task: TaskConfig,
   depOutputs: Record<string, Record<string, unknown>>,
+  existingSdkAgent?: SdkAgent,
 ): Promise<void> {
   const agent = ctx.state.agents[taskId]!;
   const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
@@ -822,35 +835,39 @@ async function launchWorkerAgent(
       });
   const model: ModelSelectionConfig = task.model != null ? { id: task.model } : ctx.config.model;
   let sdkAgent: SdkAgent;
-  try {
-    sdkAgent = await ctx.agentClient.createCloudAgent({
-      apiKey: ctx.apiKey,
-      model,
-      repoUrl,
-      startingRef: startingRefForSdk,
-      autoCreatePR: false,
-      skipReviewerRequest: true,
-      mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${startingRefForSdk})`;
-    console.error(summary);
-    const finishedAt = nowIso();
-    await handleTaskFailureWithOptionalRetry(
-      ctx,
-      taskId,
-      () =>
-        appendEvent(
-          ctx.repoStore,
-          ctx.runId,
-          makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
-            payload: { repository: repoUrl, ref: startingRefForSdk },
-          }),
-        ),
-      { finishedAt, summary },
-    );
-    return;
+  if (existingSdkAgent) {
+    sdkAgent = existingSdkAgent;
+  } else {
+    try {
+      sdkAgent = await ctx.agentClient.createCloudAgent({
+        apiKey: ctx.apiKey,
+        model,
+        repoUrl,
+        startingRef: startingRefForSdk,
+        autoCreatePR: false,
+        skipReviewerRequest: true,
+        mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const summary = `Failed to create SDK agent for task ${taskId}: ${detail} (repository=${repoUrl}, ref=${startingRefForSdk})`;
+      console.error(summary);
+      const finishedAt = nowIso();
+      await handleTaskFailureWithOptionalRetry(
+        ctx,
+        taskId,
+        () =>
+          appendEvent(
+            ctx.repoStore,
+            ctx.runId,
+            makeEvent("task_failed", `Task ${taskId} failed: launch error (${detail})`, taskId, {
+              payload: { repository: repoUrl, ref: startingRefForSdk },
+            }),
+          ),
+        { finishedAt, summary },
+      );
+      return;
+    }
   }
   let run: SdkRun;
   try {
@@ -1750,7 +1767,20 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
+        if (agent.status === "launching") {
+          const task = ctx.config.tasks.find((t) => t.id === taskId);
+          if (task) {
+            const depOutputs = await gatherDepOutputs(task, ctx.repoStore, ctx.runId);
+            await launchWorkerAgent(ctx, taskId, task, depOutputs, sdkAgent);
+            continue;
+          }
+        }
         await safeDisposeAgent(sdkAgent);
+        if (ctx.eventRecoveredTaskIds.has(taskId)) {
+          resetAgentForStaleLaunchRelaunch(agent);
+          markStateDirty(ctx);
+          continue;
+        }
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
         continue;
@@ -1784,6 +1814,11 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
+      if (ctx.eventRecoveredTaskIds.has(taskId) && isRecoveredAgentGoneError(err)) {
+        resetAgentForStaleLaunchRelaunch(agent);
+        markStateDirty(ctx);
+        continue;
+      }
       agent.status = "failed";
       agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
       markStateDirty(ctx);
@@ -1943,7 +1978,8 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   reconcileAgentsFromConfig(state, config);
   const launchEvents = await readEvents(repoStore, runId);
-  if (reconcileInFlightLaunchesFromEvents(state, launchEvents)) {
+  const eventRecoveredTaskIds = reconcileInFlightLaunchesFromEvents(state, launchEvents);
+  if (eventRecoveredTaskIds.length > 0) {
     await syncToRepo(repoStore, runId, state);
   }
 
@@ -2013,6 +2049,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     apiKey,
     ghToken,
     activeWorkers: new Map(),
+    eventRecoveredTaskIds: new Set(eventRecoveredTaskIds),
     dirty: { value: true },
     wakeup: createWakeup(),
     stopRequested: { value: false },
