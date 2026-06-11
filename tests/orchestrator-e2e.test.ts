@@ -938,6 +938,28 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("defers planning_failed until after state init so a failed plan can be retried", async () => {
+    const config = promptOnlyConfig();
+    const failingPlanner = () =>
+      new FakeAgentClient({
+        defaultScripts: [{ sendThrows: new Error("planner timeout") }],
+      });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
+    expect(files.has("state.json")).toBe(true);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const startedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
+    const failedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(failedIdx).toBeGreaterThan(startedIdx);
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.not.toThrow(
+      /refusing to reset orchestration progress/,
+    );
+  });
+
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
     const fake = new FakeAgentClient({
