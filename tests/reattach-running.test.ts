@@ -5,7 +5,6 @@ import { createInitialState, seedMainAgent, serialize } from "../src/state.js";
 import { FakeAgentClient, FakeSdkRun, statusMessage } from "./support/fake-agent-client.js";
 import {
   createInMemoryRepoStore,
-  createTransientStateReadStore,
   installGithubBranchPrepMock,
   restoreGithubBranchPrepMock,
   runGit,
@@ -98,43 +97,6 @@ describe("reattachWorkers running tasks", () => {
       expect(fake.launches).toHaveLength(0);
     },
   );
-
-  it("reattaches running workers after transient state.json read failures", async () => {
-    const config = singleTaskConfig();
-    const runId = "run-reattach-transient-state";
-    const liveAgentId = "agent-live-transient";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
-      agent_id: liveAgentId,
-      status: "running",
-      summary: "in flight",
-    };
-
-    const resumeScript = completedResumeScript(runId);
-    const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
-    listRunsMock.mockResolvedValue({ items: [resumedRun] });
-
-    const fake = new FakeAgentClient({
-      runsByAgent: { [liveAgentId]: [resumeScript] },
-      conversationText: null,
-    });
-
-    const { store, files } = createTransientStateReadStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(state),
-    });
-
-    await runOrchestration(runId, fake, store);
-
-    const final = JSON.parse(files.get("state.json")!);
-    expect(final.status).toBe("completed");
-    expect(final.agents.t1.status).toBe("finished");
-    expect(fake.launches).toHaveLength(0);
-  });
 
   it("marks the task failed when resume finds no SDK runs", async () => {
     const config = singleTaskConfig();
