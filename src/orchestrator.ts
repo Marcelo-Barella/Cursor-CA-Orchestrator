@@ -1600,6 +1600,17 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
+function assertTaskPlanMeetsPromptConstraints(tasks: TaskConfig[], prompt: string): void {
+  const constraints = extractConstraintsFromPrompt(prompt);
+  if (constraints.length === 0) return;
+  const constraintValidation = validateTaskPromptsAgainstConstraints(tasks, constraints);
+  if (constraintValidation.valid) return;
+  const detail = constraintValidation.violations
+    .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+    .join("; ");
+  throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+}
+
 async function applyTaskPlanToConfig(
   config: OrchestratorConfig,
   runId: string,
@@ -1613,16 +1624,7 @@ async function applyTaskPlanToConfig(
   config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
   const parsedTasks = parseTaskPlan(planContent, config);
   if (validateConstraints) {
-    const constraints = extractConstraintsFromPrompt(config.prompt);
-    if (constraints.length > 0) {
-      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!result.valid) {
-        const detail = result.violations
-          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-          .join("; ");
-        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
-      }
-    }
+    assertTaskPlanMeetsPromptConstraints(parsedTasks, config.prompt);
   }
   config.tasks = parsedTasks;
   const canon = canonicalizeOrchestratorConfig(config);
@@ -1632,19 +1634,30 @@ async function applyTaskPlanToConfig(
   await repoStore.writeFile(runId, "config.yaml", toYaml(config));
 }
 
-async function tryReuseExistingTaskPlan(
-  config: OrchestratorConfig,
-  runId: string,
-  planContent: string,
-  ghToken: string,
+async function emitPlanningLifecycleEvents(
   repoStore: RepoStoreClient,
-): Promise<boolean> {
-  try {
-    await applyTaskPlanToConfig(config, runId, planContent, ghToken, repoStore, false);
-    return true;
-  } catch {
-    return false;
+  runId: string,
+  planningSource: "reused" | "fresh",
+  taskCount: number,
+): Promise<void> {
+  if (planningSource === "fresh") {
+    await appendEvent(
+      repoStore,
+      runId,
+      makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+    );
   }
+  const planningSuffix = planningSource === "reused" ? " (reused existing plan)" : "";
+  await appendEvent(
+    repoStore,
+    runId,
+    makeEvent(
+      "planning_completed",
+      `Planning completed: ${taskCount} tasks${planningSuffix}`,
+      null,
+      { phase_id: "planning", agent_kind: "phase" },
+    ),
+  );
 }
 
 async function runPlanningPhase(
@@ -1685,7 +1698,6 @@ async function runPlanningPhase(
           }
         }
       } catch {
-        /* no fallback available */
       }
     }
     await safeDisposeAgent(plannerAgent);
@@ -1923,9 +1935,13 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
-    if (planContent && (await tryReuseExistingTaskPlan(config, runId, planContent, ghToken, repoStore))) {
-      planningOk = true;
-      planningSource = "reused";
+    if (planContent) {
+      try {
+        await applyTaskPlanToConfig(config, runId, planContent, ghToken, repoStore, false);
+        planningOk = true;
+        planningSource = "reused";
+      } catch {
+      }
     }
     if (!planningOk && (await runPlanningPhase(config, runId, agentClient, repoStore, apiKey))) {
       planningOk = true;
@@ -1970,24 +1986,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
     if (planningOk && planningSource) {
-      if (planningSource === "fresh") {
-        await appendEvent(
-          repoStore,
-          runId,
-          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
-        );
-      }
-      const planningSuffix = planningSource === "reused" ? " (reused existing plan)" : "";
-      await appendEvent(
-        repoStore,
-        runId,
-        makeEvent(
-          "planning_completed",
-          `Planning completed: ${config.tasks.length} tasks${planningSuffix}`,
-          null,
-          { phase_id: "planning", agent_kind: "phase" },
-        ),
-      );
+      await emitPlanningLifecycleEvents(repoStore, runId, planningSource, config.tasks.length);
     }
     await syncToRepo(repoStore, runId, state);
   }
