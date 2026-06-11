@@ -249,6 +249,34 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).agents["t-b"].status).toBe("finished");
   });
 
+  it("persists worker agent_id to state.json after launch before the worker stream completes", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-launch-sync";
+    const stateWrites: Array<{ agentId: string | null; status: string }> = [];
+    const fake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", runId)],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (id, filename, content) => {
+      if (filename === "state.json") {
+        const parsed = JSON.parse(content) as { agents?: { t1?: { agent_id?: string | null; status?: string } } };
+        stateWrites.push({
+          agentId: parsed.agents?.t1?.agent_id ?? null,
+          status: parsed.agents?.t1?.status ?? "",
+        });
+      }
+      return baseWrite(id, filename, content);
+    };
+
+    await runOrchestration(runId, fake, store);
+
+    expect(stateWrites.some((write) => write.agentId !== null && write.status === "launching")).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).agents.t1.status).toBe("finished");
+  });
+
   it("launches a worker, reads the artifact, and marks the run completed", async () => {
     const config = singleTaskConfig();
     const workerPayload = {
@@ -276,6 +304,11 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
     expect(fake.launches[0]!.opts.startingRef).toBe("cursor-orch/run-1/t1");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const launched = events.find((e: { event_type: string }) => e.event_type === "task_launched");
+    expect(launched?.payload?.agent_id).toBe(fake.launches[0]!.agent.agentId);
+    expect(launched?.payload?.run_id).toBeTruthy();
+    expect(launched?.payload?.branch).toBe("cursor-orch/run-1/t1");
   });
 
   it("persists truncated agent output when worker JSON exceeds size limits", async () => {
@@ -322,6 +355,56 @@ describe("runOrchestration with SDK (happy path)", () => {
     await runOrchestration("run-2", fake, store);
     expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("falls back to assistant JSON when the artifact is valid JSON but missing a worker status", async () => {
+    const config = singleTaskConfig();
+    const workerJson = { task_id: "t1", status: "completed", summary: "from assistant after incomplete artifact", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [
+            statusMessage("RUNNING"),
+            assistantText(`\`\`\`json\n${JSON.stringify(workerJson)}\n\`\`\``),
+            statusMessage("FINISHED"),
+          ],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", summary: "incomplete artifact", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-incomplete-artifact-fallback", fake, store);
+    expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
+    expect(finishedEvent?.payload?.payload_source).toBe("assistant");
+  });
+
+  it("falls back to assistant JSON when the artifact exists but is not valid JSON", async () => {
+    const config = singleTaskConfig();
+    const workerJson = { task_id: "t1", status: "completed", summary: "from assistant after bad artifact", outputs: {} };
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [
+            statusMessage("RUNNING"),
+            assistantText(`\`\`\`json\n${JSON.stringify(workerJson)}\n\`\`\``),
+            statusMessage("FINISHED"),
+          ],
+          result: { id: "r1", status: "finished" },
+          artifacts: { "cursor-orch-output.json": "not-json {{{" },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await runOrchestration("run-bad-artifact-fallback", fake, store);
+    expect(JSON.parse(files.get("agent-t1.json")!)).toMatchObject(workerJson);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const finishedEvent = events.find((e) => e.event_type === "task_finished" && e.task_id === "t1");
+    expect(finishedEvent?.payload?.payload_source).toBe("assistant");
   });
 
   it("marks a task failed when the SDK run returns status=error", async () => {
@@ -843,35 +926,83 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
-  it("skips planning when stopped state loads after an empty pre-planning read (prompt-only)", async () => {
-    const config = promptOnlyConfig();
-    const runId = "run-stopped-empty-first-read";
+  it("propagates state.json read errors after retry exhaustion", async () => {
+    const config = singleTaskConfig();
     const fake = new FakeAgentClient({
       defaultScripts: [
         {
           events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r1", status: "finished", result: "" },
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
         },
       ],
     });
-    const stoppedState = createInitialState(config, runId);
-    stoppedState.status = "stopped";
-    let stateReadCount = 0;
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(stoppedState),
-    });
-    const baseReadFile = store.readFile.bind(store);
-    store.readFile = async (id: string, filename: string) => {
-      if (filename === "state.json") {
-        stateReadCount += 1;
-        return stateReadCount === 1 ? "" : baseReadFile(id, filename);
-      }
-      return baseReadFile(id, filename);
-    };
-    await runOrchestration(runId, fake, store);
+    const { store } = createTransientStateReadStore({ "config.yaml": toYaml(config) }, 3);
+    await expect(runOrchestration("run-state-read-exhausted", fake, store)).rejects.toThrow(
+      /transient repo read failure/,
+    );
     expect(fake.launches).toHaveLength(0);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
+  it("resumes an in-progress task run after transient state.json read failures", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-resume-transient/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const state = createInitialState(config, "run-resume-transient");
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    const { store, files } = createTransientStateReadStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+    await runOrchestration("run-resume-transient", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("rejects corrupt state.json after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const { store } = createTransientStateReadStore(
+      {
+        "config.yaml": toYaml(config),
+        "state.json": "{not-json",
+      },
+      1,
+    );
+    await expect(runOrchestration("run-corrupt-transient", new FakeAgentClient(), store)).rejects.toThrow(
+      /Invalid state\.json/,
+    );
+  });
+
+  it("rejects empty state.json when events exist after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const { store } = createTransientStateReadStore(
+      {
+        "config.yaml": toYaml(config),
+        "state.json": "",
+        "events.jsonl": `${JSON.stringify({
+          timestamp: "2026-06-01T00:00:00.000Z",
+          event_type: "orchestration_started",
+          task_id: null,
+          detail: "Orchestration started",
+        })}\n`,
+      },
+      1,
+    );
+    await expect(runOrchestration("run-empty-transient", new FakeAgentClient(), store)).rejects.toThrow(
+      /refusing to reset orchestration progress/,
+    );
   });
 
   it("does not launch planning when resuming a stopped prompt-only run", async () => {
@@ -893,6 +1024,64 @@ describe("runOrchestration with SDK (happy path)", () => {
     await runOrchestration("run-stopped-plan", fake, store);
     expect(fake.launches).toHaveLength(0);
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
+  it("defers planning_failed until after state init so a failed plan can be retried", async () => {
+    const config = promptOnlyConfig();
+    const failingPlanner = () =>
+      new FakeAgentClient({
+        defaultScripts: [{ sendThrows: new Error("planner timeout") }],
+      });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
+    expect(files.has("state.json")).toBe(true);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const startedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
+    const failedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(failedIdx).toBeGreaterThan(startedIdx);
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.not.toThrow(
+      /refusing to reset orchestration progress/,
+    );
+  });
+
+  it("reuses existing task-plan.json without launching a planner agent", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", "run-reuse-plan")],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    await runOrchestration("run-reuse-plan", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    expect(fake.launches[0]!.opts.repoUrl).toBe("https://github.com/acme/svc");
+    expect(fake.launches[0]!.prompt).toContain("Planned work.");
+    const updatedConfig = files.get("config.yaml")!;
+    expect(updatedConfig).toContain("t1");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(
+      events.some(
+        (e: { event_type: string; detail?: string }) =>
+          e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
+      ),
+    ).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
   it("marks a task blocked when worker JSON reports blocked status", async () => {
@@ -985,6 +1174,86 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.status).toBe("finished");
     expect(state.agents.t2.status).toBe("finished");
   });
+
+  it("does not inject dependency outputs from agent files with empty JSON objects", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        completedWorkerScript("t1", "run-dep-empty-json", { upstream_token: "canonical-t1" }),
+        completedWorkerScript("t2", "run-dep-empty-json"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        await baseWrite(runId, filename, "{}");
+      }
+    };
+    await runOrchestration("run-dep-empty-json", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    const t2Prompt = fake.sentPrompts[1]!;
+    expect(t2Prompt).not.toContain("canonical-t1");
+    expect(t2Prompt).not.toContain("upstream_token");
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("ignores malformed JSON in agent files when gathering dependency outputs", async () => {
+    const config = twoTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        completedWorkerScript("t1", "run-dep-bad-json", { upstream_token: "canonical-t1" }),
+        completedWorkerScript("t2", "run-dep-bad-json"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "agent-t1.json") {
+        await baseWrite(runId, filename, "{not valid json");
+      }
+    };
+    await runOrchestration("run-dep-bad-json", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    const t2Prompt = fake.sentPrompts[1]!;
+    expect(t2Prompt).not.toContain("canonical-t1");
+    expect(t2Prompt).not.toContain("upstream_token");
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("marks a completed worker stopped when stop is requested while the worker is running", async () => {
+    const config = singleTaskConfig();
+    const script = completedWorkerScript("t1", "run-stop-finalize");
+    script.waitDelayMs = 6_000;
+    const fake = new FakeAgentClient({
+      defaultScripts: [script],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      await baseWrite(runId, filename, content);
+      if (filename === "state.json") {
+        const state = JSON.parse(content) as { agents?: Record<string, { status?: string }> };
+        if (state.agents?.t1?.status === "running") {
+          await baseWrite(
+            runId,
+            "stop-requested.json",
+            JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
+          );
+        }
+      }
+    };
+    await runOrchestration("run-stop-finalize", fake, store);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("stopped");
+    expect(state.agents.t1.status).toBe("stopped");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(
+      false,
+    );
+  }, 20_000);
 
   it("ignores non-canonical agent files when gathering dependency outputs", async () => {
     const config = twoTaskChainConfig();
