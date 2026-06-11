@@ -67,10 +67,14 @@ function readTaskFailureRetryCap(): number {
   return TASK_FAILURE_MAX_RETRIES_DEFAULT;
 }
 
-function resetAgentToSchedulableForRetry(agent: AgentState): void {
+function resetAgentForLaunch(agent: AgentState): void {
   agent.agent_id = null;
   agent.status = "pending";
   agent.started_at = null;
+}
+
+function resetAgentToSchedulableForRetry(agent: AgentState): void {
+  resetAgentForLaunch(agent);
   agent.finished_at = null;
   agent.branch_name = null;
   agent.pr_url = null;
@@ -78,12 +82,6 @@ function resetAgentToSchedulableForRetry(agent: AgentState): void {
   agent.blocked_reason = null;
   agent.blocked_since = null;
   agent.cascade_source_task_id = null;
-}
-
-function resetAgentForStaleLaunchRelaunch(agent: AgentState): void {
-  agent.agent_id = null;
-  agent.status = "pending";
-  agent.started_at = null;
 }
 
 async function handleTaskFailureWithOptionalRetry(
@@ -712,6 +710,13 @@ type LoopContext = {
 function markStateDirty(ctx: LoopContext): void {
   ctx.dirty.value = true;
   triggerWakeup(ctx);
+}
+
+function resetEventRecoveredForRelaunch(ctx: LoopContext, taskId: string, agent: AgentState): boolean {
+  if (!ctx.eventRecoveredTaskIds.has(taskId)) return false;
+  resetAgentForLaunch(agent);
+  markStateDirty(ctx);
+  return true;
 }
 
 function triggerWakeup(ctx: LoopContext): void {
@@ -1773,11 +1778,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
-        if (ctx.eventRecoveredTaskIds.has(taskId)) {
-          resetAgentForStaleLaunchRelaunch(agent);
-          markStateDirty(ctx);
-          continue;
-        }
+        if (resetEventRecoveredForRelaunch(ctx, taskId, agent)) continue;
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
         continue;
@@ -1811,11 +1812,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
-      if (ctx.eventRecoveredTaskIds.has(taskId)) {
-        resetAgentForStaleLaunchRelaunch(agent);
-        markStateDirty(ctx);
-        continue;
-      }
+      if (resetEventRecoveredForRelaunch(ctx, taskId, agent)) continue;
       agent.status = "failed";
       agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
       markStateDirty(ctx);
