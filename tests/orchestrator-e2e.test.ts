@@ -1241,20 +1241,7 @@ describe("runOrchestration with SDK (happy path)", () => {
       defaultScripts: [script],
     });
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    const baseWrite = store.writeFile.bind(store);
-    store.writeFile = async (runId, filename, content) => {
-      await baseWrite(runId, filename, content);
-      if (filename === "state.json") {
-        const state = JSON.parse(content) as { agents?: Record<string, { status?: string }> };
-        if (state.agents?.t1?.status === "running") {
-          await baseWrite(
-            runId,
-            "stop-requested.json",
-            JSON.stringify({ requested_at: new Date().toISOString(), requested_by: "test" }),
-          );
-        }
-      }
-    };
+    injectStopWhenTaskRunning(store, "t1");
     await runOrchestration("run-stop-finalize", fake, store);
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("stopped");

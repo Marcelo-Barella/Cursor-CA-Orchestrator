@@ -1939,7 +1939,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    const lateStateContent = await repoStore.readFile(runId, "state.json");
+    const lateStateContent = await readStateJsonContent(repoStore, runId);
     await refuseResumeWithEmptyState(repoStore, runId, lateStateContent);
     if (!lateStateContent.trim()) {
       state = createInitialState(config, runId);
