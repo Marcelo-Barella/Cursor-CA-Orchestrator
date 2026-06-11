@@ -729,6 +729,16 @@ async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   }
 }
 
+async function disposeUnadoptedDeferredLaunchAgent(
+  ctx: LoopContext,
+  taskId: string,
+  existingSdkAgent?: SdkAgent,
+): Promise<void> {
+  if (existingSdkAgent && !ctx.activeWorkers.has(taskId)) {
+    await safeDisposeAgent(existingSdkAgent);
+  }
+}
+
 async function launchWorkerAgent(
   ctx: LoopContext,
   taskId: string,
@@ -737,6 +747,7 @@ async function launchWorkerAgent(
   existingSdkAgent?: SdkAgent,
 ): Promise<void> {
   const agent = ctx.state.agents[taskId]!;
+  try {
   const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
   const planRef = planRefForConsolidatedRunLine(task, ref);
   const runLine =
@@ -915,6 +926,9 @@ async function launchWorkerAgent(
   handle.done = runWorkerStream(ctx, handle, { repoUrl, ref: startingRefForSdk, runLine, planRef });
   ctx.activeWorkers.set(taskId, handle);
   markStateDirty(ctx);
+  } finally {
+    await disposeUnadoptedDeferredLaunchAgent(ctx, taskId, existingSdkAgent);
+  }
 }
 
 async function runWorkerStream(

@@ -98,6 +98,62 @@ describe("reattachWorkers running tasks", () => {
     },
   );
 
+  it("disposes the resumed SdkAgent when deferred launch branch prep fails", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-deferred-launch-branch-fail";
+    const liveAgentId = "agent-deferred-branch-fail";
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    state.agents.t1 = {
+      ...state.agents.t1!,
+      agent_id: liveAgentId,
+      status: "launching",
+      started_at: state.started_at,
+      branch_name: `cursor-orch/${runId}/t1`,
+    };
+
+    listRunsMock.mockResolvedValue({ items: [] });
+
+    const wrappedFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/git/refs") && init?.method === "POST") {
+        return new Response(JSON.stringify({ message: "forbidden" }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return wrappedFetch(input, init);
+    }) as typeof fetch;
+
+    const fake = new FakeAgentClient({
+      runsByAgent: {
+        [liveAgentId]: [completedResumeScript(runId)],
+      },
+      conversationText: null,
+    });
+    let resumedAgent: FakeSdkAgent | undefined;
+    const baseResume = fake.resumeCloudAgent.bind(fake);
+    vi.spyOn(fake, "resumeCloudAgent").mockImplementation(async (agentId, opts) => {
+      resumedAgent = (await baseResume(agentId, opts)) as FakeSdkAgent;
+      return resumedAgent;
+    });
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+
+    await expect(runOrchestration(runId, fake, store)).rejects.toThrow(/Failed tasks: t1/);
+
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.agents.t1.status).toBe("failed");
+    expect(resumedAgent?.disposed).toBe(true);
+    expect(fake.launches).toHaveLength(0);
+  });
+
   it("completes a deferred launch by sending the worker prompt when listRuns is empty but agent is launching", async () => {
     const config = singleTaskConfig();
     const runId = "run-deferred-launch";
