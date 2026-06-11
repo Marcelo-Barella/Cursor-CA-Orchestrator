@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import { FakeAgentClient, statusMessage } from "./support/fake-agent-client.js";
+import { createInMemoryRepoStore } from "./support/reattach-fixtures.js";
 
 function twoTaskChainConfig(): OrchestratorConfig {
   return {
@@ -49,21 +49,7 @@ describe("stopped upstream cascade", () => {
         },
       ],
     });
-    const files = new Map([["config.yaml", toYaml(config)]]);
-    const store = {
-      async readFile(_runId: string, filename: string) {
-        return files.get(filename) ?? "";
-      },
-      async writeFile(_runId: string, filename: string, content: string) {
-        files.set(filename, content);
-      },
-      async updateFile(_runId: string, filename: string, updater: (current: string) => string | Promise<string>) {
-        files.set(filename, await updater(files.get(filename) ?? ""));
-      },
-      async deleteFile(_runId: string, filename: string) {
-        files.delete(filename);
-      },
-    } as unknown as RepoStoreClient;
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
 
     const run = runOrchestration("run-stopped-cascade-hang", fake, store);
     const timeout = new Promise<never>((_, reject) => {
