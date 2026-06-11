@@ -275,17 +275,7 @@ export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
   if (runs.length === 0) return null;
   const running = runs.find((run) => run.status === "running");
   if (running) return running;
-  let best = runs[0]!;
-  let bestCreated = best.createdAt ?? 0;
-  for (let i = 1; i < runs.length; i += 1) {
-    const run = runs[i]!;
-    const created = run.createdAt ?? 0;
-    if (created >= bestCreated) {
-      best = run;
-      bestCreated = created;
-    }
-  }
-  return best;
+  return runs.reduce((best, run) => ((run.createdAt ?? 0) >= (best.createdAt ?? 0) ? run : best));
 }
 
 export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): string[] {
@@ -710,13 +700,6 @@ type LoopContext = {
 function markStateDirty(ctx: LoopContext): void {
   ctx.dirty.value = true;
   triggerWakeup(ctx);
-}
-
-function resetEventRecoveredForRelaunch(ctx: LoopContext, taskId: string, agent: AgentState): boolean {
-  if (!ctx.eventRecoveredTaskIds.has(taskId)) return false;
-  resetAgentForLaunch(agent);
-  markStateDirty(ctx);
-  return true;
 }
 
 function triggerWakeup(ctx: LoopContext): void {
@@ -1778,7 +1761,11 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
-        if (resetEventRecoveredForRelaunch(ctx, taskId, agent)) continue;
+        if (ctx.eventRecoveredTaskIds.has(taskId)) {
+          resetAgentForLaunch(agent);
+          markStateDirty(ctx);
+          continue;
+        }
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
         continue;
@@ -1812,7 +1799,11 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
-      if (resetEventRecoveredForRelaunch(ctx, taskId, agent)) continue;
+      if (ctx.eventRecoveredTaskIds.has(taskId)) {
+        resetAgentForLaunch(agent);
+        markStateDirty(ctx);
+        continue;
+      }
       agent.status = "failed";
       agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
       markStateDirty(ctx);
