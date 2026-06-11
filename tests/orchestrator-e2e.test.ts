@@ -848,6 +848,53 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("skips orchestration loop when stopped state loads after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const stoppedState = createInitialState(config, "run-stopped-transient");
+    stoppedState.status = "stopped";
+    const stateJson = serialize(stoppedState);
+    let stateReadCount = 0;
+    const files: FileStore = new Map([["config.yaml", toYaml(config)], ["state.json", stateJson]]);
+    const store = {
+      rateLimitRemaining: null,
+      rateLimitLimit: null,
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "state.json") {
+          stateReadCount += 1;
+          if (stateReadCount <= 2) {
+            throw new Error("transient repo read failure");
+          }
+          return files.get(filename) ?? "";
+        }
+        return files.get(filename) ?? "";
+      },
+      async writeFile(_runId: string, filename: string, content: string): Promise<void> {
+        files.set(filename, content);
+      },
+      async updateFile(_runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
+        const current = files.get(filename) ?? "";
+        files.set(filename, await updater(current));
+      },
+      async deleteFile(_runId: string, filename: string): Promise<void> {
+        files.delete(filename);
+      },
+    } as unknown as RepoStoreClient;
+    await runOrchestration("run-stopped-transient", fake, store);
+    expect(fake.launches).toHaveLength(0);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
+  });
+
   it("does not launch planning when resuming a stopped prompt-only run", async () => {
     const config = promptOnlyConfig();
     const fake = new FakeAgentClient({

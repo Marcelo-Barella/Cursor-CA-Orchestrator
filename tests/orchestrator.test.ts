@@ -249,6 +249,27 @@ describe("orchestrator launch eligibility", () => {
     expect(extractDelegationPhases(config, new Set())).toBeNull();
   });
 
+  it("extractDelegationPhases parses loose waves format with camelCase keys", () => {
+    const config = createConfig(["a", "b"]) as OrchestratorConfig & {
+      delegationMap?: unknown;
+    };
+    config.delegation_map = undefined;
+    config.delegationMap = {
+      waves: [
+        {
+          phase_id: "wave-1",
+          parallelGroups: [{ taskIds: ["a"] }, { tasks: ["b"] }],
+        },
+      ],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).not.toBeNull();
+    expect(phases).toHaveLength(1);
+    expect(phases![0]!.id).toBe("wave-1");
+    expect(phases![0]!.groups).toHaveLength(1);
+    expect(phases![0]!.groups[0]!.task_ids).toEqual(["a", "b"]);
+  });
+
   it("extractDelegationPhases parses legacy delegationMap waves and parallel_groups", () => {
     const config = createConfig(["a", "b", "c"]) as OrchestratorConfig & {
       delegationMap?: unknown;
@@ -356,25 +377,28 @@ describe("orchestrator launch eligibility", () => {
     expect(eligible).toEqual(["b", "c"]);
   });
 
-  it("treats a failed task in the prior group as terminal for wave advancement", () => {
-    const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
-    config.delegation_map = {
-      phases: [
-        {
-          id: "phase-1",
-          groups: [
-            { id: "g1", task_ids: ["a"] },
-            { id: "g2", task_ids: ["b", "c"] },
-          ],
-        },
-      ],
-    };
-    const state = createInitialState(config, "run1");
-    state.agents.a!.status = "failed";
-    const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
-    expect(eligible).toEqual(["b", "c"]);
-    expect(state.delegation_group_index).toBe(1);
-  });
+  it.each(["failed", "stopped"] as const)(
+    "treats a %s task in the prior group as terminal for wave advancement",
+    (terminalStatus) => {
+      const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
+      config.delegation_map = {
+        phases: [
+          {
+            id: "phase-1",
+            groups: [
+              { id: "g1", task_ids: ["a"] },
+              { id: "g2", task_ids: ["b", "c"] },
+            ],
+          },
+        ],
+      };
+      const state = createInitialState(config, "run1");
+      state.agents.a!.status = terminalStatus;
+      const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
+      expect(eligible).toEqual(["b", "c"]);
+      expect(state.delegation_group_index).toBe(1);
+    },
+  );
 
   it("after mapped waves complete, eligible ready tasks are only those not in the delegation map (defensive)", () => {
     const config = createConfig(["a", "b", "u"]);
