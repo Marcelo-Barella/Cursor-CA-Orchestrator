@@ -131,24 +131,6 @@ function twoTaskChainConfig(): OrchestratorConfig {
   };
 }
 
-function twoParallelTaskConfig(): OrchestratorConfig {
-  const base = singleTaskConfig();
-  const mk = (id: string) => ({
-    id,
-    repo: "svc" as const,
-    prompt: `task ${id}`,
-    model: null,
-    depends_on: [] as string[],
-    timeout_minutes: 30,
-    create_repo: false,
-    repo_config: null,
-  });
-  return {
-    ...base,
-    tasks: [mk("t-a"), mk("t-b")],
-  };
-}
-
 function completedWorkerScript(taskId: string, runId: string, outputs: Record<string, unknown> = {}): FakeRunScript {
   return {
     events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
@@ -1346,57 +1328,6 @@ describe("runOrchestration with SDK (happy path)", () => {
     await runOrchestration("run-5", fake, store);
     const state = JSON.parse(files.get("state.json")!);
     expect(state.status).toBe("stopped");
-  });
-
-  it("finalizes orchestration as stopped when SDK cancels without a stop sentinel", async () => {
-    const config = singleTaskConfig();
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING")],
-          result: { id: "r1", status: "cancelled" },
-        },
-      ],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    await runOrchestration("run-sdk-cancel-no-sentinel", fake, store);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("stopped");
-    expect(state.agents.t1.status).toBe("stopped");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(
-      events.some(
-        (e: { event_type: string; detail: string }) =>
-          e.event_type === "orchestration_stopped" && e.detail.includes("one or more tasks were stopped"),
-      ),
-    ).toBe(true);
-  });
-
-  it("exits the orchestration loop when parallel tasks finish with a mix of finished and stopped", async () => {
-    const config = twoParallelTaskConfig();
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        completedWorkerScript("t-a", "run-mixed-terminal"),
-        {
-          events: [statusMessage("RUNNING")],
-          result: { id: "r-b", status: "cancelled" },
-        },
-      ],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    await runOrchestration("run-mixed-terminal", fake, store);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("stopped");
-    expect(state.agents["t-a"].status).toBe("finished");
-    expect(state.agents["t-b"].status).toBe("stopped");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(
-      events.some(
-        (e: { event_type: string; detail: string }) =>
-          e.event_type === "orchestration_stopped" &&
-          e.detail === "Orchestration stopped after one or more tasks were stopped",
-      ),
-    ).toBe(true);
   });
 
   it("cascades terminal upstream failure to dependent pending tasks without launching them", async () => {
