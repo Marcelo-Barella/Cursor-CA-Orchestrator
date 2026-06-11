@@ -94,14 +94,6 @@ export function taskLaunchedEvent(
   agentId: string,
   opts?: { legacyPayload?: boolean; runIdInPayload?: string },
 ): OrchestrationEvent {
-  return JSON.parse(taskLaunchedEventLine(runId, agentId, opts)) as OrchestrationEvent;
-}
-
-export function taskLaunchedEventLine(
-  runId: string,
-  agentId: string,
-  opts?: { legacyPayload?: boolean; runIdInPayload?: string },
-): string {
   const payload: Record<string, string> = {
     run_id: opts?.runIdInPayload ?? "run-live",
     repository: "https://github.com/acme/svc",
@@ -111,7 +103,7 @@ export function taskLaunchedEventLine(
   if (!opts?.legacyPayload) {
     payload.agent_id = agentId;
   }
-  return JSON.stringify({
+  return {
     timestamp: "2026-06-01T00:00:00.000Z",
     event_type: "task_launched",
     task_id: "t1",
@@ -120,7 +112,15 @@ export function taskLaunchedEventLine(
     agent_kind: "task",
     detail: `Launched t1 (${agentId})`,
     payload,
-  });
+  };
+}
+
+export function taskLaunchedEventLine(
+  runId: string,
+  agentId: string,
+  opts?: { legacyPayload?: boolean; runIdInPayload?: string },
+): string {
+  return JSON.stringify(taskLaunchedEvent(runId, agentId, opts));
 }
 
 let unmockedFetch: typeof fetch;

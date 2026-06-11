@@ -27,7 +27,7 @@ vi.mock("@cursor/sdk", async (importOriginal) => {
   };
 });
 
-describe("reattachWorkers running tasks", () => {
+describe("reattachWorkers", () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => resetReattachTestEnv(listRunsMock));
@@ -279,13 +279,6 @@ describe("reattachWorkers running tasks", () => {
     expect(listRunsMock).not.toHaveBeenCalled();
     expect(fake.launches).toHaveLength(0);
   });
-});
-
-describe("reattachWorkers blocked tasks", () => {
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => resetReattachTestEnv(listRunsMock));
-  afterEach(() => restoreReattachTestEnv(originalEnv));
 
   it("does not re-run finished SDK streams for blocked tasks on resume", async () => {
     const config = singleTaskConfig();

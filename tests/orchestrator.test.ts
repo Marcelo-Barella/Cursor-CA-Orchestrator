@@ -536,31 +536,15 @@ describe("pickReattachRun", () => {
 
 describe("agentIdFromTaskLaunchedEvent", () => {
   it("reads agent_id from payload when present", () => {
-    const event: OrchestrationEvent = {
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: "Launched t1 (from-detail)",
-      payload: { agent_id: "from-payload" },
-    };
+    const event = taskLaunchedEvent("run-payload", "from-payload");
+    event.detail = "Launched t1 (from-detail)";
     expect(agentIdFromTaskLaunchedEvent(event)).toBe("from-payload");
   });
 
   it("falls back to detail when legacy events omit payload agent_id", () => {
-    const event: OrchestrationEvent = {
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: "Launched t1 (legacy-agent-7)",
-      payload: { run_id: "run-legacy" },
-    };
-    expect(agentIdFromTaskLaunchedEvent(event)).toBe("legacy-agent-7");
+    expect(agentIdFromTaskLaunchedEvent(taskLaunchedEvent("run-legacy", "legacy-agent-7", { legacyPayload: true }))).toBe(
+      "legacy-agent-7",
+    );
   });
 
   it("returns null when detail does not match the launched-agent pattern", () => {
