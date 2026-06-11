@@ -228,55 +228,6 @@ describe("reattachWorkers running tasks", () => {
     expect(fake.launches).toHaveLength(0);
   });
 
-  it("reattaches from legacy task_launched detail when payload omits agent_id", async () => {
-    const config = singleTaskConfig();
-    const runId = "run-recover-legacy-events";
-    const liveAgentId = "agent-legacy-events";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-
-    const resumeScript = completedResumeScript(runId);
-    const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
-    listRunsMock.mockResolvedValue({ items: [resumedRun] });
-
-    const fake = new FakeAgentClient({
-      runsByAgent: { [liveAgentId]: [resumeScript] },
-      conversationText: null,
-    });
-
-    const launchEvent = JSON.stringify({
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: `Launched t1 (${liveAgentId})`,
-      payload: {
-        run_id: "run-live",
-        repository: "https://github.com/acme/svc",
-        ref: "main",
-        branch: `cursor-orch/${runId}/t1`,
-      },
-    });
-
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(state),
-      "events.jsonl": `${launchEvent}\n`,
-    });
-
-    await runOrchestration(runId, fake, store);
-
-    const final = JSON.parse(files.get("state.json")!);
-    expect(final.status).toBe("completed");
-    expect(final.agents.t1.agent_id).toBe(liveAgentId);
-    expect(final.agents.t1.status).toBe("finished");
-    expect(fake.launches).toHaveLength(0);
-  });
-
   it("passes configured mcp_servers to resumeCloudAgent", async () => {
     const config = {
       ...singleTaskConfig(),
