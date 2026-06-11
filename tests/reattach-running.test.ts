@@ -97,6 +97,45 @@ describe("reattachWorkers running tasks", () => {
     expect(fake.launches).toHaveLength(0);
   });
 
+  it("completes a deferred launch by sending the worker prompt when listRuns is empty but agent is launching", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-deferred-launch";
+    const liveAgentId = "agent-deferred-1";
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+    state.agents.t1 = {
+      ...state.agents.t1!,
+      agent_id: liveAgentId,
+      status: "launching",
+      started_at: state.started_at,
+      branch_name: `cursor-orch/${runId}/t1`,
+    };
+
+    listRunsMock.mockResolvedValue({ items: [] });
+
+    const fake = new FakeAgentClient({
+      runsByAgent: {
+        [liveAgentId]: [completedResumeScript(runId)],
+      },
+      conversationText: null,
+    });
+
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.status).toBe("completed");
+    expect(final.agents.t1.status).toBe("finished");
+    expect(fake.launches).toHaveLength(0);
+    expect(listRunsMock).toHaveBeenCalledWith(liveAgentId, { runtime: "cloud", apiKey: "sk-fake" });
+  });
+
   it("marks the task failed when resume finds no SDK runs", async () => {
     const config = singleTaskConfig();
     const runId = "run-reattach-no-runs";
