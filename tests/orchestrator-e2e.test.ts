@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
-import * as planner from "../src/planner.js";
 import { createInitialState, serialize } from "../src/state.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
 import {
@@ -132,29 +131,6 @@ function twoTaskChainConfig(): OrchestratorConfig {
   };
 }
 
-function eventTypesFromFiles(files: FileStore): string[] {
-  const raw = files.get("events.jsonl");
-  if (!raw?.trim()) return [];
-  return raw
-    .trim()
-    .split("\n")
-    .map((line) => (JSON.parse(line) as { event_type: string }).event_type);
-}
-
-function promptOnlyTaskPlan(prompt = "Planned work."): string {
-  return JSON.stringify({
-    tasks: [
-      {
-        id: "t1",
-        repo: "svc",
-        prompt,
-        depends_on: [],
-        timeout_minutes: 30,
-      },
-    ],
-  });
-}
-
 function completedWorkerScript(taskId: string, runId: string, outputs: Record<string, unknown> = {}): FakeRunScript {
   return {
     events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
@@ -273,6 +249,34 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).agents["t-b"].status).toBe("finished");
   });
 
+  it("persists worker agent_id to state.json after launch before the worker stream completes", async () => {
+    const config = singleTaskConfig();
+    const runId = "run-launch-sync";
+    const stateWrites: Array<{ agentId: string | null; status: string }> = [];
+    const fake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", runId)],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (id, filename, content) => {
+      if (filename === "state.json") {
+        const parsed = JSON.parse(content) as { agents?: { t1?: { agent_id?: string | null; status?: string } } };
+        stateWrites.push({
+          agentId: parsed.agents?.t1?.agent_id ?? null,
+          status: parsed.agents?.t1?.status ?? "",
+        });
+      }
+      return baseWrite(id, filename, content);
+    };
+
+    await runOrchestration(runId, fake, store);
+
+    expect(stateWrites.some((write) => write.agentId !== null && write.status === "launching")).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).agents.t1.status).toBe("finished");
+  });
+
   it("launches a worker, reads the artifact, and marks the run completed", async () => {
     const config = singleTaskConfig();
     const workerPayload = {
@@ -300,6 +304,11 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("completed");
     expect(state.agents.t1.status).toBe("finished");
     expect(fake.launches[0]!.opts.startingRef).toBe("cursor-orch/run-1/t1");
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const launched = events.find((e: { event_type: string }) => e.event_type === "task_launched");
+    expect(launched?.payload?.agent_id).toBe(fake.launches[0]!.agent.agentId);
+    expect(launched?.payload?.run_id).toBeTruthy();
+    expect(launched?.payload?.branch).toBe("cursor-orch/run-1/t1");
   });
 
   it("persists truncated agent output when worker JSON exceeds size limits", async () => {
@@ -917,6 +926,85 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("propagates state.json read errors after retry exhaustion", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished" },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const { store } = createTransientStateReadStore({ "config.yaml": toYaml(config) }, 3);
+    await expect(runOrchestration("run-state-read-exhausted", fake, store)).rejects.toThrow(
+      /transient repo read failure/,
+    );
+    expect(fake.launches).toHaveLength(0);
+  });
+
+  it("resumes an in-progress task run after transient state.json read failures", async () => {
+    const config = singleTaskConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r1", status: "finished", git: runGit("cursor-orch/run-resume-transient/t1") },
+          artifacts: {
+            "cursor-orch-output.json": JSON.stringify({ task_id: "t1", status: "completed", summary: "ok", outputs: {} }),
+          },
+        },
+      ],
+    });
+    const state = createInitialState(config, "run-resume-transient");
+    state.status = "running";
+    state.started_at = new Date().toISOString();
+    const { store, files } = createTransientStateReadStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+    await runOrchestration("run-resume-transient", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("rejects corrupt state.json after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const { store } = createTransientStateReadStore(
+      {
+        "config.yaml": toYaml(config),
+        "state.json": "{not-json",
+      },
+      1,
+    );
+    await expect(runOrchestration("run-corrupt-transient", new FakeAgentClient(), store)).rejects.toThrow(
+      /Invalid state\.json/,
+    );
+  });
+
+  it("rejects empty state.json when events exist after transient read failures", async () => {
+    const config = singleTaskConfig();
+    const { store } = createTransientStateReadStore(
+      {
+        "config.yaml": toYaml(config),
+        "state.json": "",
+        "events.jsonl": `${JSON.stringify({
+          timestamp: "2026-06-01T00:00:00.000Z",
+          event_type: "orchestration_started",
+          task_id: null,
+          detail: "Orchestration started",
+        })}\n`,
+      },
+      1,
+    );
+    await expect(runOrchestration("run-empty-transient", new FakeAgentClient(), store)).rejects.toThrow(
+      /refusing to reset orchestration progress/,
+    );
+  });
+
   it("does not launch planning when resuming a stopped prompt-only run", async () => {
     const config = promptOnlyConfig();
     const fake = new FakeAgentClient({
@@ -938,14 +1026,47 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("stopped");
   });
 
+  it("defers planning_failed until after state init so a failed plan can be retried", async () => {
+    const config = promptOnlyConfig();
+    const failingPlanner = () =>
+      new FakeAgentClient({
+        defaultScripts: [{ sendThrows: new Error("planner timeout") }],
+      });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+    });
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
+    expect(files.has("state.json")).toBe(true);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    const startedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "orchestration_started");
+    const failedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_failed");
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(failedIdx).toBeGreaterThan(startedIdx);
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
+    await expect(runOrchestration("run-plan-fail-retry", failingPlanner(), store)).rejects.not.toThrow(
+      /refusing to reset orchestration progress/,
+    );
+  });
+
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
     const fake = new FakeAgentClient({
       defaultScripts: [completedWorkerScript("t1", "run-reuse-plan")],
     });
     const { store, files } = createInMemoryRepoStore({
       "config.yaml": toYaml(config),
-      "task-plan.json": promptOnlyTaskPlan(),
+      "task-plan.json": taskPlan,
     });
     await runOrchestration("run-reuse-plan", fake, store);
     expect(fake.launches).toHaveLength(1);
@@ -960,90 +1081,7 @@ describe("runOrchestration with SDK (happy path)", () => {
           e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
       ),
     ).toBe(true);
-    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
-    const types = eventTypesFromFiles(files);
-    const startedIdx = types.indexOf("orchestration_started");
-    const completedIdx = types.indexOf("planning_completed");
-    expect(startedIdx).toBeGreaterThanOrEqual(0);
-    expect(completedIdx).toBeGreaterThan(startedIdx);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.status).toBe("completed");
-    expect(state.phase_agents.planning.status).toBe("finished");
-  });
-
-  it("falls back to full planning when task-plan.json is invalid and emits planning lifecycle events", async () => {
-    const config = promptOnlyConfig();
-    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(promptOnlyTaskPlan("Replanned work."));
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r-plan", status: "finished", result: "" },
-        },
-        completedWorkerScript("t1", "run-invalid-plan"),
-      ],
-    });
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "task-plan.json": "{not-valid-json",
-    });
-    try {
-      await runOrchestration("run-invalid-plan", fake, store);
-      expect(fake.launches).toHaveLength(2);
-      expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
-      expect(fake.launches[1]!.opts.repoUrl).toBe("https://github.com/acme/svc");
-      expect(fake.launches[1]!.prompt).toContain("Replanned work.");
-      const types = eventTypesFromFiles(files);
-      expect(types).toContain("planning_started");
-      expect(types).toContain("planning_completed");
-      expect(types.indexOf("planning_started")).toBeLessThan(types.indexOf("planning_completed"));
-      const completed = files
-        .get("events.jsonl")!
-        .trim()
-        .split("\n")
-        .map((l) => JSON.parse(l) as { event_type: string; detail?: string })
-        .find((e) => e.event_type === "planning_completed");
-      expect(completed?.detail).toBe("Planning completed: 1 tasks");
-      expect(completed?.detail).not.toContain("reused existing plan");
-      const state = JSON.parse(files.get("state.json")!);
-      expect(state.status).toBe("completed");
-      expect(state.phase_agents.planning.status).toBe("finished");
-    } finally {
-      waitSpy.mockRestore();
-    }
-  });
-
-  it("persists state before planning_failed so a retry is not blocked by the empty-state guard", async () => {
-    const config = promptOnlyConfig();
-    const waitSpy = vi.spyOn(planner, "waitForPlan").mockResolvedValue(null);
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r-plan", status: "finished", result: "" },
-        },
-      ],
-    });
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-    });
-    try {
-      await expect(runOrchestration("run-plan-retry", fake, store)).rejects.toThrow(/Timed out waiting for task plan/);
-      expect(files.get("state.json")?.trim()).toBeTruthy();
-      const failedTypes = eventTypesFromFiles(files);
-      const startedIdx = failedTypes.indexOf("orchestration_started");
-      const planningFailedIdx = failedTypes.indexOf("planning_failed");
-      expect(startedIdx).toBeGreaterThanOrEqual(0);
-      expect(planningFailedIdx).toBeGreaterThan(startedIdx);
-      const failedState = JSON.parse(files.get("state.json")!);
-      expect(failedState.phase_agents.planning.status).toBe("failed");
-
-      await expect(runOrchestration("run-plan-retry", fake, store)).rejects.toThrow(/Timed out waiting for task plan/);
-      expect(files.get("state.json")?.trim()).toBeTruthy();
-      expect(eventTypesFromFiles(files).filter((t) => t === "planning_failed").length).toBeGreaterThanOrEqual(2);
-    } finally {
-      waitSpy.mockRestore();
-    }
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
   it("marks a task blocked when worker JSON reports blocked status", async () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadSecretsFromRepo } from "../src/orchestrator.js";
 
 const execSyncMock = vi.hoisted(() => vi.fn());
@@ -10,6 +10,10 @@ vi.mock("node:child_process", () => ({
 describe("loadSecretsFromRepo", () => {
   beforeEach(() => {
     execSyncMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
   });
 
   it("returns GH_TOKEN and CURSOR_API_KEY from secrets.json", () => {

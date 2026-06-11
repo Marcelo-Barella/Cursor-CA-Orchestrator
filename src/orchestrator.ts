@@ -1600,30 +1600,6 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
-async function tryReuseExistingTaskPlan(
-  config: OrchestratorConfig,
-  runId: string,
-  planContent: string,
-  ghToken: string,
-  repoStore: RepoStoreClient,
-): Promise<string | null> {
-  try {
-    const ghUser = await resolveGithubUsername(ghToken);
-    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-    const parsedTasks = parseTaskPlan(planContent, config);
-    config.tasks = parsedTasks;
-    const canonReuse = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonReuse.repositories;
-    config.tasks = canonReuse.tasks;
-    config.delegation_map = canonReuse.delegation_map;
-    await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-    return `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`;
-  } catch {
-    return null;
-  }
-}
-
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
 
 async function runPlanningPhase(
@@ -1914,24 +1890,40 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningRan = false;
   let planningOk = false;
-  let planningCompletedDetail: string | null = null;
+  let planningUsedFullPhase = false;
   let planningFailedDetail: string | null = null;
-  let emitPlanningStarted = false;
+  let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      planningCompletedDetail = await tryReuseExistingTaskPlan(config, runId, planContent, ghToken, repoStore);
-      if (planningCompletedDetail) {
+      try {
+        const ghUser = await resolveGithubUsername(ghToken);
+        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+        config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+        const parsedTasks = parseTaskPlan(planContent, config);
+        config.tasks = parsedTasks;
+        const canonReuse = canonicalizeOrchestratorConfig(config);
+        config.repositories = canonReuse.repositories;
+        config.tasks = canonReuse.tasks;
+        config.delegation_map = canonReuse.delegation_map;
+        await repoStore.writeFile(runId, "config.yaml", toYaml(config));
+        planningEvents = {
+          emitStarted: false,
+          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
+        };
         planningOk = true;
-      }
+      } catch {}
     }
     if (!planningOk) {
-      emitPlanningStarted = true;
+      planningUsedFullPhase = true;
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {
         planningOk = true;
-        planningCompletedDetail = `Planning completed: ${config.tasks.length} tasks`;
+        planningEvents = {
+          emitStarted: true,
+          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
+        };
       } else {
         planningFailedDetail = planningResult.error;
       }
@@ -1942,12 +1934,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    const eventsContent = await repoStore.readFile(runId, "events.jsonl");
-    if (eventsContent.trim()) {
-      throw new Error(
-        `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
-      );
-    }
     state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
@@ -1974,20 +1960,27 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
-    if (emitPlanningStarted) {
+    if (planningOk && planningEvents) {
+      if (planningEvents.emitStarted) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
       await appendEvent(
         repoStore,
         runId,
-        makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
-    }
-    if (planningOk && planningCompletedDetail) {
-      await appendEvent(
-        repoStore,
-        runId,
-        makeEvent("planning_completed", planningCompletedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
-      );
-    } else if (planningFailedDetail) {
+    } else if (!planningOk && planningFailedDetail !== null) {
+      if (planningUsedFullPhase) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
       await appendEvent(
         repoStore,
         runId,
@@ -2006,15 +1999,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       state.main_agent.finished_at = nowIso();
     }
     await syncToRepo(repoStore, runId, state);
-    await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("orchestration_failed", `Orchestration failed: ${failureMessage}`, null, {
-        agent_node_id: "main-orchestrator",
-        agent_kind: "main",
-      }),
-    );
-    throw new Error(`Orchestration failed: ${failureMessage}`);
+    throw new Error(failureMessage);
   }
 
   const graph = buildDependencyGraph(config.tasks);
