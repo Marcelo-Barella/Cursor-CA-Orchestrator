@@ -1752,6 +1752,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
     if (!agent.agent_id) continue;
     if (agent.status !== "launching" && agent.status !== "running") continue;
     if (ctx.activeWorkers.has(taskId)) continue;
+    let sdkAgent: SdkAgent | undefined;
     try {
       const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
         apiKey: ctx.apiKey,
@@ -1761,7 +1762,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       if (mcpServers) {
         resumeOptions.mcpServers = mcpServers;
       }
-      const sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
+      sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
@@ -1803,7 +1804,10 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
-      if (ctx.eventRecoveredTaskIds.has(taskId)) {
+      if (sdkAgent) {
+        await safeDisposeAgent(sdkAgent);
+      }
+      if (!sdkAgent && ctx.eventRecoveredTaskIds.has(taskId)) {
         resetEventRecoveredAgent(agent, ctx);
         continue;
       }
