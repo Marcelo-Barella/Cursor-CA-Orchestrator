@@ -1628,6 +1628,22 @@ async function applyTaskPlanContent(
   return parsedTasks.length;
 }
 
+async function tryReuseTaskPlan(
+  config: OrchestratorConfig,
+  runId: string,
+  repoStore: RepoStoreClient,
+  planContent: string,
+  ghToken: string,
+): Promise<number | null> {
+  try {
+    const ghUser = await resolveGithubUsername(ghToken);
+    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+    return await applyTaskPlanContent(config, runId, repoStore, planContent, bootstrapUrl);
+  } catch {
+    return null;
+  }
+}
+
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
@@ -1898,16 +1914,14 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      try {
-        const ghUser = await resolveGithubUsername(ghToken);
-        const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-        const taskCount = await applyTaskPlanContent(config, runId, repoStore, planContent, bootstrapUrl);
+      const taskCount = await tryReuseTaskPlan(config, runId, repoStore, planContent, ghToken);
+      if (taskCount !== null) {
         planningEvents = {
           emitStarted: false,
           completedDetail: `Planning completed: ${taskCount} tasks (reused existing plan)`,
         };
         planningOk = true;
-      } catch {}
+      }
     }
     if (!planningOk) {
       try {
