@@ -9,27 +9,6 @@ export function runGit(branch: string): NonNullable<SdkRunResult["git"]> {
   return { branches: [{ repoUrl: "https://github.com/acme/svc", branch }] };
 }
 
-export function createTransientStateReadStore(
-  initial: Record<string, string>,
-  failCount = 2,
-): { store: RepoStoreClient; files: FileStore } {
-  const { store: baseStore, files } = createInMemoryRepoStore(initial);
-  let stateReadCount = 0;
-  const store = {
-    ...baseStore,
-    async readFile(runId: string, filename: string): Promise<string> {
-      if (filename === "state.json") {
-        stateReadCount += 1;
-        if (stateReadCount <= failCount) {
-          throw new Error("transient repo read failure");
-        }
-      }
-      return baseStore.readFile(runId, filename);
-    },
-  } as unknown as RepoStoreClient;
-  return { store, files };
-}
-
 export function createInMemoryRepoStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
   const files: FileStore = new Map(Object.entries(initial));
   const store = {
