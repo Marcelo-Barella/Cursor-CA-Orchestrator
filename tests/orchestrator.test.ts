@@ -991,6 +991,27 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     expect(state.agents.t1!.status).toBe("running");
   });
 
+  it("skips agents that already have an agent_id", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-skip");
+    state.agents.t1!.agent_id = "agent-existing";
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-other)",
+        payload: { agent_id: "agent-other", run_id: "run-other" },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBe("agent-existing");
+    expect(state.agents.t1!.status).toBe("pending");
+  });
+
   it("ignores task_launched events with blank agent_id", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover-blank-detail");
@@ -1009,6 +1030,25 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
+  });
+
+  it("ignores task_launched events with blank agent_id payloads", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-blank");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 ()",
+        payload: { agent_id: "   ", run_id: "run-blank" },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBeNull();
   });
 
   it("uses the latest task_launched event when a task is relaunched", () => {
