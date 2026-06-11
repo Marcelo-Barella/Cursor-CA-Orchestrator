@@ -1960,13 +1960,11 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     const ghUser = await resolveGithubUsername(ghToken);
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      const reused = await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false)
-        .then(() => true)
-        .catch(() => false);
-      if (reused) {
+      try {
+        await applyTaskPlanToConfig(config, runId, planContent, ghUser, repoStore, false);
         planningOk = true;
         planningSource = "reused";
-      }
+      } catch {}
     }
     if (!planningOk) {
       planningUsedFullPhase = true;
