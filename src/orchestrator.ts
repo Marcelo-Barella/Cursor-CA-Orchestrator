@@ -729,9 +729,7 @@ async function syncStopRequestedFromRepo(ctx: LoopContext): Promise<boolean> {
       ctx.stopRequested.value = true;
       return true;
     }
-  } catch {
-    /* poller will retry */
-  }
+  } catch {}
   return false;
 }
 
@@ -1869,16 +1867,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
 
   try {
     while (true) {
-      if (!ctx.stopRequested.value) {
-        try {
-          const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-          if (stopContent) {
-            ctx.stopRequested.value = true;
-          }
-        } catch {
-          /* poller will retry */
-        }
-      }
+      await syncStopRequestedFromRepo(ctx);
       if (ctx.stopRequested.value) {
         await checkStopRequested(ctx);
         return;
@@ -1974,12 +1963,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    let lateStateContent = stateContent;
-    try {
-      lateStateContent = await repoStore.readFile(runId, "state.json");
-    } catch (readErr) {
-      throw readErr instanceof Error ? readErr : new Error(String(readErr));
-    }
+    const lateStateContent = await repoStore.readFile(runId, "state.json");
     await refuseResumeWithEmptyState(repoStore, runId, lateStateContent);
     if (!lateStateContent.trim()) {
       state = createInitialState(config, runId);
