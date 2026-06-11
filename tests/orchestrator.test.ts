@@ -14,6 +14,7 @@ import {
   pickReattachRun,
   planRefForConsolidatedRunLine,
   reconcileInFlightLaunchesFromEvents,
+  shouldRelaunchMissingEventAgent,
   runOrchestration,
 } from "../src/orchestrator.js";
 import type { AgentState, OrchestrationEvent } from "../src/state.js";
@@ -1152,5 +1153,80 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.started_at).toBe("2026-05-01T00:00:00.000Z");
     expect(state.agents.t1!.branch_name).toBe("existing-branch");
+  });
+});
+
+describe("shouldRelaunchMissingEventAgent", () => {
+  const launchEvent: OrchestrationEvent = {
+    timestamp: "2026-06-01T00:00:00.000Z",
+    event_type: "task_launched",
+    task_id: "t1",
+    phase_id: "execution",
+    agent_node_id: "t1",
+    agent_kind: "task",
+    detail: "Launched t1 (agent-dead)",
+    payload: { agent_id: "agent-dead", run_id: "run-dead" },
+  };
+
+  it("returns true for current-session event recovery", () => {
+    const agent: AgentState = {
+      task_id: "t1",
+      agent_id: "agent-dead",
+      status: "launching",
+      started_at: "2026-06-02T00:00:00.000Z",
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    };
+    expect(shouldRelaunchMissingEventAgent(agent, [launchEvent], new Set(["t1"]))).toBe(true);
+  });
+
+  it("returns true when pre-sync persisted event-recovered agent_id and started_at", () => {
+    const agent: AgentState = {
+      task_id: "t1",
+      agent_id: "agent-dead",
+      status: "launching",
+      started_at: launchEvent.timestamp,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    };
+    expect(shouldRelaunchMissingEventAgent(agent, [launchEvent], new Set())).toBe(true);
+  });
+
+  it("returns false for a normally launched agent with mismatched started_at", () => {
+    const agent: AgentState = {
+      task_id: "t1",
+      agent_id: "agent-live",
+      status: "launching",
+      started_at: "2026-06-01T00:00:00.100Z",
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    };
+    const event: OrchestrationEvent = {
+      ...launchEvent,
+      detail: "Launched t1 (agent-live)",
+      payload: { agent_id: "agent-live", run_id: "run-live" },
+    };
+    expect(shouldRelaunchMissingEventAgent(agent, [event], new Set())).toBe(false);
   });
 });
