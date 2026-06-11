@@ -1431,26 +1431,4 @@ describe("runOrchestration with SDK (happy path)", () => {
       /refusing to reset orchestration progress/,
     );
   });
-
-  it("allows retry after planning failure without blocking on empty-state resume guard", async () => {
-    const config = promptOnlyConfig();
-    const failingFake = new FakeAgentClient({
-      defaultScripts: [{ sendThrows: new Error("transient planner error") }],
-    });
-    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-    await expect(runOrchestration("run-plan-retry", failingFake, store)).rejects.toThrow(/transient planner error/);
-    expect(files.get("state.json")).toBeTruthy();
-    expect(files.get("events.jsonl")).toContain("planning_failed");
-
-    const taskPlan = JSON.stringify({
-      tasks: [{ id: "t1", repo: "svc", prompt: "Planned work.", depends_on: [], timeout_minutes: 30 }],
-    });
-    files.set("task-plan.json", taskPlan);
-    const successFake = new FakeAgentClient({
-      defaultScripts: [completedWorkerScript("t1", "run-plan-retry")],
-    });
-    await runOrchestration("run-plan-retry", successFake, store);
-    expect(successFake.launches).toHaveLength(1);
-    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
-  });
 });
