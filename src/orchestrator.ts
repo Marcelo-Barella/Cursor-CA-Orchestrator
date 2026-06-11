@@ -94,9 +94,7 @@ async function handleTaskFailureWithOptionalRetry(
     resetAgentToSchedulableForRetry(agent);
     try {
       await ctx.repoStore.deleteFile(ctx.runId, `agent-${taskId}.json`);
-    } catch {
-      /* advisory */
-    }
+    } catch {}
     await appendEvent(
       ctx.repoStore,
       ctx.runId,
@@ -616,8 +614,7 @@ async function resolveRepoForTask(
   ghToken: string,
 ): Promise<[string, string]> {
   if (task.create_repo) {
-    const ghUser = await resolveGithubUsername(ghToken);
-    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+    const { bootstrapUrl } = await resolveBootstrapContext(ghToken, config.bootstrap_repo_name);
     return [bootstrapUrl, resolveBootstrapRef()];
   }
   if (task.repo in config.repositories) {
@@ -732,9 +729,7 @@ function createWakeup(): { resolve: () => void; promise: Promise<void> } {
 async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   try {
     await agent[Symbol.asyncDispose]();
-  } catch {
-    /* advisory close */
-  }
+  } catch {}
 }
 
 async function launchWorkerAgent(
@@ -952,9 +947,7 @@ async function runWorkerStream(
               payload: { status: event.status, ...(event.message ? { message: event.message } : {}) },
             }),
           );
-        } catch {
-          /* ignore event append failures */
-        }
+        } catch {}
       },
       onToolCall: async (event) => {
         if (event.status === "running") return;
@@ -973,9 +966,7 @@ async function runWorkerStream(
               },
             ),
           );
-        } catch {
-          /* ignore */
-        }
+        } catch {}
       },
       onError: (err) => {
         streamError = err;
@@ -986,9 +977,7 @@ async function runWorkerStream(
   }
   try {
     await handle.transcript.flush();
-  } catch {
-    /* flush failures are non-fatal */
-  }
+  } catch {}
 
   let result: { status: "finished" | "error" | "cancelled" | "unknown"; durationMs?: number; git?: { branch?: string; prUrl?: string }; model?: string; resultText?: string } = { status: "unknown" };
   try {
@@ -1012,9 +1001,7 @@ async function runWorkerStream(
       if (artifact.value !== null && normalizeWorkerPayload(artifact.value, taskId) !== null) {
         return { raw: artifact.value, source: "artifact" };
       }
-    } catch {
-      /* handled as null below */
-    }
+    } catch {}
     const fallback = parseAssistantJsonFromMessages(handle.assistantMessages);
     if (fallback !== null) {
       return { raw: fallback, source: "assistant" };
@@ -1028,9 +1015,7 @@ async function runWorkerStream(
             return { raw: parsed, source: "conversation" };
           }
         }
-      } catch {
-        /* conversation fallback is best-effort */
-      }
+      } catch {}
     }
     return { raw: null, source: "none" };
   };
@@ -1249,9 +1234,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
   agent.blocked_since = null;
   try {
     await ctx.repoStore.deleteFile(ctx.runId, `agent-${agent.task_id}.json`);
-  } catch {
-    /* advisory */
-  }
+  } catch {}
   const nextHandle: WorkerHandle = {
     taskId: agent.task_id,
     sdkAgent: handle.sdkAgent,
@@ -1279,9 +1262,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
         !task.create_repo &&
         ctx.config.target.branch_layout === "consolidated" &&
         ctx.config.target.consolidate_prs;
-    } catch {
-      /* fall through with empty info; branch_name will not update via run-line logic */
-    }
+    } catch {}
   }
   nextHandle.done = runWorkerStream(ctx, nextHandle, info);
   ctx.activeWorkers.set(agent.task_id, nextHandle);
@@ -1785,9 +1766,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
             !task.create_repo &&
             ctx.config.target.branch_layout === "consolidated" &&
             ctx.config.target.consolidate_prs;
-        } catch {
-          /* ignore */
-        }
+        } catch {}
       }
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
@@ -1810,9 +1789,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
     if (existing) {
       ctx.stopRequested.value = true;
     }
-  } catch {
-    /* ignore; the poller will retry */
-  }
+  } catch {}
   const pollController = new AbortController();
   const stopPoller = (async () => {
     while (!ctx.stopRequested.value) {
@@ -1829,9 +1806,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
           triggerWakeup(ctx);
           return;
         }
-      } catch {
-        /* retry next tick */
-      }
+      } catch {}
     }
   })();
 
@@ -1843,9 +1818,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
           if (stopContent) {
             ctx.stopRequested.value = true;
           }
-        } catch {
-          /* poller will retry */
-        }
+        } catch {}
       }
       if (ctx.stopRequested.value) {
         await checkStopRequested(ctx);
