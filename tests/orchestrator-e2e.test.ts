@@ -995,6 +995,50 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
+  it("persists state.json before planning_failed so prompt-only runs can retry", async () => {
+    const config = promptOnlyConfig();
+    const runId = "run-plan-fail-retry";
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          sendThrows: new Error("planner dispatch failed"),
+          result: { id: "r-plan-fail", status: "finished" },
+        },
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+
+    await expect(runOrchestration(runId, fake, store)).rejects.toThrow(/planner dispatch failed/);
+
+    expect(files.has("state.json")).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("failed");
+    const eventsAfterFail = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(eventsAfterFail.some((e: { event_type: string }) => e.event_type === "planning_failed")).toBe(true);
+
+    files.set(
+      "task-plan.json",
+      JSON.stringify({
+        tasks: [
+          {
+            id: "t1",
+            repo: "svc",
+            prompt: "Planned work.",
+            depends_on: [],
+            timeout_minutes: 30,
+          },
+        ],
+      }),
+    );
+
+    const fakeRetry = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", runId)],
+    });
+    await runOrchestration(runId, fakeRetry, store);
+
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+    expect(fakeRetry.launches).toHaveLength(1);
+  });
+
   it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
