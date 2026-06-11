@@ -716,22 +716,16 @@ function createWakeup(): { resolve: () => void; promise: Promise<void> } {
 
 async function syncStopRequestedFromRepo(ctx: LoopContext): Promise<boolean> {
   if (ctx.stopRequested.value) return true;
-  try {
-    const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-    if (stopContent) {
-      ctx.stopRequested.value = true;
-      return true;
-    }
-  } catch {}
-  return false;
+  const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json").catch(() => null);
+  if (!stopContent) return false;
+  ctx.stopRequested.value = true;
+  return true;
 }
 
 async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   try {
     await agent[Symbol.asyncDispose]();
-  } catch {
-    /* advisory close */
-  }
+  } catch {}
 }
 
 async function launchWorkerAgent(
@@ -1342,9 +1336,7 @@ async function launchReadyTasks(ctx: LoopContext): Promise<void> {
 }
 
 async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
-  const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-  if (!stopContent) return false;
-  ctx.stopRequested.value = true;
+  if (!(await syncStopRequestedFromRepo(ctx))) return false;
   console.info("Stop requested, halting orchestration");
   const stoppedAt = nowIso();
   for (const [taskId, handle] of ctx.activeWorkers.entries()) {
@@ -1822,14 +1814,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
     return;
   }
   ctx.wakeup = createWakeup();
-  try {
-    const existing = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-    if (existing) {
-      ctx.stopRequested.value = true;
-    }
-  } catch {
-    /* ignore; the poller will retry */
-  }
+  await syncStopRequestedFromRepo(ctx);
   const pollController = new AbortController();
   const stopPoller = (async () => {
     while (!ctx.stopRequested.value) {
@@ -1855,14 +1840,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
   try {
     while (true) {
       if (!ctx.stopRequested.value) {
-        try {
-          const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-          if (stopContent) {
-            ctx.stopRequested.value = true;
-          }
-        } catch {
-          /* poller will retry */
-        }
+        await syncStopRequestedFromRepo(ctx);
       }
       if (ctx.stopRequested.value) {
         await checkStopRequested(ctx);
