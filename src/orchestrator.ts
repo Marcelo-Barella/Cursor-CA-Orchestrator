@@ -1902,6 +1902,16 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
         config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
         const parsedTasks = parseTaskPlan(planContent, config);
+        const constraints = extractConstraintsFromPrompt(config.prompt);
+        if (constraints.length > 0) {
+          const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+          if (!result.valid) {
+            const detail = result.violations
+              .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+              .join("; ");
+            throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+          }
+        }
         config.tasks = parsedTasks;
         const canonReuse = canonicalizeOrchestratorConfig(config);
         config.repositories = canonReuse.repositories;
@@ -1916,6 +1926,11 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       } catch {}
     }
     if (!planningOk) {
+      try {
+        await repoStore.deleteFile(runId, "task-plan.json");
+      } catch {
+        /* missing plan file is fine */
+      }
       planningUsedFullPhase = true;
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
       if (planningResult.ok) {

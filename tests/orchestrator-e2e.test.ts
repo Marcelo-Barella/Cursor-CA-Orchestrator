@@ -102,6 +102,27 @@ function promptOnlyConfig(): OrchestratorConfig {
   };
 }
 
+function constraintPromptOnlyConfig(): OrchestratorConfig {
+  return {
+    ...promptOnlyConfig(),
+    prompt: "Ship the feature. Every route must use your translation method.",
+  };
+}
+
+function taskPlanJson(taskPrompt: string): string {
+  return JSON.stringify({
+    tasks: [
+      {
+        id: "t1",
+        repo: "svc",
+        prompt: taskPrompt,
+        depends_on: [],
+        timeout_minutes: 30,
+      },
+    ],
+  });
+}
+
 function twoTaskChainConfig(): OrchestratorConfig {
   const base = singleTaskConfig();
   return {
@@ -1050,17 +1071,7 @@ describe("runOrchestration with SDK (happy path)", () => {
 
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
-    const taskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Planned work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
+    const taskPlan = taskPlanJson("Planned work.");
     const fake = new FakeAgentClient({
       defaultScripts: [completedWorkerScript("t1", "run-reuse-plan")],
     });
@@ -1079,6 +1090,80 @@ describe("runOrchestration with SDK (happy path)", () => {
       events.some(
         (e: { event_type: string; detail?: string }) =>
           e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
+      ),
+    ).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("reuses task-plan.json when cached tasks satisfy prompt constraints", async () => {
+    const config = constraintPromptOnlyConfig();
+    const constraintLine = "Every route must use your translation method.";
+    const taskPlan = taskPlanJson(`Implement the home page. ${constraintLine}`);
+    const fake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", "run-reuse-constrained-plan")],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    await runOrchestration("run-reuse-constrained-plan", fake, store);
+    expect(fake.launches).toHaveLength(1);
+    expect(fake.launches[0]!.prompt).toContain(constraintLine);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(
+      events.some(
+        (e: { event_type: string; detail?: string }) =>
+          e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
+      ),
+    ).toBe(true);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("rejects cached task-plan.json that violates prompt constraints and replans", async () => {
+    const config = constraintPromptOnlyConfig();
+    const constraintLine = "Every route must use your translation method.";
+    const invalidPlan = taskPlanJson("Planned work without constraint coverage.");
+    const validPlan = taskPlanJson(`Implement the home page. ${constraintLine}`);
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-constraint-replan"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": invalidPlan,
+    });
+    let reuseAttempted = false;
+    const baseRead = store.readFile.bind(store);
+    store.readFile = async (runId, filename) => {
+      if (filename === "task-plan.json") {
+        const content = await baseRead(runId, filename);
+        if (!reuseAttempted) {
+          reuseAttempted = true;
+          return content;
+        }
+        if (!content.trim()) {
+          await store.writeFile(runId, filename, validPlan);
+          return validPlan;
+        }
+        return content;
+      }
+      return baseRead(runId, filename);
+    };
+    await runOrchestration("run-constraint-replan", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+    expect(fake.launches[1]!.prompt).toContain(constraintLine);
+    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(true);
+    expect(
+      events.some(
+        (e: { event_type: string; detail?: string }) =>
+          e.event_type === "planning_completed" && !e.detail?.includes("reused existing plan"),
       ),
     ).toBe(true);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
