@@ -1,4 +1,3 @@
-import type { RunResult as SdkRunResult } from "@cursor/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
@@ -13,38 +12,14 @@ import {
 } from "./support/fake-agent-client.js";
 import {
   completedWorkerScript,
+  createInMemoryRepoStore,
+  type FileStore,
   parseEvents,
   promptOnlyConfig,
+  runGit,
+  singleTaskConfig,
   validTaskPlanJson,
 } from "./support/reattach-fixtures.js";
-
-type FileStore = Map<string, string>;
-
-function runGit(branch: string, repoUrl = "https://github.com/acme/svc"): NonNullable<SdkRunResult["git"]> {
-  return { branches: [{ repoUrl, branch }] };
-}
-
-function createInMemoryRepoStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
-  const files: FileStore = new Map(Object.entries(initial));
-  const store = {
-    rateLimitRemaining: null,
-    rateLimitLimit: null,
-    async readFile(_runId: string, filename: string): Promise<string> {
-      return files.get(filename) ?? "";
-    },
-    async writeFile(_runId: string, filename: string, content: string): Promise<void> {
-      files.set(filename, content);
-    },
-    async updateFile(_runId: string, filename: string, updater: (current: string) => string | Promise<string>): Promise<void> {
-      const current = files.get(filename) ?? "";
-      files.set(filename, await updater(current));
-    },
-    async deleteFile(_runId: string, filename: string): Promise<void> {
-      files.delete(filename);
-    },
-  } as unknown as RepoStoreClient;
-  return { store, files };
-}
 
 function createTransientStateReadStore(
   initial: Record<string, string>,
@@ -65,31 +40,6 @@ function createTransientStateReadStore(
     },
   } as unknown as RepoStoreClient;
   return { store, files };
-}
-
-function singleTaskConfig(): OrchestratorConfig {
-  return {
-    name: "demo",
-    model: { id: "composer-2" },
-    prompt: "",
-    repositories: {
-      svc: { url: "https://github.com/acme/svc", ref: "main" },
-    },
-    tasks: [
-      {
-        id: "t1",
-        repo: "svc",
-        prompt: "Do the thing.",
-        model: null,
-        depends_on: [],
-        timeout_minutes: 30,
-        create_repo: false,
-        repo_config: null,
-      },
-    ],
-    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-    bootstrap_repo_name: "cursor-orch-bootstrap",
-  };
 }
 
 function twoTaskChainConfig(): OrchestratorConfig {

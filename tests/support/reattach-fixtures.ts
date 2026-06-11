@@ -6,8 +6,8 @@ import { statusMessage, type FakeRunScript } from "./fake-agent-client.js";
 
 export type FileStore = Map<string, string>;
 
-export function runGit(branch: string): NonNullable<SdkRunResult["git"]> {
-  return { branches: [{ repoUrl: "https://github.com/acme/svc", branch }] };
+export function runGit(branch: string, repoUrl = "https://github.com/acme/svc"): NonNullable<SdkRunResult["git"]> {
+  return { branches: [{ repoUrl, branch }] };
 }
 
 export function createInMemoryRepoStore(initial: Record<string, string>): { store: RepoStoreClient; files: FileStore } {
@@ -53,6 +53,24 @@ export function validTaskPlanJson(): string {
         id: "t1",
         repo: "svc",
         prompt: "Planned work.",
+        depends_on: [],
+        timeout_minutes: 30,
+      },
+    ],
+  });
+}
+
+export function constraintPromptOnlyConfig(): OrchestratorConfig {
+  return { ...promptOnlyConfig(), prompt: "Every route must use your translation method." };
+}
+
+export function constraintViolatingTaskPlanJson(): string {
+  return JSON.stringify({
+    tasks: [
+      {
+        id: "t1",
+        repo: "svc",
+        prompt: "Do unrelated work.",
         depends_on: [],
         timeout_minutes: 30,
       },
@@ -106,7 +124,7 @@ export function singleTaskConfig(): OrchestratorConfig {
       },
     ],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-    bootstrap_repo_name: "b",
+    bootstrap_repo_name: "cursor-orch-bootstrap",
   };
 }
 

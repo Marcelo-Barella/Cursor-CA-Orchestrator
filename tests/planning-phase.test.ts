@@ -4,6 +4,8 @@ import { toYaml } from "../src/config/parse.js";
 import { FakeAgentClient, statusMessage } from "./support/fake-agent-client.js";
 import {
   completedWorkerScript,
+  constraintPromptOnlyConfig,
+  constraintViolatingTaskPlanJson,
   createInMemoryRepoStore,
   installGithubBranchPrepMock,
   parseEvents,
@@ -196,22 +198,8 @@ describe("planning phase", () => {
   });
 
   it("fails fresh planning when planner output violates prompt constraints", async () => {
-    const config = {
-      ...promptOnlyConfig(),
-      prompt: "Every route must use your translation method.",
-    };
-    const badPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Do unrelated work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    waitForPlanMock.mockResolvedValue(badPlan);
+    const config = constraintPromptOnlyConfig();
+    waitForPlanMock.mockResolvedValue(constraintViolatingTaskPlanJson());
     const fake = new FakeAgentClient({
       defaultScripts: [{ events: [statusMessage("FINISHED")], result: { id: "r-plan", status: "finished", result: "" } }],
     });
@@ -223,25 +211,11 @@ describe("planning phase", () => {
   });
 
   it("fails planning when reused plan violates prompt constraints", async () => {
-    const config = {
-      ...promptOnlyConfig(),
-      prompt: "Every route must use your translation method.",
-    };
-    const taskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Do unrelated work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
+    const config = constraintPromptOnlyConfig();
     const fake = new FakeAgentClient();
     const { store, files } = createInMemoryRepoStore({
       "config.yaml": toYaml(config),
-      "task-plan.json": taskPlan,
+      "task-plan.json": constraintViolatingTaskPlanJson(),
     });
     await expect(runOrchestration("run-constraint-reuse", fake, store)).rejects.toThrow(/Plan constraint validation failed/);
     expect(fake.launches).toHaveLength(0);
