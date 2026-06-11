@@ -42,6 +42,34 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
   return { store, files };
 }
 
+function parseEventsJsonl(content: string | undefined): Array<{ event_type: string; detail?: string }> {
+  if (!content?.trim()) return [];
+  return content.trim().split("\n").map((line) => JSON.parse(line));
+}
+
+function createLazyTaskPlanStore(
+  initial: Record<string, string>,
+  taskPlan: string,
+  fake: FakeAgentClient,
+): { store: RepoStoreClient; files: FileStore } {
+  const { store: baseStore, files } = createInMemoryRepoStore(initial);
+  const baseRead = baseStore.readFile.bind(baseStore);
+  const store = {
+    ...baseStore,
+    async readFile(runId: string, filename: string): Promise<string> {
+      if (filename === "task-plan.json") {
+        const plannerLaunched = fake.launches.some((launch) => launch.opts.repoUrl.includes("cursor-orch-bootstrap"));
+        if (plannerLaunched) {
+          files.set("task-plan.json", taskPlan);
+          return taskPlan;
+        }
+      }
+      return baseRead(runId, filename);
+    },
+  } as unknown as RepoStoreClient;
+  return { store, files };
+}
+
 function createTransientStateReadStore(
   initial: Record<string, string>,
   failCount = 2,
@@ -940,13 +968,90 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(fake.launches[0]!.prompt).toContain("Planned work.");
     const updatedConfig = files.get("config.yaml")!;
     expect(updatedConfig).toContain("t1");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(
-      events.some(
-        (e: { event_type: string; detail?: string }) =>
-          e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
-      ),
-    ).toBe(true);
+    const events = parseEventsJsonl(files.get("events.jsonl"));
+    expect(events.some((e) => e.event_type === "planning_started")).toBe(false);
+    const startedIdx = events.findIndex((e) => e.event_type === "orchestration_started");
+    const completedIdx = events.findIndex(
+      (e) => e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
+    );
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(completedIdx).toBeGreaterThan(startedIdx);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.phase_agents.planning.status).toBe("finished");
+    expect(state.status).toBe("completed");
+  });
+
+  it("emits planning_started only after state init when running a full planning phase", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Freshly planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-full-plan"),
+      ],
+    });
+    const { store, files } = createLazyTaskPlanStore({ "config.yaml": toYaml(config) }, taskPlan, fake);
+    await runOrchestration("run-full-plan", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+    expect(fake.launches[1]!.opts.repoUrl).toBe("https://github.com/acme/svc");
+    const events = parseEventsJsonl(files.get("events.jsonl"));
+    const startedIdx = events.findIndex((e) => e.event_type === "orchestration_started");
+    const planningStartedIdx = events.findIndex((e) => e.event_type === "planning_started");
+    const planningCompletedIdx = events.findIndex(
+      (e) => e.event_type === "planning_completed" && e.detail === "Planning completed: 1 tasks",
+    );
+    expect(planningStartedIdx).toBeGreaterThan(startedIdx);
+    expect(planningCompletedIdx).toBeGreaterThan(planningStartedIdx);
+    expect(JSON.parse(files.get("state.json")!).phase_agents.planning.status).toBe("finished");
+  });
+
+  it("falls back to full planning when pre-seeded task-plan.json is invalid", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Recovered planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-invalid-plan-fallback"),
+      ],
+    });
+    const { store, files } = createLazyTaskPlanStore(
+      { "config.yaml": toYaml(config), "task-plan.json": "{not-json" },
+      taskPlan,
+      fake,
+    );
+    await runOrchestration("run-invalid-plan-fallback", fake, store);
+    expect(fake.launches).toHaveLength(2);
+    expect(fake.launches[0]!.opts.repoUrl).toContain("cursor-orch-bootstrap");
+    const events = parseEventsJsonl(files.get("events.jsonl"));
+    expect(events.some((e) => e.event_type === "planning_started")).toBe(true);
+    expect(events.some((e) => e.detail?.includes("reused existing plan"))).toBe(false);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
