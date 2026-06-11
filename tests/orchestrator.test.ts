@@ -10,10 +10,12 @@ import {
   filterEligibleReadyTasks,
   getBlockedTasks,
   getReadyTasks,
+  pickReattachRun,
   planRefForConsolidatedRunLine,
+  reconcileInFlightLaunchesFromEvents,
   runOrchestration,
 } from "../src/orchestrator.js";
-import type { AgentState } from "../src/state.js";
+import type { AgentState, OrchestrationEvent } from "../src/state.js";
 import { createInitialState, deserialize, serialize } from "../src/state.js";
 
 function createConfig(
@@ -266,6 +268,94 @@ describe("orchestrator launch eligibility", () => {
     expect(phases![0]!.id).toBe("wave-1");
     expect(phases![0]!.groups).toHaveLength(1);
     expect(phases![0]!.groups[0]!.task_ids).toEqual(["a", "b"]);
+  });
+
+  it("extractDelegationPhases parses legacy delegationMap waves and parallel_groups", () => {
+    const config = createConfig(["a", "b", "c"]) as OrchestratorConfig & {
+      delegationMap?: unknown;
+    };
+    config.delegationMap = {
+      waves: [
+        {
+          phase_id: "wave-1",
+          parallel_groups: [{ tasks: ["a", "b"] }],
+        },
+        {
+          name: "wave-2",
+          parallelGroups: [{ taskIds: ["c"] }],
+        },
+      ],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b", "c"]));
+    expect(phases).toEqual([
+      { id: "wave-1", groups: [{ id: "group-1", task_ids: ["a", "b"] }] },
+      { id: "wave-2", groups: [{ id: "group-1", task_ids: ["c"] }] },
+    ]);
+  });
+
+  it("extractDelegationPhases legacy path drops unknown task ids", () => {
+    const config = createConfig(["a"]) as OrchestratorConfig & { delegationMap?: unknown };
+    config.delegationMap = {
+      waves: [{ tasks: ["a", "ghost"] }],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).toEqual([{ id: "phase-1", groups: [{ id: "group-1", task_ids: ["a"] }] }]);
+  });
+
+  it("extractDelegationPhases parses legacy waves with parallel_groups and tasks fields", () => {
+    const config = createConfig(["a", "b", "c"]);
+    config.delegation_map = undefined;
+    Object.assign(config as unknown as Record<string, unknown>, {
+      delegation_map: {
+        waves: [
+          {
+            phase_id: "wave-1",
+            parallel_groups: [
+              { id: "pg1", tasks: ["a", "b"] },
+              { id: "pg2", taskIds: ["c"] },
+            ],
+          },
+        ],
+      },
+    });
+    const phases = extractDelegationPhases(config, new Set(["a", "b", "c"]));
+    expect(phases).toEqual([
+      {
+        id: "wave-1",
+        groups: [
+          { id: "group-1", task_ids: ["a", "b", "c"] },
+        ],
+      },
+    ]);
+  });
+
+  it("extractDelegationPhases parses legacy delegationMap camelCase phase task lists", () => {
+    const config = createConfig(["a", "b"]);
+    config.delegation_map = undefined;
+    Object.assign(config as unknown as Record<string, unknown>, {
+      delegationMap: {
+        phases: [{ name: "setup", tasks: ["a"] }, { id: "run", tasks: ["b"] }],
+      },
+    });
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).toEqual([
+      { id: "setup", groups: [{ id: "group-1", task_ids: ["a"] }] },
+      { id: "run", groups: [{ id: "group-1", task_ids: ["b"] }] },
+    ]);
+  });
+
+  it("filterEligibleReadyTasks honors legacy delegation_map wave ordering", () => {
+    const config = createConfig(["a", "b"]);
+    config.delegation_map = undefined;
+    Object.assign(config as unknown as Record<string, unknown>, {
+      delegation_map: {
+        waves: [{ id: "p1", tasks: ["a"] }, { id: "p2", tasks: ["b"] }],
+      },
+    });
+    const state = createInitialState(config, "run1");
+    expect(filterEligibleReadyTasks(state, config, ["a", "b"])).toEqual(["a"]);
+    state.agents.a!.status = "finished";
+    expect(filterEligibleReadyTasks(state, config, ["a", "b"])).toEqual(["b"]);
   });
 
   it("eligibles multiple tasks in the same parallel group when both are ready", () => {
@@ -527,5 +617,78 @@ describe("runOrchestration validation gate", () => {
     const agentClient = {} as unknown as AgentClient;
     await expect(runOrchestration("run-gate-1", agentClient, repoStore)).rejects.toThrow(/unknown task/);
     expect(writeCount).toBe(0);
+  });
+});
+
+describe("pickReattachRun", () => {
+  it("prefers a running run over a newer finished run", () => {
+    const staleFinished = { status: "finished" as const, createdAt: 200 };
+    const activeRunning = { status: "running" as const, createdAt: 100 };
+    expect(pickReattachRun([staleFinished, activeRunning] as never)).toBe(activeRunning);
+  });
+
+  it("falls back to the newest createdAt when no run is running", () => {
+    const older = { status: "finished" as const, createdAt: 100 };
+    const newer = { status: "finished" as const, createdAt: 200 };
+    expect(pickReattachRun([older, newer] as never)).toBe(newer);
+  });
+});
+
+describe("reconcileInFlightLaunchesFromEvents", () => {
+  it("restores agent_id for pending tasks with a later task_launched event", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-live-9)",
+        payload: {
+          agent_id: "agent-live-9",
+          run_id: "run-9",
+          repository: "https://github.com/acme/svc",
+          ref: "main",
+          branch: "cursor-orch/run-recover/t1",
+        },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(state.agents.t1!.agent_id).toBe("agent-live-9");
+    expect(state.agents.t1!.status).toBe("launching");
+    expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover/t1");
+  });
+
+  it("ignores stale launches cleared by a terminal task event", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-stale");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-old)",
+        payload: { agent_id: "agent-old", run_id: "run-old" },
+      },
+      {
+        timestamp: "2026-06-01T00:01:00.000Z",
+        event_type: "task_failed",
+        task_id: "t1",
+        phase_id: null,
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Task t1 failed",
+        payload: {},
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBeNull();
+    expect(state.agents.t1!.status).toBe("pending");
   });
 });

@@ -106,4 +106,48 @@ describe("RepoStoreClient", () => {
       statusCode: 403,
     });
   });
+
+  it("listRunFiles returns content entry names for the run branch", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { name: "state.json" },
+          { name: "events.jsonl" },
+          { type: "dir", name: "transcripts" },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.listRunFiles(runId)).resolves.toEqual(["state.json", "events.jsonl", "transcripts"]);
+    const url = String(fetchMock.mock.calls[0]![0]);
+    expect(url).toContain(`/contents/?ref=${encodeURIComponent(`run/${runId}`)}`);
+  });
+
+  it("listRunFiles returns an empty list when the run branch is missing", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.listRunFiles(runId)).resolves.toEqual([]);
+  });
+
+  it("deleteFile is a no-op when the file is absent", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.deleteFile(runId, "agent-t1.json")).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("deleteFile issues DELETE when the file exists", async () => {
+    fetchMock
+      .mockResolvedValueOnce(contentsResponse("{}", "sha-del"))
+      .mockResolvedValueOnce(new Response("", { status: 200 }));
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.deleteFile(runId, "agent-t1.json")).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const deleteCall = fetchMock.mock.calls[1]!;
+    expect((deleteCall[1] as RequestInit).method).toBe("DELETE");
+    const body = JSON.parse(String((deleteCall[1] as RequestInit).body));
+    expect(body.sha).toBe("sha-del");
+    expect(body.branch).toBe(`run/${runId}`);
+  });
 });
