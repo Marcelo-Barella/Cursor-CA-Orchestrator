@@ -1608,59 +1608,59 @@ async function runPlanningPhase(
   apiKey: string,
 ): Promise<boolean> {
   const ghToken = process.env.GH_TOKEN!;
-    const ghUser = await resolveGithubUsername(ghToken);
-    const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
-    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-    const plannerAgent = await agentClient.createCloudAgent({
-      apiKey,
-      model: config.model,
-      repoUrl: bootstrapUrl,
-      startingRef: resolveBootstrapRef(),
-      autoCreatePR: false,
-      skipReviewerRequest: true,
-      mcpServers: nonEmptyMcpServers(config.mcp_servers),
-    });
-    try {
-      await plannerAgent.send(plannerPrompt);
-    } catch (error) {
-      await safeDisposeAgent(plannerAgent);
-      throw error;
-    }
-    let planContent = await waitForPlan(repoStore, runId);
-    if (!planContent) {
-      try {
-        const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
-        for (const r of runs.items) {
-          if (typeof r.result === "string" && r.result.trim()) {
-            planContent = r.result;
-            break;
-          }
-        }
-      } catch {
-        /* no fallback available */
-      }
-    }
+  const ghUser = await resolveGithubUsername(ghToken);
+  const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
+  const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
+  const plannerAgent = await agentClient.createCloudAgent({
+    apiKey,
+    model: config.model,
+    repoUrl: bootstrapUrl,
+    startingRef: resolveBootstrapRef(),
+    autoCreatePR: false,
+    skipReviewerRequest: true,
+    mcpServers: nonEmptyMcpServers(config.mcp_servers),
+  });
+  try {
+    await plannerAgent.send(plannerPrompt);
+  } catch (error) {
     await safeDisposeAgent(plannerAgent);
-    if (!planContent) {
-      throw new Error("Timed out waiting for task plan from planner agent");
-    }
-    config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
-    const parsedTasks = parseTaskPlan(planContent, config);
-    const constraints = extractConstraintsFromPrompt(config.prompt);
-    if (constraints.length > 0) {
-      const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
-      if (!result.valid) {
-        const detail = result.violations
-          .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
-          .join("; ");
-        throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+    throw error;
+  }
+  let planContent = await waitForPlan(repoStore, runId);
+  if (!planContent) {
+    try {
+      const runs = await (await import("@cursor/sdk")).Agent.listRuns(plannerAgent.agentId, { runtime: "cloud", apiKey });
+      for (const r of runs.items) {
+        if (typeof r.result === "string" && r.result.trim()) {
+          planContent = r.result;
+          break;
+        }
       }
+    } catch {
+      /* no fallback available */
     }
-    config.tasks = parsedTasks;
-    const canonPlan = canonicalizeOrchestratorConfig(config);
-    config.repositories = canonPlan.repositories;
-    config.tasks = canonPlan.tasks;
-    config.delegation_map = canonPlan.delegation_map;
+  }
+  await safeDisposeAgent(plannerAgent);
+  if (!planContent) {
+    throw new Error("Timed out waiting for task plan from planner agent");
+  }
+  config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+  const parsedTasks = parseTaskPlan(planContent, config);
+  const constraints = extractConstraintsFromPrompt(config.prompt);
+  if (constraints.length > 0) {
+    const result = validateTaskPromptsAgainstConstraints(parsedTasks, constraints);
+    if (!result.valid) {
+      const detail = result.violations
+        .map((v) => `Task '${v.taskId}' missing constraint: "${v.missingConstraint}"`)
+        .join("; ");
+      throw new Error(`Plan constraint validation failed: ${detail}. Re-plan with full constraint coverage.`);
+    }
+  }
+  config.tasks = parsedTasks;
+  const canonPlan = canonicalizeOrchestratorConfig(config);
+  config.repositories = canonPlan.repositories;
+  config.tasks = canonPlan.tasks;
+  config.delegation_map = canonPlan.delegation_map;
   await repoStore.writeFile(runId, "config.yaml", toYaml(config));
   return true;
 }
