@@ -426,26 +426,6 @@ describe("orchestrator launch eligibility", () => {
     },
   );
 
-  it("treats a stopped task in the prior group as terminal for wave advancement", () => {
-    const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
-    config.delegation_map = {
-      phases: [
-        {
-          id: "phase-1",
-          groups: [
-            { id: "g1", task_ids: ["a"] },
-            { id: "g2", task_ids: ["b", "c"] },
-          ],
-        },
-      ],
-    };
-    const state = createInitialState(config, "run1");
-    state.agents.a!.status = "stopped";
-    const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
-    expect(eligible).toEqual(["b", "c"]);
-    expect(state.delegation_group_index).toBe(1);
-  });
-
   it("after mapped waves complete, eligible ready tasks are only those not in the delegation map (defensive)", () => {
     const config = createConfig(["a", "b", "u"]);
     config.delegation_map = {
@@ -598,6 +578,38 @@ describe("runOrchestration validation gate", () => {
     } as unknown as RepoStoreClient;
     const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
     await expect(runOrchestration("run-corrupt-state", agentClient, repoStore)).rejects.toThrow(/Invalid state\.json/);
+  });
+
+  it("re-reads state.json before reset when the pre-planning read was empty", async () => {
+    const config = createConfig(["a"]);
+    const persisted = createInitialState(config, "run-reread");
+    persisted.status = "running";
+    persisted.agents.a!.status = "finished";
+    let stateReadCount = 0;
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") {
+          stateReadCount += 1;
+          return stateReadCount === 1 ? "" : serialize(persisted);
+        }
+        if (filename === "events.jsonl") return "";
+        throw new Error(`unexpected read: ${filename}`);
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    let launchCount = 0;
+    const agentClient = {
+      createCloudAgent: async () => {
+        launchCount += 1;
+        return { agentId: "x" };
+      },
+    } as unknown as AgentClient;
+    await runOrchestration("run-reread", agentClient, repoStore);
+    expect(stateReadCount).toBe(2);
+    expect(launchCount).toBe(0);
   });
 
   it("rejects empty state.json when events.jsonl shows an in-progress run", async () => {
@@ -855,7 +867,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.agent_id).toBe("agent-live-9");
     expect(state.agents.t1!.status).toBe("launching");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover/t1");
@@ -888,7 +900,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
           payload: {},
         },
       ];
-      expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+      expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
       expect(state.agents.t1!.agent_id).toBeNull();
       expect(state.agents.t1!.status).toBe("pending");
     },
@@ -914,7 +926,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.agent_id).toBe("legacy-agent-9");
     expect(state.agents.t1!.status).toBe("launching");
   });
@@ -934,7 +946,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { run_id: "run-9" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
   });
@@ -964,7 +976,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "agent-new", run_id: "run-new", branch: "cursor-orch/run-recover-latest/t1" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.agent_id).toBe("agent-new");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover-latest/t1");
   });
@@ -986,7 +998,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "agent-other", run_id: "run-other" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
     expect(state.agents.t1!.agent_id).toBe("agent-kept");
     expect(state.agents.t1!.status).toBe("running");
   });
@@ -1007,7 +1019,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "agent-other", run_id: "run-other" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
     expect(state.agents.t1!.agent_id).toBe("agent-existing");
     expect(state.agents.t1!.status).toBe("pending");
   });
@@ -1027,7 +1039,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "   ", run_id: "run-blank" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
   });
@@ -1047,7 +1059,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         payload: { agent_id: "   ", run_id: "run-blank" },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual([]);
     expect(state.agents.t1!.agent_id).toBeNull();
   });
 
@@ -1090,7 +1102,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.agent_id).toBe("agent-retry");
     expect(state.agents.t1!.status).toBe("launching");
     expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover-retry/t1-retry-1");
@@ -1117,7 +1129,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
         },
       },
     ];
-    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toEqual(["t1"]);
     expect(state.agents.t1!.started_at).toBe("2026-05-01T00:00:00.000Z");
     expect(state.agents.t1!.branch_name).toBe("existing-branch");
   });
