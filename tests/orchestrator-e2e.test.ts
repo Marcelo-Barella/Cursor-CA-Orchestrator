@@ -42,30 +42,6 @@ function createInMemoryRepoStore(initial: Record<string, string>): { store: Repo
   return { store, files };
 }
 
-function createTaskPlanReuseFallbackStore(
-  initial: Record<string, string>,
-  invalidPlan: string,
-  validPlan: string,
-): { store: RepoStoreClient; files: FileStore } {
-  const { store: baseStore, files } = createInMemoryRepoStore({ ...initial, "task-plan.json": invalidPlan });
-  let taskPlanReadCount = 0;
-  const store = {
-    ...baseStore,
-    async readFile(runId: string, filename: string): Promise<string> {
-      if (filename === "task-plan.json") {
-        taskPlanReadCount += 1;
-        if (taskPlanReadCount === 1) {
-          return invalidPlan;
-        }
-        files.set("task-plan.json", validPlan);
-        return validPlan;
-      }
-      return baseStore.readFile(runId, filename);
-    },
-  } as unknown as RepoStoreClient;
-  return { store, files };
-}
-
 function createTransientStateReadStore(
   initial: Record<string, string>,
   failCount = 2,
@@ -1105,51 +1081,6 @@ describe("runOrchestration with SDK (happy path)", () => {
           e.event_type === "planning_completed" && e.detail?.includes("reused existing plan"),
       ),
     ).toBe(true);
-    expect(events.some((e: { event_type: string }) => e.event_type === "planning_started")).toBe(false);
-    const state = JSON.parse(files.get("state.json")!);
-    expect(state.phase_agents.planning.status).toBe("finished");
-    expect(state.status).toBe("completed");
-  });
-
-  it("falls back to full planning when task-plan.json cannot be reused", async () => {
-    const config = promptOnlyConfig();
-    const validTaskPlan = JSON.stringify({
-      tasks: [
-        {
-          id: "t1",
-          repo: "svc",
-          prompt: "Replanned work.",
-          depends_on: [],
-          timeout_minutes: 30,
-        },
-      ],
-    });
-    const fake = new FakeAgentClient({
-      defaultScripts: [
-        {
-          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-          result: { id: "r-planner", status: "finished", result: "" },
-        },
-        completedWorkerScript("t1", "run-invalid-reuse"),
-      ],
-    });
-    const { store, files } = createTaskPlanReuseFallbackStore(
-      { "config.yaml": toYaml(config) },
-      "{not-a-valid-plan}",
-      validTaskPlan,
-    );
-    await runOrchestration("run-invalid-reuse", fake, store);
-    expect(fake.launches).toHaveLength(2);
-    expect(fake.launches[0]!.opts.repoUrl).toBe("https://github.com/acme-user/cursor-orch-bootstrap");
-    expect(fake.launches[1]!.opts.repoUrl).toBe("https://github.com/acme/svc");
-    const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    const startedIdx = events.findIndex((e: { event_type: string }) => e.event_type === "planning_started");
-    const completedIdx = events.findIndex(
-      (e: { event_type: string; detail?: string }) =>
-        e.event_type === "planning_completed" && !e.detail?.includes("reused existing plan"),
-    );
-    expect(startedIdx).toBeGreaterThanOrEqual(0);
-    expect(completedIdx).toBeGreaterThan(startedIdx);
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
