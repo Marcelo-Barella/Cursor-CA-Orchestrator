@@ -28,6 +28,8 @@ export interface FakeRunScript {
   throwOnStream?: unknown;
   /** When set, send() throws before starting the run (launch-time failure). */
   sendThrows?: unknown;
+  /** Delay before wait() resolves so background stop polling can observe stop-requested.json. */
+  waitDelayMs?: number;
 }
 
 export interface FakeLaunch {
@@ -77,6 +79,9 @@ export class FakeSdkRun implements SdkRun {
   async wait(): Promise<SdkRunResult> {
     if (this.script.throwOnWait) {
       throw this.script.throwOnWait;
+    }
+    if (this.script.waitDelayMs && this.script.waitDelayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, this.script.waitDelayMs));
     }
     this.status = this.script.result.status;
     return this.script.result;
