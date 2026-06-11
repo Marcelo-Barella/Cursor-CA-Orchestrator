@@ -1600,13 +1600,15 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
+type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
+
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
   agentClient: AgentClient,
   repoStore: RepoStoreClient,
   apiKey: string,
-): Promise<boolean> {
+): Promise<PlanningPhaseResult> {
   try {
     const ghToken = process.env.GH_TOKEN!;
     const ghUser = await resolveGithubUsername(ghToken);
@@ -1663,10 +1665,9 @@ async function runPlanningPhase(
     config.tasks = canonPlan.tasks;
     config.delegation_map = canonPlan.delegation_map;
     await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-    return true;
+    return { ok: true };
   } catch (exc) {
-    await appendEvent(repoStore, runId, makeEvent("planning_failed", String(exc), null, { phase_id: "planning", agent_kind: "phase" }));
-    throw exc;
+    return { ok: false, error: String(exc) };
   }
 }
 
@@ -1889,6 +1890,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let planningRan = false;
   let planningOk = false;
+  let planningFailureDetail: string | null = null;
   let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
@@ -1913,12 +1915,15 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       } catch {}
     }
     if (!planningOk) {
-      planningOk = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
-      if (planningOk) {
+      const planResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
+      if (planResult.ok) {
+        planningOk = true;
         planningEvents = {
           emitStarted: true,
           completedDetail: `Planning completed: ${config.tasks.length} tasks`,
         };
+      } else {
+        planningFailureDetail = planResult.error;
       }
     }
   }
@@ -1972,8 +1977,17 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         runId,
         makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
+    } else if (!planningOk && planningFailureDetail) {
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_failed", planningFailureDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+      );
     }
     await syncToRepo(repoStore, runId, state);
+  }
+  if (planningRan && !planningOk) {
+    throw new Error(planningFailureDetail ?? "Planning failed");
   }
 
   const graph = buildDependencyGraph(config.tasks);

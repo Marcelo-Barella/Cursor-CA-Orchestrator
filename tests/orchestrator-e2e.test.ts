@@ -1019,6 +1019,52 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).phase_agents.planning.status).toBe("finished");
   });
 
+  it("defers planning_failed until after state init and allows retry after planning failure", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Recovered after planning failure.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    const failFake = new FakeAgentClient({ createFailCount: 1 });
+    const { store: failStore, files: failFiles } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-plan-fail-retry", failFake, failStore)).rejects.toThrow(/fake createCloudAgent failure/);
+    expect(failFiles.has("state.json")).toBe(true);
+    const failEvents = parseEventsJsonl(failFiles.get("events.jsonl"));
+    const startedIdx = failEvents.findIndex((e) => e.event_type === "orchestration_started");
+    const failedIdx = failEvents.findIndex((e) => e.event_type === "planning_failed");
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(failedIdx).toBeGreaterThan(startedIdx);
+    expect(JSON.parse(failFiles.get("state.json")!).phase_agents.planning.status).toBe("failed");
+
+    const recoverFake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-plan", status: "finished", result: "" },
+        },
+        completedWorkerScript("t1", "run-plan-fail-retry"),
+      ],
+    });
+    const { store: recoverStore } = createLazyTaskPlanStore(
+      {
+        "config.yaml": failFiles.get("config.yaml")!,
+        "state.json": failFiles.get("state.json")!,
+        "events.jsonl": failFiles.get("events.jsonl")!,
+      },
+      taskPlan,
+      recoverFake,
+    );
+    await runOrchestration("run-plan-fail-retry", recoverFake, recoverStore);
+    expect(recoverFake.launches).toHaveLength(2);
+  });
+
   it("falls back to full planning when pre-seeded task-plan.json is invalid", async () => {
     const config = promptOnlyConfig();
     const taskPlan = JSON.stringify({
