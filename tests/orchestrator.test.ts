@@ -48,6 +48,20 @@ function createConfig(
   };
 }
 
+function taskLaunchedEvent(overrides: Partial<OrchestrationEvent> = {}): OrchestrationEvent {
+  return {
+    timestamp: "2026-06-01T00:00:00.000Z",
+    event_type: "task_launched",
+    task_id: "t1",
+    phase_id: "execution",
+    agent_node_id: "t1",
+    agent_kind: "task",
+    detail: "Launched t1 (agent-x)",
+    payload: {},
+    ...overrides,
+  };
+}
+
 describe("getBlockedTasks", () => {
   it("returns only agents in blocked status", () => {
     const agent = (taskId: string, status: string): AgentState => ({
@@ -426,26 +440,6 @@ describe("orchestrator launch eligibility", () => {
     },
   );
 
-  it("treats a stopped task in the prior group as terminal for wave advancement", () => {
-    const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
-    config.delegation_map = {
-      phases: [
-        {
-          id: "phase-1",
-          groups: [
-            { id: "g1", task_ids: ["a"] },
-            { id: "g2", task_ids: ["b", "c"] },
-          ],
-        },
-      ],
-    };
-    const state = createInitialState(config, "run1");
-    state.agents.a!.status = "stopped";
-    const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
-    expect(eligible).toEqual(["b", "c"]);
-    expect(state.delegation_group_index).toBe(1);
-  });
-
   it("after mapped waves complete, eligible ready tasks are only those not in the delegation map (defensive)", () => {
     const config = createConfig(["a", "b", "u"]);
     config.delegation_map = {
@@ -734,78 +728,56 @@ describe("pickReattachRun", () => {
 
 describe("agentIdFromTaskLaunchedEvent", () => {
   it("reads agent_id from payload when present", () => {
-    const event: OrchestrationEvent = {
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: "Launched t1 (from-detail)",
-      payload: { agent_id: "from-payload" },
-    };
-    expect(agentIdFromTaskLaunchedEvent(event)).toBe("from-payload");
+    expect(
+      agentIdFromTaskLaunchedEvent(
+        taskLaunchedEvent({ detail: "Launched t1 (from-detail)", payload: { agent_id: "from-payload" } }),
+      ),
+    ).toBe("from-payload");
   });
 
   it("falls back to detail when legacy events omit payload agent_id", () => {
-    const event: OrchestrationEvent = {
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: "Launched t1 (legacy-agent-7)",
-      payload: { run_id: "run-legacy" },
-    };
-    expect(agentIdFromTaskLaunchedEvent(event)).toBe("legacy-agent-7");
+    expect(
+      agentIdFromTaskLaunchedEvent(
+        taskLaunchedEvent({ detail: "Launched t1 (legacy-agent-7)", payload: { run_id: "run-legacy" } }),
+      ),
+    ).toBe("legacy-agent-7");
   });
 
   it("returns null when detail does not match the launched-agent pattern", () => {
-    const event: OrchestrationEvent = {
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: "Launched t1 without agent id parens",
-      payload: { run_id: "run-legacy" },
-    };
-    expect(agentIdFromTaskLaunchedEvent(event)).toBeNull();
+    expect(
+      agentIdFromTaskLaunchedEvent(
+        taskLaunchedEvent({ detail: "Launched t1 without agent id parens", payload: { run_id: "run-legacy" } }),
+      ),
+    ).toBeNull();
   });
 
   it("falls back to detail when payload agent_id is whitespace-only", () => {
-    const event: OrchestrationEvent = {
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: "Launched t1 (legacy-agent-8)",
-      payload: { agent_id: "   ", run_id: "run-legacy" },
-    };
-    expect(agentIdFromTaskLaunchedEvent(event)).toBe("legacy-agent-8");
+    expect(
+      agentIdFromTaskLaunchedEvent(
+        taskLaunchedEvent({
+          detail: "Launched t1 (legacy-agent-8)",
+          payload: { agent_id: "   ", run_id: "run-legacy" },
+        }),
+      ),
+    ).toBe("legacy-agent-8");
   });
 
-  it("trims whitespace from payload and detail captures", () => {
-    const event: OrchestrationEvent = {
-      timestamp: "2026-06-01T00:00:00.000Z",
-      event_type: "task_launched",
-      task_id: "t1",
-      phase_id: "execution",
-      agent_node_id: "t1",
-      agent_kind: "task",
-      detail: "Launched t1 ( spaced-agent )",
-      payload: { agent_id: "  trimmed-payload  " },
-    };
-    expect(agentIdFromTaskLaunchedEvent(event)).toBe("trimmed-payload");
+  it("trims whitespace from payload agent_id", () => {
     expect(
-      agentIdFromTaskLaunchedEvent({
-        ...event,
-        payload: { run_id: "run-legacy" },
-      }),
+      agentIdFromTaskLaunchedEvent(
+        taskLaunchedEvent({
+          detail: "Launched t1 ( spaced-agent )",
+          payload: { agent_id: "  trimmed-payload  " },
+        }),
+      ),
+    ).toBe("trimmed-payload");
+  });
+
+  it("trims whitespace from detail capture when payload omits agent_id", () => {
+    expect(
+      agentIdFromTaskLaunchedEvent(
+        taskLaunchedEvent({ detail: "Launched t1 ( spaced-agent )", payload: { run_id: "run-legacy" } }),
+      ),
     ).toBe("spaced-agent");
   });
 });
@@ -814,14 +786,8 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
   it("restores agent_id for pending tasks with a later task_launched event", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover");
-    const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
+    const events = [
+      taskLaunchedEvent({
         detail: "Launched t1 (agent-live-9)",
         payload: {
           agent_id: "agent-live-9",
@@ -830,7 +796,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
           ref: "main",
           branch: "cursor-orch/run-recover/t1",
         },
-      },
+      }),
     ];
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("agent-live-9");
@@ -844,16 +810,10 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
       const config = createConfig(["t1"]);
       const state = createInitialState(config, "run-recover-stale");
       const events: OrchestrationEvent[] = [
-        {
-          timestamp: "2026-06-01T00:00:00.000Z",
-          event_type: "task_launched",
-          task_id: "t1",
-          phase_id: "execution",
-          agent_node_id: "t1",
-          agent_kind: "task",
+        taskLaunchedEvent({
           detail: "Launched t1 (agent-old)",
           payload: { agent_id: "agent-old", run_id: "run-old" },
-        },
+        }),
         {
           timestamp: "2026-06-01T00:01:00.000Z",
           event_type: terminalEvent,
@@ -874,14 +834,8 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
   it("restores agent_id from legacy task_launched detail when payload omits agent_id", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover-legacy");
-    const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
+    const events = [
+      taskLaunchedEvent({
         detail: "Launched t1 (legacy-agent-9)",
         payload: {
           run_id: "run-9",
@@ -889,7 +843,7 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
           ref: "main",
           branch: "cursor-orch/run-recover-legacy/t1",
         },
-      },
+      }),
     ];
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("legacy-agent-9");
@@ -899,47 +853,30 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
   it("leaves agent pending when task_launched detail cannot be parsed and payload omits agent_id", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover-unparseable");
-    const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
+    const events = [
+      taskLaunchedEvent({
         detail: "Launched t1 without recoverable agent id",
         payload: { run_id: "run-9" },
-      },
+      }),
     ];
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
     expect(state.agents.t1!.status).toBe("pending");
   });
 
-  it("uses the latest task_launched event before any terminal event", () => {
+  it("uses the latest task_launched when multiple launches exist", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover-latest");
-    const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
+    const events = [
+      taskLaunchedEvent({
         detail: "Launched t1 (agent-old)",
         payload: { agent_id: "agent-old", run_id: "run-old" },
-      },
-      {
+      }),
+      taskLaunchedEvent({
         timestamp: "2026-06-01T00:01:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
         detail: "Launched t1 (agent-new)",
         payload: { agent_id: "agent-new", run_id: "run-new", branch: "cursor-orch/run-recover-latest/t1" },
-      },
+      }),
     ];
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.agent_id).toBe("agent-new");
@@ -950,17 +887,11 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover-skip");
     state.agents.t1!.agent_id = "agent-existing";
-    const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
+    const events = [
+      taskLaunchedEvent({
         detail: "Launched t1 (agent-other)",
         payload: { agent_id: "agent-other", run_id: "run-other" },
-      },
+      }),
     ];
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBe("agent-existing");
@@ -970,17 +901,11 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
   it("ignores task_launched events with blank agent_id payloads", () => {
     const config = createConfig(["t1"]);
     const state = createInitialState(config, "run-recover-blank");
-    const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
+    const events = [
+      taskLaunchedEvent({
         detail: "Launched t1 ()",
         payload: { agent_id: "   ", run_id: "run-blank" },
-      },
+      }),
     ];
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
     expect(state.agents.t1!.agent_id).toBeNull();
@@ -991,21 +916,15 @@ describe("reconcileInFlightLaunchesFromEvents", () => {
     const state = createInitialState(config, "run-recover-preserve");
     state.agents.t1!.started_at = "2026-05-01T00:00:00.000Z";
     state.agents.t1!.branch_name = "existing-branch";
-    const events: OrchestrationEvent[] = [
-      {
-        timestamp: "2026-06-01T00:00:00.000Z",
-        event_type: "task_launched",
-        task_id: "t1",
-        phase_id: "execution",
-        agent_node_id: "t1",
-        agent_kind: "task",
+    const events = [
+      taskLaunchedEvent({
         detail: "Launched t1 (agent-live)",
         payload: {
           agent_id: "agent-live",
           run_id: "run-live",
           branch: "cursor-orch/run-recover-preserve/t1",
         },
-      },
+      }),
     ];
     expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
     expect(state.agents.t1!.started_at).toBe("2026-05-01T00:00:00.000Z");

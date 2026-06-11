@@ -57,45 +57,45 @@ describe("reattachWorkers running tasks", () => {
     process.env = { ...originalEnv };
   });
 
-  it("reattaches running workers via resumeCloudAgent and listRuns without relaunching", async () => {
-    const config = singleTaskConfig();
-    const runId = "run-reattach-running";
-    const liveAgentId = "agent-live-1";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
-      agent_id: liveAgentId,
-      status: "running",
-      summary: "in flight",
-    };
+  it.each(["running", "launching"] as const)(
+    "reattaches %s workers without relaunching",
+    async (workerStatus) => {
+      const config = singleTaskConfig();
+      const runId = `run-reattach-${workerStatus}`;
+      const liveAgentId = `agent-live-${workerStatus}`;
+      const state = createInitialState(config, runId);
+      state.status = "running";
+      state.started_at = new Date().toISOString();
+      seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
+      state.agents.t1 = {
+        ...state.agents.t1!,
+        agent_id: liveAgentId,
+        status: workerStatus,
+      };
 
-    const resumeScript = completedResumeScript(runId);
-    const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
-    listRunsMock.mockResolvedValue({ items: [resumedRun] });
+      const resumeScript = completedResumeScript(runId);
+      const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
+      listRunsMock.mockResolvedValue({ items: [resumedRun] });
 
-    const fake = new FakeAgentClient({
-      runsByAgent: {
-        [liveAgentId]: [resumeScript],
-      },
-      conversationText: null,
-    });
+      const fake = new FakeAgentClient({
+        runsByAgent: { [liveAgentId]: [resumeScript] },
+        conversationText: null,
+      });
 
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(state),
-    });
+      const { store, files } = createInMemoryRepoStore({
+        "config.yaml": toYaml(config),
+        "state.json": serialize(state),
+      });
 
-    await runOrchestration(runId, fake, store);
+      await runOrchestration(runId, fake, store);
 
-    const final = JSON.parse(files.get("state.json")!);
-    expect(final.status).toBe("completed");
-    expect(final.agents.t1.status).toBe("finished");
-    expect(listRunsMock).toHaveBeenCalledWith(liveAgentId, { runtime: "cloud", apiKey: "sk-fake" });
-    expect(fake.launches).toHaveLength(0);
-  });
+      const final = JSON.parse(files.get("state.json")!);
+      expect(final.status).toBe("completed");
+      expect(final.agents.t1.status).toBe("finished");
+      expect(listRunsMock).toHaveBeenCalledWith(liveAgentId, { runtime: "cloud", apiKey: "sk-fake" });
+      expect(fake.launches).toHaveLength(0);
+    },
+  );
 
   it("marks the task failed when resume finds no SDK runs", async () => {
     const config = singleTaskConfig();
@@ -161,42 +161,6 @@ describe("reattachWorkers running tasks", () => {
 
     const fake = new FakeAgentClient({
       runsByAgent: { [liveAgentId]: [activeScript] },
-      conversationText: null,
-    });
-
-    const { store, files } = createInMemoryRepoStore({
-      "config.yaml": toYaml(config),
-      "state.json": serialize(state),
-    });
-
-    await runOrchestration(runId, fake, store);
-
-    const final = JSON.parse(files.get("state.json")!);
-    expect(final.status).toBe("completed");
-    expect(final.agents.t1.status).toBe("finished");
-    expect(fake.launches).toHaveLength(0);
-  });
-
-  it("reattaches launching workers without relaunching", async () => {
-    const config = singleTaskConfig();
-    const runId = "run-reattach-launching";
-    const liveAgentId = "agent-live-launching";
-    const state = createInitialState(config, runId);
-    state.status = "running";
-    state.started_at = new Date().toISOString();
-    seedMainAgent(state, { agent_id: "orch-1", status: "running", started_at: state.started_at });
-    state.agents.t1 = {
-      ...state.agents.t1!,
-      agent_id: liveAgentId,
-      status: "launching",
-    };
-
-    const resumeScript = completedResumeScript(runId);
-    const resumedRun = new FakeSdkRun(liveAgentId, resumeScript);
-    listRunsMock.mockResolvedValue({ items: [resumedRun] });
-
-    const fake = new FakeAgentClient({
-      runsByAgent: { [liveAgentId]: [resumeScript] },
       conversationText: null,
     });
 
