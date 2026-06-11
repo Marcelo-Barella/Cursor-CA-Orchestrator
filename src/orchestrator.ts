@@ -1609,11 +1609,12 @@ type DeferredPlanningEvents =
 async function reuseTaskPlanFromRepo(
   config: OrchestratorConfig,
   planContent: string,
-  ghUser: string,
+  ghToken: string,
   repoStore: RepoStoreClient,
   runId: string,
 ): Promise<string | null> {
   try {
+    const ghUser = await resolveGithubUsername(ghToken);
     const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
     config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
     const parsedTasks = parseTaskPlan(planContent, config);
@@ -1946,8 +1947,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
-      const ghUser = await resolveGithubUsername(ghToken);
-      const reuseDetail = await reuseTaskPlanFromRepo(config, planContent, ghUser, repoStore, runId);
+      const reuseDetail = await reuseTaskPlanFromRepo(config, planContent, ghToken, repoStore, runId);
       if (reuseDetail) {
         deferredPlanning = { status: "finished", emitStarted: false, completedDetail: reuseDetail };
       }
