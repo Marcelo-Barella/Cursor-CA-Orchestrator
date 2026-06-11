@@ -13,6 +13,7 @@ import {
   promptOnlyConfig,
   restoreGithubBranchPrepMock,
   runGit,
+  singleTaskConfig,
   type FileStore,
   validTaskPlanJson,
 } from "./support/reattach-fixtures.js";
@@ -36,31 +37,6 @@ function createTransientStateReadStore(
     },
   } as unknown as RepoStoreClient;
   return { store, files };
-}
-
-function singleTaskConfig(): OrchestratorConfig {
-  return {
-    name: "demo",
-    model: { id: "composer-2" },
-    prompt: "",
-    repositories: {
-      svc: { url: "https://github.com/acme/svc", ref: "main" },
-    },
-    tasks: [
-      {
-        id: "t1",
-        repo: "svc",
-        prompt: "Do the thing.",
-        model: null,
-        depends_on: [],
-        timeout_minutes: 30,
-        create_repo: false,
-        repo_config: null,
-      },
-    ],
-    target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
-    bootstrap_repo_name: "cursor-orch-bootstrap",
-  };
 }
 
 function twoTaskChainConfig(): OrchestratorConfig {
