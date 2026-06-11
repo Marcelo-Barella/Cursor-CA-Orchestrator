@@ -105,6 +105,31 @@ describe("getReadyTasks", () => {
       }),
     ).toEqual(["t2"]);
   });
+
+  it("excludes pending tasks that have no agent entry", () => {
+    const graph = { t1: new Set<string>(), t2: new Set(["t1"]) };
+    const agent = (taskId: string, status: string): AgentState => ({
+      task_id: taskId,
+      agent_id: null,
+      status,
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      blocked_retry_count: 0,
+      cascade_source_task_id: null,
+    });
+    expect(getReadyTasks(graph, {})).toEqual([]);
+    expect(
+      getReadyTasks(graph, {
+        t1: agent("t1", "finished"),
+      }),
+    ).toEqual([]);
+  });
 });
 
 describe("orchestrator launch eligibility", () => {
@@ -250,6 +275,115 @@ describe("orchestrator launch eligibility", () => {
     expect(extractDelegationPhases(config, new Set())).toBeNull();
   });
 
+  it("extractDelegationPhases parses loose waves format with camelCase keys", () => {
+    const config = createConfig(["a", "b"]) as OrchestratorConfig & {
+      delegationMap?: unknown;
+    };
+    config.delegation_map = undefined;
+    config.delegationMap = {
+      waves: [
+        {
+          phase_id: "wave-1",
+          parallelGroups: [{ taskIds: ["a"] }, { tasks: ["b"] }],
+        },
+      ],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).not.toBeNull();
+    expect(phases).toHaveLength(1);
+    expect(phases![0]!.id).toBe("wave-1");
+    expect(phases![0]!.groups).toHaveLength(1);
+    expect(phases![0]!.groups[0]!.task_ids).toEqual(["a", "b"]);
+  });
+
+  it("extractDelegationPhases parses legacy delegationMap waves and parallel_groups", () => {
+    const config = createConfig(["a", "b", "c"]) as OrchestratorConfig & {
+      delegationMap?: unknown;
+    };
+    config.delegationMap = {
+      waves: [
+        {
+          phase_id: "wave-1",
+          parallel_groups: [{ tasks: ["a", "b"] }],
+        },
+        {
+          name: "wave-2",
+          parallelGroups: [{ taskIds: ["c"] }],
+        },
+      ],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b", "c"]));
+    expect(phases).toEqual([
+      { id: "wave-1", groups: [{ id: "group-1", task_ids: ["a", "b"] }] },
+      { id: "wave-2", groups: [{ id: "group-1", task_ids: ["c"] }] },
+    ]);
+  });
+
+  it("extractDelegationPhases legacy path drops unknown task ids", () => {
+    const config = createConfig(["a"]) as OrchestratorConfig & { delegationMap?: unknown };
+    config.delegationMap = {
+      waves: [{ tasks: ["a", "ghost"] }],
+    };
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).toEqual([{ id: "phase-1", groups: [{ id: "group-1", task_ids: ["a"] }] }]);
+  });
+
+  it("extractDelegationPhases parses legacy waves with parallel_groups and tasks fields", () => {
+    const config = createConfig(["a", "b", "c"]);
+    config.delegation_map = undefined;
+    Object.assign(config as unknown as Record<string, unknown>, {
+      delegation_map: {
+        waves: [
+          {
+            phase_id: "wave-1",
+            parallel_groups: [
+              { id: "pg1", tasks: ["a", "b"] },
+              { id: "pg2", taskIds: ["c"] },
+            ],
+          },
+        ],
+      },
+    });
+    const phases = extractDelegationPhases(config, new Set(["a", "b", "c"]));
+    expect(phases).toEqual([
+      {
+        id: "wave-1",
+        groups: [
+          { id: "group-1", task_ids: ["a", "b", "c"] },
+        ],
+      },
+    ]);
+  });
+
+  it("extractDelegationPhases parses legacy delegationMap camelCase phase task lists", () => {
+    const config = createConfig(["a", "b"]);
+    config.delegation_map = undefined;
+    Object.assign(config as unknown as Record<string, unknown>, {
+      delegationMap: {
+        phases: [{ name: "setup", tasks: ["a"] }, { id: "run", tasks: ["b"] }],
+      },
+    });
+    const phases = extractDelegationPhases(config, new Set(["a", "b"]));
+    expect(phases).toEqual([
+      { id: "setup", groups: [{ id: "group-1", task_ids: ["a"] }] },
+      { id: "run", groups: [{ id: "group-1", task_ids: ["b"] }] },
+    ]);
+  });
+
+  it("filterEligibleReadyTasks honors legacy delegation_map wave ordering", () => {
+    const config = createConfig(["a", "b"]);
+    config.delegation_map = undefined;
+    Object.assign(config as unknown as Record<string, unknown>, {
+      delegation_map: {
+        waves: [{ id: "p1", tasks: ["a"] }, { id: "p2", tasks: ["b"] }],
+      },
+    });
+    const state = createInitialState(config, "run1");
+    expect(filterEligibleReadyTasks(state, config, ["a", "b"])).toEqual(["a"]);
+    state.agents.a!.status = "finished";
+    expect(filterEligibleReadyTasks(state, config, ["a", "b"])).toEqual(["b"]);
+  });
+
   it("eligibles multiple tasks in the same parallel group when both are ready", () => {
     const config = createConfig(["a", "b", "c"]);
     config.delegation_map = {
@@ -269,7 +403,30 @@ describe("orchestrator launch eligibility", () => {
     expect(eligible).toEqual(["b", "c"]);
   });
 
-  it("treats a failed task in the prior group as terminal for wave advancement", () => {
+  it.each(["failed", "stopped"] as const)(
+    "treats a %s task in the prior group as terminal for wave advancement",
+    (terminalStatus) => {
+      const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
+      config.delegation_map = {
+        phases: [
+          {
+            id: "phase-1",
+            groups: [
+              { id: "g1", task_ids: ["a"] },
+              { id: "g2", task_ids: ["b", "c"] },
+            ],
+          },
+        ],
+      };
+      const state = createInitialState(config, "run1");
+      state.agents.a!.status = terminalStatus;
+      const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
+      expect(eligible).toEqual(["b", "c"]);
+      expect(state.delegation_group_index).toBe(1);
+    },
+  );
+
+  it("treats a stopped task in the prior group as terminal for wave advancement", () => {
     const config = createConfig(["a", "b", "c"], { repoFor: { c: "svc2" } });
     config.delegation_map = {
       phases: [
@@ -283,7 +440,7 @@ describe("orchestrator launch eligibility", () => {
       ],
     };
     const state = createInitialState(config, "run1");
-    state.agents.a!.status = "failed";
+    state.agents.a!.status = "stopped";
     const eligible = filterEligibleReadyTasks(state, config, ["b", "c"]);
     expect(eligible).toEqual(["b", "c"]);
     expect(state.delegation_group_index).toBe(1);
@@ -462,6 +619,46 @@ describe("runOrchestration validation gate", () => {
     await expect(runOrchestration("run-empty-state", agentClient, repoStore)).rejects.toThrow(/refusing to reset orchestration progress/);
   });
 
+  it("rejects whitespace-only state.json when events.jsonl shows an in-progress run", async () => {
+    const config = createConfig(["a"]);
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") return "   \n";
+        if (filename === "events.jsonl") {
+          return `${JSON.stringify({ timestamp: "2026-06-01T00:00:00.000Z", event_type: "orchestration_started", task_id: null, detail: "started" })}\n`;
+        }
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
+    await expect(runOrchestration("run-whitespace-state", agentClient, repoStore)).rejects.toThrow(/refusing to reset orchestration progress/);
+  });
+
+  it("propagates events.jsonl read errors when state.json is empty", async () => {
+    const config = createConfig(["a"]);
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") return "";
+        if (filename === "events.jsonl") {
+          throw new Error("GitHub API rate limited");
+        }
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
+    await expect(runOrchestration("run-events-read-fail", agentClient, repoStore)).rejects.toThrow(
+      /GitHub API rate limited/,
+    );
+  });
+
   it("aborts before repo writes when delegation_map fails validateConfig", async () => {
     const bad: OrchestratorConfig = {
       name: "n",
@@ -491,6 +688,8 @@ describe("runOrchestration validation gate", () => {
     const repoStore = {
       async readFile(_runId: string, filePath: string): Promise<string> {
         if (filePath === "config.yaml") return yaml;
+        if (filePath === "state.json") return "";
+        if (filePath === "events.jsonl") return "";
         throw new Error(`unexpected read: ${filePath}`);
       },
       async writeFile(): Promise<void> {
@@ -506,6 +705,421 @@ describe("runOrchestration validation gate", () => {
     const agentClient = {} as unknown as AgentClient;
     await expect(runOrchestration("run-gate-1", agentClient, repoStore)).rejects.toThrow(/unknown task/);
     expect(writeCount).toBe(0);
+  });
+
+  it("retries state.json reads and propagates the error when all attempts fail", async () => {
+    const config = createConfig(["a"]);
+    let stateReadAttempts = 0;
+    const repoStore = {
+      async readFile(_runId: string, filename: string): Promise<string> {
+        if (filename === "config.yaml") return toYaml(config);
+        if (filename === "state.json") {
+          stateReadAttempts += 1;
+          throw new Error("transient repo read failure");
+        }
+        return "";
+      },
+      async writeFile(): Promise<void> {},
+      async updateFile(): Promise<void> {},
+      async deleteFile(): Promise<void> {},
+    } as unknown as RepoStoreClient;
+    const agentClient = { createCloudAgent: async () => ({ agentId: "x" }) } as unknown as AgentClient;
+    await expect(runOrchestration("run-state-read-exhausted", agentClient, repoStore)).rejects.toThrow(
+      /transient repo read failure/,
+    );
+    expect(stateReadAttempts).toBe(3);
+  });
+});
+
+describe("pickReattachRun", () => {
+  it("returns null for an empty run list", () => {
+    expect(pickReattachRun([])).toBeNull();
+  });
+
+  it("prefers a running run over a newer finished run", () => {
+    const staleFinished = { status: "finished" as const, createdAt: 200 };
+    const activeRunning = { status: "running" as const, createdAt: 100 };
+    expect(pickReattachRun([staleFinished, activeRunning] as never)).toBe(activeRunning);
+  });
+
+  it("falls back to the newest createdAt when no run is running", () => {
+    const older = { status: "finished" as const, createdAt: 100 };
+    const newer = { status: "finished" as const, createdAt: 200 };
+    expect(pickReattachRun([older, newer] as never)).toBe(newer);
+  });
+
+  it("treats missing createdAt as zero when comparing finished runs", () => {
+    const noTimestamp = { status: "finished" as const };
+    const newer = { status: "finished" as const, createdAt: 50 };
+    expect(pickReattachRun([noTimestamp, newer] as never)).toBe(newer);
+  });
+});
+
+describe("agentIdFromTaskLaunchedEvent", () => {
+  it("reads agent_id from payload when present", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 (from-detail)",
+      payload: { agent_id: "from-payload" },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBe("from-payload");
+  });
+
+  it("falls back to detail when legacy events omit payload agent_id", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 (legacy-agent-7)",
+      payload: { run_id: "run-legacy" },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBe("legacy-agent-7");
+  });
+
+  it("returns null when detail does not match the launched-agent pattern", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 without agent id parens",
+      payload: { run_id: "run-legacy" },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBeNull();
+  });
+
+  it("falls back to detail when payload agent_id is whitespace-only", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 (legacy-agent-8)",
+      payload: { agent_id: "   ", run_id: "run-legacy" },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBe("legacy-agent-8");
+  });
+
+  it("trims whitespace from payload and detail captures", () => {
+    const event: OrchestrationEvent = {
+      timestamp: "2026-06-01T00:00:00.000Z",
+      event_type: "task_launched",
+      task_id: "t1",
+      phase_id: "execution",
+      agent_node_id: "t1",
+      agent_kind: "task",
+      detail: "Launched t1 ( spaced-agent )",
+      payload: { agent_id: "  trimmed-payload  " },
+    };
+    expect(agentIdFromTaskLaunchedEvent(event)).toBe("trimmed-payload");
+    expect(
+      agentIdFromTaskLaunchedEvent({
+        ...event,
+        payload: { run_id: "run-legacy" },
+      }),
+    ).toBe("spaced-agent");
+  });
+});
+
+describe("reconcileInFlightLaunchesFromEvents", () => {
+  it("restores agent_id for pending tasks with a later task_launched event", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-live-9)",
+        payload: {
+          agent_id: "agent-live-9",
+          run_id: "run-9",
+          repository: "https://github.com/acme/svc",
+          ref: "main",
+          branch: "cursor-orch/run-recover/t1",
+        },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(state.agents.t1!.agent_id).toBe("agent-live-9");
+    expect(state.agents.t1!.status).toBe("launching");
+    expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover/t1");
+  });
+
+  it.each(["task_failed", "task_finished", "task_stopped"] as const)(
+    "ignores stale launches cleared by %s",
+    (terminalEvent) => {
+      const config = createConfig(["t1"]);
+      const state = createInitialState(config, "run-recover-stale");
+      const events: OrchestrationEvent[] = [
+        {
+          timestamp: "2026-06-01T00:00:00.000Z",
+          event_type: "task_launched",
+          task_id: "t1",
+          phase_id: "execution",
+          agent_node_id: "t1",
+          agent_kind: "task",
+          detail: "Launched t1 (agent-old)",
+          payload: { agent_id: "agent-old", run_id: "run-old" },
+        },
+        {
+          timestamp: "2026-06-01T00:01:00.000Z",
+          event_type: terminalEvent,
+          task_id: "t1",
+          phase_id: null,
+          agent_node_id: "t1",
+          agent_kind: "task",
+          detail: `Task t1 ${terminalEvent}`,
+          payload: {},
+        },
+      ];
+      expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+      expect(state.agents.t1!.agent_id).toBeNull();
+      expect(state.agents.t1!.status).toBe("pending");
+    },
+  );
+
+  it("restores agent_id from legacy task_launched detail when payload omits agent_id", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-legacy");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (legacy-agent-9)",
+        payload: {
+          run_id: "run-9",
+          repository: "https://github.com/acme/svc",
+          ref: "main",
+          branch: "cursor-orch/run-recover-legacy/t1",
+        },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(state.agents.t1!.agent_id).toBe("legacy-agent-9");
+    expect(state.agents.t1!.status).toBe("launching");
+  });
+
+  it("leaves agent pending when task_launched detail cannot be parsed and payload omits agent_id", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-unparseable");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 without recoverable agent id",
+        payload: { run_id: "run-9" },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBeNull();
+    expect(state.agents.t1!.status).toBe("pending");
+  });
+
+  it("uses the latest task_launched event before any terminal event", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-latest");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-old)",
+        payload: { agent_id: "agent-old", run_id: "run-old" },
+      },
+      {
+        timestamp: "2026-06-01T00:01:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-new)",
+        payload: { agent_id: "agent-new", run_id: "run-new", branch: "cursor-orch/run-recover-latest/t1" },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(state.agents.t1!.agent_id).toBe("agent-new");
+    expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover-latest/t1");
+  });
+
+  it("does not overwrite agents that already have agent_id", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-existing");
+    state.agents.t1!.agent_id = "agent-kept";
+    state.agents.t1!.status = "running";
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-other)",
+        payload: { agent_id: "agent-other", run_id: "run-other" },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBe("agent-kept");
+    expect(state.agents.t1!.status).toBe("running");
+  });
+
+  it("skips agents that already have an agent_id", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-skip");
+    state.agents.t1!.agent_id = "agent-existing";
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-other)",
+        payload: { agent_id: "agent-other", run_id: "run-other" },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBe("agent-existing");
+    expect(state.agents.t1!.status).toBe("pending");
+  });
+
+  it("ignores task_launched events with blank agent_id", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-blank-detail");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1",
+        payload: { agent_id: "   ", run_id: "run-blank" },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBeNull();
+    expect(state.agents.t1!.status).toBe("pending");
+  });
+
+  it("ignores task_launched events with blank agent_id payloads", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-blank");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 ()",
+        payload: { agent_id: "   ", run_id: "run-blank" },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(false);
+    expect(state.agents.t1!.agent_id).toBeNull();
+  });
+
+  it("uses the latest task_launched event when a task is relaunched", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-retry");
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-first)",
+        payload: { agent_id: "agent-first", run_id: "run-first" },
+      },
+      {
+        timestamp: "2026-06-01T00:01:00.000Z",
+        event_type: "task_failed",
+        task_id: "t1",
+        phase_id: null,
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Task t1 failed",
+        payload: {},
+      },
+      {
+        timestamp: "2026-06-01T00:02:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-retry)",
+        payload: {
+          agent_id: "agent-retry",
+          run_id: "run-retry",
+          branch: "cursor-orch/run-recover-retry/t1-retry-1",
+        },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(state.agents.t1!.agent_id).toBe("agent-retry");
+    expect(state.agents.t1!.status).toBe("launching");
+    expect(state.agents.t1!.branch_name).toBe("cursor-orch/run-recover-retry/t1-retry-1");
+  });
+
+  it("preserves existing started_at and branch_name when reconciling", () => {
+    const config = createConfig(["t1"]);
+    const state = createInitialState(config, "run-recover-preserve");
+    state.agents.t1!.started_at = "2026-05-01T00:00:00.000Z";
+    state.agents.t1!.branch_name = "existing-branch";
+    const events: OrchestrationEvent[] = [
+      {
+        timestamp: "2026-06-01T00:00:00.000Z",
+        event_type: "task_launched",
+        task_id: "t1",
+        phase_id: "execution",
+        agent_node_id: "t1",
+        agent_kind: "task",
+        detail: "Launched t1 (agent-live)",
+        payload: {
+          agent_id: "agent-live",
+          run_id: "run-live",
+          branch: "cursor-orch/run-recover-preserve/t1",
+        },
+      },
+    ];
+    expect(reconcileInFlightLaunchesFromEvents(state, events)).toBe(true);
+    expect(state.agents.t1!.started_at).toBe("2026-05-01T00:00:00.000Z");
+    expect(state.agents.t1!.branch_name).toBe("existing-branch");
   });
 });
 
