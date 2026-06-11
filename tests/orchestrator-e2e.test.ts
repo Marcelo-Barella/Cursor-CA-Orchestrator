@@ -102,6 +102,45 @@ function promptOnlyConfig(): OrchestratorConfig {
   };
 }
 
+function threeTaskChainConfig(): OrchestratorConfig {
+  const base = singleTaskConfig();
+  return {
+    ...base,
+    tasks: [
+      {
+        id: "t1",
+        repo: "svc",
+        prompt: "Produce upstream outputs.",
+        model: null,
+        depends_on: [],
+        timeout_minutes: 30,
+        create_repo: false,
+        repo_config: null,
+      },
+      {
+        id: "t2",
+        repo: "svc",
+        prompt: "Consume t1 outputs.",
+        model: null,
+        depends_on: ["t1"],
+        timeout_minutes: 30,
+        create_repo: false,
+        repo_config: null,
+      },
+      {
+        id: "t3",
+        repo: "svc",
+        prompt: "Consume t2 outputs.",
+        model: null,
+        depends_on: ["t2"],
+        timeout_minutes: 30,
+        create_repo: false,
+        repo_config: null,
+      },
+    ],
+  };
+}
+
 function twoTaskChainConfig(): OrchestratorConfig {
   const base = singleTaskConfig();
   return {
@@ -1048,6 +1087,28 @@ describe("runOrchestration with SDK (happy path)", () => {
     );
   });
 
+  it("clears stale planning failure state when a later planning attempt succeeds", async () => {
+    const config = promptOnlyConfig();
+    const validTaskPlan = JSON.stringify({
+      tasks: [{ id: "t1", repo: "svc", prompt: "Planned work.", depends_on: [], timeout_minutes: 30 }],
+    });
+    const failingPlanner = () =>
+      new FakeAgentClient({
+        defaultScripts: [{ sendThrows: new Error("planner timeout") }],
+      });
+    const workerOnly = () =>
+      new FakeAgentClient({
+        defaultScripts: [completedWorkerScript("t1", "run-plan-retry-ok")],
+      });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-plan-retry-ok", failingPlanner(), store)).rejects.toThrow(/planner timeout/);
+    files.set("task-plan.json", validTaskPlan);
+    await runOrchestration("run-plan-retry-ok", workerOnly(), store);
+    const final = JSON.parse(files.get("state.json")!);
+    expect(final.status).toBe("completed");
+    expect(final.error).toBeNull();
+  });
+
   it("reuses existing task-plan.json without launching a planner agent", async () => {
     const config = promptOnlyConfig();
     const taskPlan = JSON.stringify({
@@ -1309,6 +1370,28 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t2.summary).toContain("Upstream task t1 failed");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.some((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t2")).toBe(true);
+  });
+
+  it("cascades failure transitively through dependency chains", async () => {
+    const config = threeTaskChainConfig();
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        {
+          events: [statusMessage("RUNNING"), statusMessage("ERROR")],
+          result: { id: "r-t1", status: "error" },
+        },
+        completedWorkerScript("t2", "run-transitive-cascade"),
+        completedWorkerScript("t3", "run-transitive-cascade"),
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-transitive-cascade", fake, store)).rejects.toThrow();
+    expect(fake.launches).toHaveLength(1);
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.agents.t1.status).toBe("failed");
+    expect(state.agents.t2.status).toBe("failed");
+    expect(state.agents.t3.status).toBe("failed");
+    expect(state.agents.t3.cascade_source_task_id).toBe("t2");
   });
 
   it("writes the stop sentinel leads to state.status=stopped", async () => {

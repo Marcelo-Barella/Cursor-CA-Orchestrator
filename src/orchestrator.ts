@@ -1569,6 +1569,7 @@ async function checkCompletion(ctx: LoopContext): Promise<boolean> {
     await maybeFinalizePullRequests(ctx.state, ctx.config, ctx.graph, ctx.runId, ctx.repoStore);
   }
   ctx.state.status = "completed";
+  ctx.state.error = null;
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
   await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await appendEvent(
@@ -1581,11 +1582,20 @@ async function checkCompletion(ctx: LoopContext): Promise<boolean> {
 }
 
 async function checkFailure(ctx: LoopContext): Promise<boolean> {
+  for (;;) {
+    const failedIds = Object.entries(ctx.state.agents)
+      .filter(([, a]) => a.status === "failed")
+      .map(([id]) => id);
+    if (!failedIds.length) return false;
+    let cascadedAny = false;
+    for (const fid of failedIds) {
+      const cascaded = await cascadeFailures(ctx.state, fid, ctx.graph, ctx.repoStore, ctx.runId);
+      if (cascaded.length > 0) cascadedAny = true;
+    }
+    if (!cascadedAny) break;
+  }
   const failedIds = new Set(Object.entries(ctx.state.agents).filter(([, a]) => a.status === "failed").map(([id]) => id));
   if (!failedIds.size) return false;
-  for (const fid of failedIds) {
-    await cascadeFailures(ctx.state, fid, ctx.graph, ctx.repoStore, ctx.runId);
-  }
   if (!checkTerminalFailure(ctx.state)) return false;
   if (ctx.activeWorkers.size > 0) return false;
   ctx.state.status = "failed";
@@ -1986,6 +1996,16 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         runId,
         makeEvent("planning_failed", planningFailedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
       );
+    }
+    await syncToRepo(repoStore, runId, state);
+  }
+
+  if (planningRan && planningOk && state.status === "failed") {
+    state.status = "running";
+    state.error = null;
+    if (state.main_agent) {
+      state.main_agent.status = "running";
+      state.main_agent.finished_at = null;
     }
     await syncToRepo(repoStore, runId, state);
   }
