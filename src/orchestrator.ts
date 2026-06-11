@@ -500,8 +500,8 @@ async function cascadeDependents(
   graph: Record<string, Set<string>>,
   repoStore: RepoStoreClient,
   runId: string,
-): Promise<string[]> {
-  const cascaded: string[] = [];
+): Promise<boolean> {
+  let changed = false;
   const finishedAt = kind === "stopped" ? nowIso() : undefined;
   const eventType = kind === "failed" ? "task_failed" : "task_stopped";
   for (const [taskId, deps] of Object.entries(graph)) {
@@ -512,25 +512,24 @@ async function cascadeDependents(
     agent.cascade_source_task_id = sourceTaskId;
     agent.summary = `Upstream task ${sourceTaskId} ${kind}`;
     if (finishedAt) agent.finished_at = finishedAt;
-    cascaded.push(taskId);
+    changed = true;
     await appendEvent(
       repoStore,
       runId,
       makeEvent(eventType, `Task ${taskId} ${kind}: upstream ${sourceTaskId} ${kind}`, taskId),
     );
     if (kind === "stopped") {
-      cascaded.push(...(await cascadeDependents(state, taskId, kind, graph, repoStore, runId)));
+      changed = (await cascadeDependents(state, taskId, kind, graph, repoStore, runId)) || changed;
     }
   }
-  return cascaded;
+  return changed;
 }
 
-async function reconcileStoppedCascades(ctx: LoopContext): Promise<void> {
+async function cascadeFromStoppedAgents(ctx: LoopContext): Promise<void> {
   let changed = false;
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
     if (agent.status !== "stopped") continue;
-    const cascaded = await cascadeDependents(ctx.state, taskId, "stopped", ctx.graph, ctx.repoStore, ctx.runId);
-    if (cascaded.length > 0) changed = true;
+    changed = (await cascadeDependents(ctx.state, taskId, "stopped", ctx.graph, ctx.repoStore, ctx.runId)) || changed;
   }
   if (changed) markStateDirty(ctx);
 }
@@ -629,10 +628,6 @@ function agentsMatch(state: OrchestrationState, match: (status: string) => boole
   const agents = Object.values(state.agents);
   if (!agents.length) return false;
   return agents.every((a) => match(a.status));
-}
-
-function checkAllFinished(state: OrchestrationState): boolean {
-  return agentsMatch(state, (status) => status === "finished");
 }
 
 export function allAgentsTerminal(state: OrchestrationState): boolean {
@@ -1060,8 +1055,10 @@ async function runWorkerStream(
   if (ctx.stopRequested.value) {
     agent.status = "stopped";
     agent.finished_at = finalizedAt;
+    await cascadeDependents(ctx.state, taskId, "stopped", ctx.graph, ctx.repoStore, ctx.runId);
     ctx.activeWorkers.delete(taskId);
     await safeDisposeAgent(sdkAgent);
+    markStateDirty(ctx);
     return;
   }
 
@@ -1305,6 +1302,7 @@ async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
     await safeDisposeAgent(handle.sdkAgent);
   }
   ctx.activeWorkers.clear();
+  await cascadeFromStoppedAgents(ctx);
   ctx.state.status = "stopped";
   await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
@@ -1529,7 +1527,7 @@ async function maybeFinalizePullRequests(
 async function checkCompletion(ctx: LoopContext): Promise<boolean> {
   if (ctx.activeWorkers.size > 0) return false;
   if (!allAgentsTerminal(ctx.state)) return false;
-  if (!checkAllFinished(ctx.state)) {
+  if (!agentsMatch(ctx.state, (status) => status === "finished")) {
     const hasFailed = Object.values(ctx.state.agents).some((a) => a.status === "failed");
     if (hasFailed) return false;
     ctx.state.status = "stopped";
@@ -1839,7 +1837,6 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
         await checkStopRequested(ctx);
         return;
       }
-      await reconcileStoppedCascades(ctx);
       await handleBlockedTasks(ctx);
       await launchReadyTasks(ctx);
       await writeProgress(ctx);
@@ -1978,6 +1975,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   try {
     await reattachWorkers(ctx);
+    await cascadeFromStoppedAgents(ctx);
     await orchestrationLoop(ctx);
   } catch (exc) {
     console.error("Orchestration loop failed", exc);
