@@ -117,24 +117,23 @@ export async function runCleanupCommand(opts: {
     });
   }
   const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
-  const eligible: string[] = [];
+  const eligible: Array<{ branch: string; runId: string }> = [];
   for (const branch of branches) {
     const runId = branch.replace(/^run\//, "");
     const commitDate = await repoStore.getRunBranchCommitDate(runId);
     if (commitDate && commitDate.getTime() < cutoffMs) {
-      eligible.push(branch);
+      eligible.push({ branch, runId });
     }
   }
   if (opts.dryRun) {
     console.log(`Found ${eligible.length} run branch(es) older than ${days} day(s) (dry run - not deleting):`);
-    for (const branch of eligible) {
+    for (const { branch } of eligible) {
       console.log(`  - ${branch}`);
     }
     return;
   }
   let deleted = 0;
-  for (const branch of eligible) {
-    const runId = branch.replace(/^run\//, "");
+  for (const { branch, runId } of eligible) {
     await repoStore.deleteRunBranch(runId);
     console.log(`Deleted branch: ${branch}`);
     deleted += 1;

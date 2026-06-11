@@ -604,16 +604,17 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
   }
 }
 
-function checkAllFinished(state: OrchestrationState): boolean {
+function agentsSatisfy(state: OrchestrationState, match: (status: string) => boolean): boolean {
   const agents = Object.values(state.agents);
-  if (!agents.length) return false;
-  return agents.every((a) => a.status === "finished");
+  return agents.length > 0 && agents.every((a) => match(a.status));
+}
+
+function checkAllFinished(state: OrchestrationState): boolean {
+  return agentsSatisfy(state, (status) => status === "finished");
 }
 
 export function allAgentsTerminal(state: OrchestrationState): boolean {
-  const agents = Object.values(state.agents);
-  if (!agents.length) return false;
-  return agents.every((a) => isTerminalStatus(a.status));
+  return agentsSatisfy(state, isTerminalStatus);
 }
 
 function checkTerminalFailure(state: OrchestrationState): boolean {

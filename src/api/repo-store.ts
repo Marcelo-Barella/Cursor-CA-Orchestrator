@@ -374,10 +374,10 @@ export class RepoStoreClient implements RepoStoreReader {
     const url = `${BASE_URL}/repos/${this.owner}/${this.repo}/branches/run/${encodeURIComponent(runId)}`;
     try {
       const resp = await this.request("GET", url);
-      const data = (await resp.json()) as {
+      const branchPayload = (await resp.json()) as {
         commit?: { commit?: { committer?: { date?: string }; author?: { date?: string } } };
       };
-      const raw = data.commit?.commit?.committer?.date ?? data.commit?.commit?.author?.date;
+      const raw = branchPayload.commit?.commit?.committer?.date ?? branchPayload.commit?.commit?.author?.date;
       if (!raw) return null;
       const parsed = new Date(raw);
       return Number.isNaN(parsed.getTime()) ? null : parsed;
