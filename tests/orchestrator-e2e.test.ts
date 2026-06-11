@@ -1029,6 +1029,36 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
   });
 
+  it("persists state before planning_failed so prompt-only runs can retry after planning failure", async () => {
+    const config = promptOnlyConfig();
+    const failFake = new FakeAgentClient({ createFailCount: 1 });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-plan-fail-retry", failFake, store)).rejects.toThrow(/fake createCloudAgent failure/);
+    expect(files.get("state.json")).toBeTruthy();
+    const failureEvents = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(failureEvents.some((e: { event_type: string }) => e.event_type === "planning_failed")).toBe(true);
+    expect(failureEvents.some((e: { event_type: string }) => e.event_type === "orchestration_started")).toBe(true);
+
+    const taskPlan = JSON.stringify({
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "Planned work.",
+          depends_on: [],
+          timeout_minutes: 30,
+        },
+      ],
+    });
+    files.set("task-plan.json", taskPlan);
+    const retryFake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", "run-plan-fail-retry")],
+    });
+    await runOrchestration("run-plan-fail-retry", retryFake, store);
+    expect(retryFake.launches).toHaveLength(1);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
   it("marks a task blocked when worker JSON reports blocked status", async () => {
     const config = singleTaskConfig();
     const blockedPayload = {
