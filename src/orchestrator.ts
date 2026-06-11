@@ -714,6 +714,20 @@ function createWakeup(): { resolve: () => void; promise: Promise<void> } {
   return { resolve: resolveFn, promise };
 }
 
+async function syncStopRequestedFromRepo(ctx: LoopContext): Promise<boolean> {
+  if (ctx.stopRequested.value) return true;
+  try {
+    const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+    if (stopContent) {
+      ctx.stopRequested.value = true;
+      return true;
+    }
+  } catch {
+    /* poller will retry */
+  }
+  return false;
+}
+
 async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
   try {
     await agent[Symbol.asyncDispose]();
@@ -1087,11 +1101,12 @@ async function runWorkerStream(
 
   const finalizedAt = nowIso();
 
-  if (ctx.stopRequested.value) {
+  if (await syncStopRequestedFromRepo(ctx)) {
     agent.status = "stopped";
     agent.finished_at = finalizedAt;
     ctx.activeWorkers.delete(taskId);
     await safeDisposeAgent(sdkAgent);
+    markStateDirty(ctx);
     return;
   }
 
@@ -1302,6 +1317,7 @@ async function handleBlockedTasks(ctx: LoopContext): Promise<void> {
 async function launchReadyTasks(ctx: LoopContext): Promise<void> {
   const taskMap = Object.fromEntries(ctx.config.tasks.map((t) => [t.id, t]));
   for (;;) {
+    if (await syncStopRequestedFromRepo(ctx)) return;
     const readyTasks = getReadyTasks(ctx.graph, ctx.state.agents);
     const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks).filter(
       (taskId) => !ctx.activeWorkers.has(taskId),
