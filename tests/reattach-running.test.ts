@@ -9,7 +9,7 @@ import {
   restoreGithubBranchPrepMock,
   runGit,
   singleTaskConfig,
-} from "./support/reattach-fixtures.js";
+} from "./support/orchestrator-fixtures.js";
 
 const listRunsMock = vi.hoisted(() => vi.fn());
 

@@ -26,9 +26,7 @@ export interface FakeRunScript {
   artifacts?: Record<string, string>;
   throwOnWait?: unknown;
   throwOnStream?: unknown;
-  /** When set, send() throws before starting the run (launch-time failure). */
   sendThrows?: unknown;
-  /** Delay before wait() resolves so background stop polling can observe stop-requested.json. */
   waitDelayMs?: number;
 }
 
@@ -170,7 +168,6 @@ export interface FakeAgentClientOptions {
   defaultScripts?: FakeRunScript[];
   conversationText?: string | null | ((agentId: string) => string | null);
   sendPreDelayMs?: number;
-  /** First N createCloudAgent calls throw before any agent is returned. */
   createFailCount?: number;
 }
 

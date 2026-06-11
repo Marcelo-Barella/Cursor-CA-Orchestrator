@@ -18,7 +18,7 @@ import {
   restoreGithubBranchPrepMock,
   runGit,
   singleTaskConfig,
-} from "./support/reattach-fixtures.js";
+} from "./support/orchestrator-fixtures.js";
 
 function promptOnlyConfig(): OrchestratorConfig {
   return {
