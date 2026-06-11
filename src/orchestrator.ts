@@ -725,12 +725,12 @@ async function syncStopRequestedFromRepo(ctx: LoopContext): Promise<boolean> {
   if (ctx.stopRequested.value) return true;
   try {
     const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-    if (stopContent) {
-      ctx.stopRequested.value = true;
-      return true;
-    }
-  } catch {}
-  return false;
+    if (!stopContent) return false;
+    ctx.stopRequested.value = true;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function safeDisposeAgent(agent: SdkAgent): Promise<void> {
@@ -1341,8 +1341,7 @@ async function launchReadyTasks(ctx: LoopContext): Promise<void> {
   }
 }
 
-async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
-  if (!ctx.stopRequested.value) return false;
+async function haltOrchestration(ctx: LoopContext): Promise<void> {
   console.info("Stop requested, halting orchestration");
   for (const [taskId, handle] of ctx.activeWorkers.entries()) {
     const agent = ctx.state.agents[taskId];
@@ -1361,7 +1360,6 @@ async function checkStopRequested(ctx: LoopContext): Promise<boolean> {
     ctx.runId,
     makeEvent("orchestration_stopped", "Orchestration stopped by user", null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
   );
-  return true;
 }
 
 async function writeProgress(ctx: LoopContext): Promise<void> {
@@ -1809,7 +1807,6 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
     return;
   }
   ctx.wakeup = createWakeup();
-  await syncStopRequestedFromRepo(ctx);
   const pollController = new AbortController();
   const stopPoller = (async () => {
     while (!ctx.stopRequested.value) {
@@ -1828,7 +1825,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
   try {
     while (true) {
       if (await syncStopRequestedFromRepo(ctx)) {
-        await checkStopRequested(ctx);
+        await haltOrchestration(ctx);
         return;
       }
       await handleBlockedTasks(ctx);
