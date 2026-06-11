@@ -11,11 +11,13 @@ import {
   getBlockedTasks,
   getReadyTasks,
   agentIdFromTaskLaunchedEvent,
+  isRecoveredAgentGoneError,
   pickReattachRun,
   planRefForConsolidatedRunLine,
   reconcileInFlightLaunchesFromEvents,
   runOrchestration,
 } from "../src/orchestrator.js";
+import { ConfigurationError, NetworkError } from "@cursor/sdk";
 import type { AgentState, OrchestrationEvent } from "../src/state.js";
 import { createInitialState, deserialize, serialize } from "../src/state.js";
 
@@ -506,6 +508,17 @@ describe("runOrchestration validation gate", () => {
     const agentClient = {} as unknown as AgentClient;
     await expect(runOrchestration("run-gate-1", agentClient, repoStore)).rejects.toThrow(/unknown task/);
     expect(writeCount).toBe(0);
+  });
+});
+
+describe("isRecoveredAgentGoneError", () => {
+  it("returns true for SDK 404 agent errors", () => {
+    expect(isRecoveredAgentGoneError(new ConfigurationError("agent not found", { status: 404 }))).toBe(true);
+  });
+
+  it("returns false for transient SDK errors", () => {
+    expect(isRecoveredAgentGoneError(new NetworkError("service unavailable", { status: 503 }))).toBe(false);
+    expect(isRecoveredAgentGoneError(new Error("resume boom"))).toBe(false);
   });
 });
 

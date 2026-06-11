@@ -35,6 +35,7 @@ import { parseGithubOwnerRepo, resolveRepoTarget } from "./lib/repo-target.js";
 import { toSdkModelSelection } from "./lib/model-selection.js";
 import {
   type AgentClient,
+  CursorAgentError,
   type SDKAssistantMessage,
   type SDKStatusMessage,
   type SdkAgent,
@@ -84,6 +85,10 @@ function resetAgentForStaleLaunchRelaunch(agent: AgentState): void {
   agent.agent_id = null;
   agent.status = "pending";
   agent.started_at = null;
+}
+
+export function isRecoveredAgentGoneError(err: unknown): boolean {
+  return err instanceof CursorAgentError && err.status === 404;
 }
 
 async function handleTaskFailureWithOptionalRetry(
@@ -1773,11 +1778,6 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const reattachRun = pickReattachRun(runs.items);
       if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
-        if (ctx.eventRecoveredTaskIds.has(taskId)) {
-          resetAgentForStaleLaunchRelaunch(agent);
-          markStateDirty(ctx);
-          continue;
-        }
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
         continue;
@@ -1811,7 +1811,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       handle.done = runWorkerStream(ctx, handle, info);
       ctx.activeWorkers.set(taskId, handle);
     } catch (err) {
-      if (ctx.eventRecoveredTaskIds.has(taskId)) {
+      if (ctx.eventRecoveredTaskIds.has(taskId) && isRecoveredAgentGoneError(err)) {
         resetAgentForStaleLaunchRelaunch(agent);
         markStateDirty(ctx);
         continue;
