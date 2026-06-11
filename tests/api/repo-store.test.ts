@@ -150,4 +150,52 @@ describe("RepoStoreClient", () => {
     expect(body.sha).toBe("sha-del");
     expect(body.branch).toBe(`run/${runId}`);
   });
+
+  it("listRunBranches parses run branch refs from the GitHub refs API", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { ref: "refs/heads/run/run-1" },
+          { ref: "refs/heads/run/run-2" },
+          { ref: "refs/heads/other-branch" },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.listRunBranches()).resolves.toEqual(["run/run-1", "run/run-2", "other-branch"]);
+    const url = String(fetchMock.mock.calls[0]![0]);
+    expect(url).toContain("/git/refs/heads/run/");
+  });
+
+  it("listRunBranches returns an empty list when the refs endpoint is missing", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.listRunBranches()).resolves.toEqual([]);
+  });
+
+  it("listRunBranches returns an empty list when the payload is not an array", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ message: "unexpected" }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.listRunBranches()).resolves.toEqual([]);
+  });
+
+  it("deleteRunBranch is a no-op when the branch ref is absent", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.deleteRunBranch(runId)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = String(fetchMock.mock.calls[0]![0]);
+    expect(url).toContain(`/git/refs/heads/run/${runId}`);
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).method).toBe("DELETE");
+  });
+
+  it("deleteRunBranch issues DELETE when the branch exists", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 200 }));
+    const client = new RepoStoreClient("ghp-test", owner, repo);
+    await expect(client.deleteRunBranch(runId)).resolves.toBeUndefined();
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).method).toBe("DELETE");
+  });
 });
