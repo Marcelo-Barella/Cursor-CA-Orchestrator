@@ -601,6 +601,10 @@ function nonEmptyMcpServers(
   return servers;
 }
 
+function bootstrapRepoUrl(ghUser: string, bootstrapRepoName: string): string {
+  return `https://github.com/${ghUser}/${bootstrapRepoName}`;
+}
+
 async function resolveRepoForTask(
   task: TaskConfig,
   config: OrchestratorConfig,
@@ -609,8 +613,7 @@ async function resolveRepoForTask(
 ): Promise<[string, string]> {
   if (task.create_repo) {
     const ghUser = await resolveGithubUsername(ghToken);
-    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-    return [bootstrapUrl, resolveBootstrapRef()];
+    return [bootstrapRepoUrl(ghUser, config.bootstrap_repo_name), resolveBootstrapRef()];
   }
   if (task.repo in config.repositories) {
     const rc = config.repositories[task.repo]!;
@@ -1619,8 +1622,10 @@ async function applyTaskPlanToConfig(
   repoStore: RepoStoreClient,
   validateConstraints: boolean,
 ): Promise<void> {
-  const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
-  config.repositories["__bootstrap__"] = { url: bootstrapUrl, ref: resolveBootstrapRef() };
+  config.repositories["__bootstrap__"] = {
+    url: bootstrapRepoUrl(ghUser, config.bootstrap_repo_name),
+    ref: resolveBootstrapRef(),
+  };
   const parsedTasks = parseTaskPlan(planContent, config);
   if (validateConstraints) {
     assertTaskPlanMeetsPromptConstraints(parsedTasks, config.prompt);
@@ -1633,53 +1638,49 @@ async function applyTaskPlanToConfig(
   await repoStore.writeFile(runId, "config.yaml", toYaml(config));
 }
 
-async function emitPlanningLifecycleEvents(
-  repoStore: RepoStoreClient,
-  runId: string,
-  planningSource: "reused" | "fresh",
-  taskCount: number,
-): Promise<void> {
-  if (planningSource === "fresh") {
-    await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
-    );
-  }
-  const planningSuffix = planningSource === "reused" ? " (reused existing plan)" : "";
+const PLANNING_PHASE_META = { phase_id: "planning", agent_kind: "phase" } as const;
+
+async function appendPlanningStarted(repoStore: RepoStoreClient, runId: string): Promise<void> {
   await appendEvent(
     repoStore,
     runId,
-    makeEvent(
-      "planning_completed",
-      `Planning completed: ${taskCount} tasks${planningSuffix}`,
-      null,
-      { phase_id: "planning", agent_kind: "phase" },
-    ),
+    makeEvent("planning_started", "Planning phase started", null, PLANNING_PHASE_META),
   );
 }
 
-async function emitPlanningFailedEvents(
-  repoStore: RepoStoreClient,
-  runId: string,
-  errorDetail: string,
-  emitStarted: boolean,
-): Promise<void> {
-  if (emitStarted) {
+type PlanningEvents =
+  | { kind: "completed"; source: "reused" | "fresh"; taskCount: number }
+  | { kind: "failed"; detail: string; emitStarted: boolean };
+
+async function emitPlanningEvents(repoStore: RepoStoreClient, runId: string, events: PlanningEvents): Promise<void> {
+  if (events.kind === "completed") {
+    if (events.source === "fresh") {
+      await appendPlanningStarted(repoStore, runId);
+    }
+    const suffix = events.source === "reused" ? " (reused existing plan)" : "";
     await appendEvent(
       repoStore,
       runId,
-      makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+      makeEvent("planning_completed", `Planning completed: ${events.taskCount} tasks${suffix}`, null, PLANNING_PHASE_META),
     );
+    return;
+  }
+  if (events.emitStarted) {
+    await appendPlanningStarted(repoStore, runId);
   }
   await appendEvent(
     repoStore,
     runId,
-    makeEvent("planning_failed", errorDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+    makeEvent("planning_failed", events.detail, null, PLANNING_PHASE_META),
   );
 }
 
 type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
+
+type PlanningOutcome =
+  | { ran: false }
+  | { ran: true; ok: true; source: "reused" | "fresh" }
+  | { ran: true; ok: false; detail: string; usedFullPhase: boolean };
 
 async function readPlanFromAgentRuns(agentId: string, apiKey: string): Promise<string | null> {
   const runs = await (await import("@cursor/sdk")).Agent.listRuns(agentId, { runtime: "cloud", apiKey }).catch(() => null);
@@ -1702,11 +1703,10 @@ async function runPlanningPhase(
 ): Promise<PlanningPhaseResult> {
   try {
     const plannerPrompt = buildPlannerPrompt(config, runId, ghUser, config.bootstrap_repo_name);
-    const bootstrapUrl = `https://github.com/${ghUser}/${config.bootstrap_repo_name}`;
     const plannerAgent = await agentClient.createCloudAgent({
       apiKey,
       model: config.model,
-      repoUrl: bootstrapUrl,
+      repoUrl: bootstrapRepoUrl(ghUser, config.bootstrap_repo_name),
       startingRef: resolveBootstrapRef(),
       autoCreatePR: false,
       skipReviewerRequest: true,
@@ -1950,13 +1950,8 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     return;
   }
 
-  let planningRan = false;
-  let planningOk = false;
-  let planningSource: "reused" | "fresh" | null = null;
-  let planningUsedFullPhase = false;
-  let planningFailedDetail: string | null = null;
+  let planning: PlanningOutcome = { ran: false };
   if (config.prompt && !config.tasks.length) {
-    planningRan = true;
     const ghUser = await resolveGithubUsername(ghToken);
     const planContent = await repoStore.readFile(runId, "task-plan.json");
     if (planContent) {
@@ -1964,19 +1959,14 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         .then(() => true)
         .catch(() => false);
       if (reused) {
-        planningOk = true;
-        planningSource = "reused";
+        planning = { ran: true, ok: true, source: "reused" };
       }
     }
-    if (!planningOk) {
-      planningUsedFullPhase = true;
+    if (!planning.ran || !planning.ok) {
       const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey, ghUser);
-      if (planningResult.ok) {
-        planningOk = true;
-        planningSource = "fresh";
-      } else {
-        planningFailedDetail = planningResult.error;
-      }
+      planning = planningResult.ok
+        ? { ran: true, ok: true, source: "fresh" }
+        : { ran: true, ok: false, detail: planningResult.error, usedFullPhase: true };
     }
   }
 
@@ -2014,26 +2004,31 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       makeEvent("orchestration_started", "Orchestration started", null, { agent_node_id: "main-orchestrator", agent_kind: "main" }),
     );
   }
-  if (planningRan) {
-    setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
-    if (planningOk && planningSource) {
-      await emitPlanningLifecycleEvents(repoStore, runId, planningSource, config.tasks.length);
-    } else if (!planningOk && planningFailedDetail !== null) {
-      await emitPlanningFailedEvents(repoStore, runId, planningFailedDetail, planningUsedFullPhase);
+  if (planning.ran) {
+    setPhaseStatus(state, "planning", planning.ok ? "finished" : "failed", { timestamp: nowIso() });
+    if (planning.ok) {
+      await emitPlanningEvents(repoStore, runId, {
+        kind: "completed",
+        source: planning.source,
+        taskCount: config.tasks.length,
+      });
+    } else {
+      await emitPlanningEvents(repoStore, runId, {
+        kind: "failed",
+        detail: planning.detail,
+        emitStarted: planning.usedFullPhase,
+      });
+      state.status = "failed";
+      state.error = planning.detail;
+      if (state.main_agent) {
+        state.main_agent.status = "failed";
+        state.main_agent.finished_at = nowIso();
+      }
     }
     await syncToRepo(repoStore, runId, state);
-  }
-
-  if (planningRan && !planningOk) {
-    const failureMessage = planningFailedDetail ?? "Planning failed";
-    state.status = "failed";
-    state.error = failureMessage;
-    if (state.main_agent) {
-      state.main_agent.status = "failed";
-      state.main_agent.finished_at = nowIso();
+    if (!planning.ok) {
+      throw new Error(planning.detail);
     }
-    await syncToRepo(repoStore, runId, state);
-    throw new Error(failureMessage);
   }
 
   const graph = buildDependencyGraph(config.tasks);
