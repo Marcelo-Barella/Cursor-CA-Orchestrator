@@ -1458,6 +1458,48 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(JSON.parse(state!).status).not.toBe("completed");
   });
 
+  it("preserves task-plan.json when reuse fails on transient config write", async () => {
+    const config = promptOnlyConfig();
+    const taskPlan = JSON.stringify({
+      tasks: [{ id: "t1", repo: "svc", prompt: "Planned work.", depends_on: [], timeout_minutes: 30 }],
+    });
+    let configWriteFails = true;
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "task-plan.json": taskPlan,
+    });
+    const baseWrite = store.writeFile.bind(store);
+    store.writeFile = async (runId, filename, content) => {
+      if (filename === "config.yaml" && configWriteFails) {
+        throw new Error("transient config write failure");
+      }
+      return baseWrite(runId, filename, content);
+    };
+    const failingFake = new FakeAgentClient({
+      defaultScripts: [{ sendThrows: new Error("transient planner error") }],
+    });
+    await expect(runOrchestration("run-preserve-plan", failingFake, store)).rejects.toThrow(/transient planner error/);
+    expect(files.get("task-plan.json")).toBe(taskPlan);
+    expect(files.get("events.jsonl")).toContain("planning_failed");
+
+    configWriteFails = false;
+    const successFake = new FakeAgentClient({
+      defaultScripts: [completedWorkerScript("t1", "run-preserve-plan")],
+    });
+    await runOrchestration("run-preserve-plan", successFake, store);
+    expect(successFake.launches).toHaveLength(1);
+    expect(JSON.parse(files.get("state.json")!).status).toBe("completed");
+  });
+
+  it("returns planning_failed when planner agent creation fails", async () => {
+    const config = promptOnlyConfig();
+    const fake = new FakeAgentClient({ createFailCount: 1 });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    await expect(runOrchestration("run-planner-create-fail", fake, store)).rejects.toThrow(/fake createCloudAgent failure/);
+    expect(files.get("state.json")).toBeTruthy();
+    expect(files.get("events.jsonl")).toContain("planning_failed");
+  });
+
   it("allows retry after planning failure without blocking on empty-state resume guard", async () => {
     const config = promptOnlyConfig();
     const failingFake = new FakeAgentClient({
