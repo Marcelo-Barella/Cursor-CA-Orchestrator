@@ -573,6 +573,30 @@ async function cascadeFailures(
   return cascaded;
 }
 
+async function cascadeStops(
+  state: OrchestrationState,
+  stoppedTaskId: string,
+  graph: Record<string, Set<string>>,
+  repoStore: RepoStoreClient,
+  runId: string,
+): Promise<void> {
+  const queue = [stoppedTaskId];
+  while (queue.length > 0) {
+    const sourceId = queue.shift()!;
+    for (const [taskId, deps] of Object.entries(graph)) {
+      if (!deps.has(sourceId)) continue;
+      const agent = state.agents[taskId];
+      if (!agent || (agent.status !== "pending" && agent.status !== "blocked")) continue;
+      agent.status = "stopped";
+      agent.cascade_source_task_id = sourceId;
+      agent.summary = `Upstream task ${sourceId} stopped`;
+      agent.finished_at = nowIso();
+      queue.push(taskId);
+      await appendEvent(repoStore, runId, makeEvent("task_stopped", `Task ${taskId} stopped: upstream ${sourceId} stopped`, taskId));
+    }
+  }
+}
+
 async function resolveGithubUsername(ghToken: string): Promise<string> {
   const resp = await fetch("https://api.github.com/user", {
     headers: { Authorization: `Bearer ${ghToken}` },
@@ -1115,6 +1139,7 @@ async function runWorkerStream(
       ctx.runId,
       makeEvent("task_stopped", `Task ${taskId} stopped`, taskId),
     );
+    await cascadeStops(ctx.state, taskId, ctx.graph, ctx.repoStore, ctx.runId);
   } else if (payloadStatus === "completed" && agentFilePersisted) {
     agent.status = "finished";
     agent.finished_at = finalizedAt;
