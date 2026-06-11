@@ -1875,13 +1875,10 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const stateContent = await readStateJsonContent(repoStore, runId);
   await refuseResumeWithEmptyState(repoStore, runId, stateContent);
   let parsedState: OrchestrationState | null = null;
-  let stateParseDetail: string | null = null;
   if (stateContent.trim()) {
     try {
       parsedState = deserialize(stateContent);
-    } catch (parseErr) {
-      stateParseDetail = parseErr instanceof Error ? parseErr.message : String(parseErr);
-    }
+    } catch {}
   }
   if (parsedState?.status === "stopped") {
     console.info(`Run ${runId} is already stopped; skipping orchestration`);
