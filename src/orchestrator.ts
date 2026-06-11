@@ -1559,10 +1559,14 @@ async function maybeFinalizePullRequests(
 async function checkCompletion(ctx: LoopContext): Promise<boolean> {
   if (ctx.activeWorkers.size > 0) return false;
   const agents = Object.values(ctx.state.agents);
-  if (!agents.length || !agents.every((a) => isTerminalStatus(a.status))) return false;
-  if (!agents.every((a) => a.status === "finished")) {
-    const hasFailed = agents.some((a) => a.status === "failed");
-    if (hasFailed) return false;
+  if (!agents.length) return false;
+  let allFinished = true;
+  for (const agent of agents) {
+    if (!isTerminalStatus(agent.status)) return false;
+    if (agent.status !== "finished") allFinished = false;
+  }
+  if (!allFinished) {
+    if (agents.some((a) => a.status === "failed")) return false;
     ctx.state.status = "stopped";
     await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
     await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
