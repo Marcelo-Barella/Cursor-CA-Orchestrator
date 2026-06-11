@@ -1950,12 +1950,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   if (!stateContent.trim()) {
-    const eventsContent = await repoStore.readFile(runId, "events.jsonl");
-    if (eventsContent.trim()) {
-      throw new Error(
-        `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
-      );
-    }
     state = createInitialState(config, runId);
   } else if (parsedState) {
     state = parsedState;
