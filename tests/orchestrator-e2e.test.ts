@@ -549,6 +549,7 @@ function installV3GateResultWriter(
     passed: boolean;
     findings?: { severity: "blocking" | "info"; message: string; path?: string }[];
     summary?: string;
+    skipWrite?: boolean;
   },
 ): void {
   let gateSendCount = 0;
@@ -563,16 +564,18 @@ function installV3GateResultWriter(
           const wave = Math.floor(gateSendCount / 3);
           gateSendCount += 1;
           const decision = decide(gate, wave);
-          await store.writeFile(
-            runId,
-            `gate-results/${gate}.json`,
-            JSON.stringify({
-              gate,
-              passed: decision.passed,
-              findings: decision.findings ?? [],
-              summary: decision.summary ?? (decision.passed ? `${gate} ok` : `${gate} failed`),
-            }),
-          );
+          if (!decision.skipWrite) {
+            await store.writeFile(
+              runId,
+              `gate-results/${gate}.json`,
+              JSON.stringify({
+                gate,
+                passed: decision.passed,
+                findings: decision.findings ?? [],
+                summary: decision.summary ?? (decision.passed ? `${gate} ok` : `${gate} failed`),
+              }),
+            );
+          }
         }
       }
       return run;
@@ -877,5 +880,66 @@ describe("runOrchestration v3 claims path", () => {
     expect(files.get("summary.md")).toBeTruthy();
     expect(files.get("summary.md")).toMatch(/## Gate results/);
     expect(files.get("summary.md")).toMatch(/quality still failing/);
+  });
+
+  it("clears stale gate passes so a missing rewrite fails the wave", async () => {
+    const config = v3ClaimsHappyConfig({
+      max_iterations: 1,
+      prompt: "Keep iterating until gates pass.",
+    });
+    const runId = "run-v3-stale-gate";
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        v3WorkerScript(runId, "fix-iter-1-code_quality"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "gate-results/code_quality.json": JSON.stringify({
+        gate: "code_quality",
+        passed: true,
+        findings: [],
+        summary: "stale pass",
+      }),
+      "gate-results/code_review.json": JSON.stringify({
+        gate: "code_review",
+        passed: true,
+        findings: [],
+        summary: "stale pass",
+      }),
+      "gate-results/computer_use.json": JSON.stringify({
+        gate: "computer_use",
+        passed: true,
+        findings: [],
+        summary: "stale pass",
+      }),
+    });
+    installV3GateResultWriter(fake, store, runId, (gate) => {
+      if (gate === "code_quality") {
+        return { passed: true, skipWrite: true };
+      }
+      return { passed: true };
+    });
+
+    await expect(runOrchestration(runId, fake, store)).rejects.toThrow(/Missing gate result|Orchestration failed/);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.phase).toBe("failed");
+    expect(String(state.error)).toMatch(/code_quality/);
+    expect(String(state.error)).toMatch(/Missing gate result/);
+    expect(files.get("gate-results/code_quality.json") ?? "").not.toMatch(/stale pass/);
+    expect(tracker.pulls).toBe(0);
   });
 });
