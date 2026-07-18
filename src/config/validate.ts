@@ -7,6 +7,7 @@ import type {
   TaskConfig,
 } from "./types.js";
 import { resolveRepoTarget } from "../lib/repo-target.js";
+import { assertDisjointClaims, usesClaimsPath } from "../engine/claims.js";
 
 const BRANCH_LAYOUT_VALUES = new Set<BranchLayout>(["consolidated", "per_task"]);
 
@@ -225,6 +226,9 @@ export function canonicalRepoAliasForTask(task: TaskConfig, repositories: Record
 }
 
 function validateRunLineForConsolidated(config: OrchestratorConfig): void {
+  if (usesClaimsPath(config)) {
+    return;
+  }
   if (config.target.branch_layout !== "consolidated" || !config.target.consolidate_prs) {
     return;
   }
@@ -419,5 +423,6 @@ export function validateConfig(config: OrchestratorConfig): void {
     throw new Error(`Circular dependency detected: ${cycle}`);
   }
   validateBranchNames(config);
+  assertDisjointClaims(config.tasks);
   validateRunLineForConsolidated(config);
 }
