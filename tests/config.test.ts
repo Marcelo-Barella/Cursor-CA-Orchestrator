@@ -607,6 +607,86 @@ target:
     expect(() => validateConfig(config)).toThrow(/same parallel group/);
   });
 
+  it("validateConfig rejects overlapping allowed_paths claims", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: { id: "composer-2" },
+      prompt: "",
+      repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "p1",
+          model: null,
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+          allowed_paths: ["src/api"],
+        },
+        {
+          id: "t2",
+          repo: "svc",
+          prompt: "p2",
+          model: null,
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+          allowed_paths: ["src/api/handlers"],
+        },
+      ],
+      delegation_map: {
+        phases: [{ id: "phase-1", groups: [{ id: "g1", task_ids: ["t1", "t2"] }] }],
+      },
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
+    };
+    expect(() => validateConfig(config)).toThrow(/Overlapping allowed_paths claims/);
+  });
+
+  it("validateConfig allows same-repo same-group tasks when claims paths are disjoint", () => {
+    const config: OrchestratorConfig = {
+      name: "t",
+      model: { id: "composer-2" },
+      prompt: "",
+      repositories: { svc: { url: "https://github.com/o/r", ref: "main" } },
+      tasks: [
+        {
+          id: "t1",
+          repo: "svc",
+          prompt: "p1",
+          model: null,
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+          allowed_paths: ["src/api"],
+        },
+        {
+          id: "t2",
+          repo: "svc",
+          prompt: "p2",
+          model: null,
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+          allowed_paths: ["src/web"],
+        },
+      ],
+      delegation_map: {
+        phases: [{ id: "phase-1", groups: [{ id: "g1", task_ids: ["t1", "t2"] }] }],
+      },
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
+      bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
+    };
+    expect(() => validateConfig(config)).not.toThrow();
+  });
+
   it("resolveConfigPrecedence includes delegation_map from project YAML for validateConfig", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-orch-resolve-dm-"));
     const yamlPath = path.join(dir, "orch.yaml");
