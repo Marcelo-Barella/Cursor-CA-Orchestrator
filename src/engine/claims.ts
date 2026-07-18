@@ -8,6 +8,7 @@ export function claimsOverlap(a: string, b: string): boolean {
   const left = normalizeClaimPath(a);
   const right = normalizeClaimPath(b);
   if (!left || !right) return false;
+  if (left === "." || right === ".") return true;
   if (left === right) return true;
   return left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }

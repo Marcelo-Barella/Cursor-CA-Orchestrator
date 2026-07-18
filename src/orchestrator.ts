@@ -1869,11 +1869,7 @@ async function launchGateAgent(
 
 async function clearGateResultsOnBoard(ctx: LoopContext): Promise<void> {
   for (const gate of GATE_IDS) {
-    try {
-      await ctx.repoStore.deleteFile(ctx.runId, gateResultBoardPath(gate));
-    } catch {
-      /* absent is fine */
-    }
+    await ctx.repoStore.deleteFile(ctx.runId, gateResultBoardPath(gate));
   }
 }
 

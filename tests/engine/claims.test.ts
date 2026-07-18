@@ -26,6 +26,24 @@ describe("claims", () => {
     expect(claimsOverlap("src/api", "src/web")).toBe(false);
   });
 
+  it("treats '.' as whole-repo overlap", () => {
+    expect(claimsOverlap(".", "src/foo.ts")).toBe(true);
+    expect(claimsOverlap("src/foo.ts", ".")).toBe(true);
+    expect(claimsOverlap(".", ".")).toBe(true);
+    expect(claimsOverlap("./", "src/web")).toBe(true);
+    expect(claimsOverlap("", "src/foo.ts")).toBe(false);
+  });
+
+  it("finds overlaps when one task claims '.'", () => {
+    const overlaps = findClaimOverlaps([
+      task("pathful", ["src/foo.ts"]),
+      task("pathless", ["."]),
+    ]);
+    expect(overlaps).toEqual([
+      { left: "pathful", right: "pathless", pathA: "src/foo.ts", pathB: "." },
+    ]);
+  });
+
   it("finds overlapping tasks", () => {
     const overlaps = findClaimOverlaps([
       task("a", ["src/api"]),
