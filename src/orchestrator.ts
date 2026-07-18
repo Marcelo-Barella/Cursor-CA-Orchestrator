@@ -29,10 +29,10 @@ import {
   appendEvent,
   assignTaskPhase,
   createInitialState,
+  deserialize,
   ensureLifecycleAgents,
   seedMainAgent,
   setPhaseStatus,
-  syncFromRepo,
   syncToRepo,
 } from "./state.js";
 import {
@@ -1873,6 +1873,43 @@ async function clearGateResultsOnBoard(ctx: LoopContext): Promise<void> {
   }
 }
 
+async function inferResumePhase(
+  repoStore: RepoStoreClient,
+  runId: string,
+  state: OrchestrationState,
+): Promise<OrchestrationState["phase"]> {
+  try {
+    const fixPlan = await repoStore.readFile(runId, "fix-plan.json");
+    if (fixPlan) return "fix";
+  } catch {
+    /* ignore */
+  }
+
+  const gateResults: GateResult[] = [];
+  let anyGateFile = false;
+  for (const gate of GATE_IDS) {
+    const path = gateResultBoardPath(gate);
+    try {
+      const raw = await repoStore.readFile(runId, path);
+      if (!raw) continue;
+      anyGateFile = true;
+      gateResults.push(parseGateResult(JSON.parse(raw) as unknown));
+    } catch {
+      /* ignore */
+    }
+  }
+  if (anyGateFile) {
+    if (gateResults.some((r) => !r.passed)) return "fix";
+    if (allGatesPassed(gateResults)) return "finalize";
+    return "gate";
+  }
+
+  const agents = Object.values(state.agents);
+  if (agents.length === 0) return "plan";
+  if (agents.some((a) => !isTerminalStatus(a.status))) return "implement";
+  return "integrate";
+}
+
 async function readGateResultsFromBoard(ctx: LoopContext): Promise<GateResult[]> {
   const results: GateResult[] = [];
   for (const gate of GATE_IDS) {
@@ -1979,6 +2016,13 @@ async function runGatePhase(ctx: LoopContext): Promise<void> {
 }
 
 async function runFixPhase(ctx: LoopContext): Promise<void> {
+  if (ctx.lastGateResults.length === 0) {
+    ctx.lastGateResults = await readGateResultsFromBoard(ctx);
+    if (ctx.lastGateResults.some((r) => !r.passed)) {
+      ctx.pendingFixFromGates = true;
+    }
+  }
+
   const primaryAlias = selectPrimaryRepoAlias(ctx.config);
   const built = buildFixTasks({
     results: ctx.lastGateResults,
@@ -2314,15 +2358,24 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   let state: OrchestrationState;
+  let isFreshRun = false;
   try {
-    state = await syncFromRepo(repoStore, runId);
+    const stateJson = await repoStore.readFile(runId, "state.json");
+    const raw = JSON.parse(stateJson) as Record<string, unknown>;
+    const hadPersistedPhase = typeof raw.phase === "string";
+    state = deserialize(stateJson);
+    if (!hadPersistedPhase && state.status !== "pending") {
+      state.phase = await inferResumePhase(repoStore, runId, state);
+    }
   } catch {
     state = createInitialState(config, runId);
+    isFreshRun = true;
   }
 
   reconcileAgentsFromConfig(state, config);
 
   if (state.status === "pending") {
+    isFreshRun = true;
     state.status = "running";
     state.started_at = nowIso();
     seedMainAgent(state, { agent_id: state.orchestrator_agent_id, status: "running", started_at: state.started_at });
@@ -2338,7 +2391,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     await syncToRepo(repoStore, runId, state);
   }
 
-  if (usesClaimsPath(config) && state.phase === "plan") {
+  if (usesClaimsPath(config) && state.phase === "plan" && isFreshRun) {
     state.phase = nextPhase(state.phase, "plan_ready");
     await syncToRepo(repoStore, runId, state);
   }
