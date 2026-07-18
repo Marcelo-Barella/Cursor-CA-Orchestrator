@@ -484,3 +484,190 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("stopped");
   });
 });
+
+function v3ClaimsHappyConfig(): OrchestratorConfig {
+  const mk = (id: string, path: string) => ({
+    id,
+    repo: "svc",
+    prompt: `task ${id}`,
+    model: null,
+    depends_on: [] as string[],
+    timeout_minutes: 30,
+    create_repo: false,
+    repo_config: null,
+    allowed_paths: [path],
+  });
+  return {
+    name: "v3-demo",
+    model: { id: "composer-2" },
+    prompt: "",
+    repositories: {
+      svc: { url: "https://github.com/acme/svc", ref: "main" },
+    },
+    tasks: [mk("t-a", "src/a"), mk("t-b", "src/b")],
+    target: {
+      auto_create_pr: true,
+      consolidate_prs: true,
+      branch_prefix: "cursor-orch",
+      branch_layout: "per_task",
+    },
+    bootstrap_repo_name: "cursor-orch-bootstrap",
+    max_iterations: 10,
+  };
+}
+
+function installV3GithubMock(tracker: { pulls: number; merges: string[]; createdRefs: Set<string> }): void {
+  unmockedFetch = globalThis.fetch;
+  tracker.createdRefs.add("main");
+  globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (!url.startsWith("https://api.github.com/")) {
+      return unmockedFetch(input, init);
+    }
+    if (url.endsWith("/user") || url.includes("/user?")) {
+      return new Response(JSON.stringify({ login: "acme" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("/git/ref/heads/")) {
+      const tail = url.split("/git/ref/heads/")[1] ?? "";
+      const decoded = decodeURIComponent(tail);
+      if (tracker.createdRefs.has(decoded)) {
+        return new Response(JSON.stringify({ object: { sha: "0123456789abcdef0123456789abcdef01234567" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ message: "Not Found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("/git/refs") && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { ref?: string };
+      const ref = (body.ref ?? "").replace(/^refs\/heads\//, "");
+      if (ref) tracker.createdRefs.add(ref);
+      return new Response(JSON.stringify({ ref: body.ref }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("/merges") && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { head?: string; base?: string };
+      tracker.merges.push(`${body.head ?? ""}->${body.base ?? ""}`);
+      return new Response(JSON.stringify({ sha: "mergedsha" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("/pulls") && method === "POST") {
+      tracker.pulls += 1;
+      return new Response(JSON.stringify({ html_url: "https://github.com/acme/svc/pull/1" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return unmockedFetch(input, init);
+  }) as typeof fetch;
+}
+
+describe("runOrchestration v3 claims path", () => {
+  const originalEnv = { ...process.env };
+  beforeEach(() => {
+    process.env.CURSOR_API_KEY = "sk-fake";
+    process.env.GH_TOKEN = "ghp-fake";
+    process.env.BOOTSTRAP_OWNER = "acme";
+    process.env.BOOTSTRAP_REPO = "cursor-orch-bootstrap";
+    process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES = "0";
+    delete process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRY_MS;
+    delete process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES;
+  });
+  afterEach(() => {
+    globalThis.fetch = unmockedFetch;
+    process.env = { ...originalEnv };
+  });
+
+  it("v3 happy path: implement, fan-in, gates, finalize one PR", async () => {
+    const config = v3ClaimsHappyConfig();
+    const runId = "run-v3-happy";
+    const runBranch = `cursor-orch/${runId}/main/run`;
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const workerScript = (taskId: string) => ({
+      events: [statusMessage("CREATING"), statusMessage("RUNNING"), assistantText("ok"), statusMessage("FINISHED")],
+      result: {
+        id: `r-${taskId}`,
+        status: "finished" as const,
+        git: runGit(`cursor-orch/${runId}/${taskId}`),
+      },
+      artifacts: {
+        "cursor-orch-output.json": JSON.stringify({
+          task_id: taskId,
+          status: "completed",
+          summary: "ok",
+          outputs: {},
+        }),
+      },
+    });
+    const gateScript = {
+      events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+      result: { id: "r-gate", status: "finished" as const },
+    };
+    const fake = new FakeAgentClient({
+      defaultScripts: [workerScript("t-a"), workerScript("t-b"), gateScript, gateScript, gateScript],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+
+    const originalCreate = fake.createCloudAgent.bind(fake);
+    fake.createCloudAgent = async (opts) => {
+      const agent = await originalCreate(opts);
+      const originalSend = agent.send.bind(agent);
+      agent.send = async (prompt: string) => {
+        const run = await originalSend(prompt);
+        for (const gate of ["code_quality", "code_review", "computer_use"] as const) {
+          if (prompt.includes(`Gate: ${gate}`)) {
+            await store.writeFile(
+              runId,
+              `gate-results/${gate}.json`,
+              JSON.stringify({
+                gate,
+                passed: true,
+                findings: [],
+                summary: `${gate} ok`,
+              }),
+            );
+          }
+        }
+        return run;
+      };
+      return agent;
+    };
+
+    await runOrchestration(runId, fake, store);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.phase).toBe("completed");
+    expect(tracker.pulls).toBe(1);
+    expect(state.consolidated_pr_urls).toBeTruthy();
+
+    const workerLaunches = fake.launches.filter((l) => {
+      const ref = l.opts.startingRef ?? "";
+      return ref.includes("/t-a") || ref.includes("/t-b");
+    });
+    expect(workerLaunches.length).toBe(2);
+    for (const launch of workerLaunches) {
+      expect(launch.opts.startingRef).not.toBe(runBranch);
+      expect(launch.opts.startingRef).not.toMatch(/\/run$/);
+    }
+
+    const gateLaunches = fake.launches.filter((l) => l.opts.startingRef === runBranch);
+    expect(gateLaunches.length).toBe(3);
+    expect(files.get("gate-results/code_quality.json")).toBeTruthy();
+    expect(files.get("gate-results/code_review.json")).toBeTruthy();
+    expect(files.get("gate-results/computer_use.json")).toBeTruthy();
+  });
+});
