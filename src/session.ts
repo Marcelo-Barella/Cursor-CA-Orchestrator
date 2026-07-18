@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
 import type { McpServerConfig, ModelSelectionConfig, OrchestratorConfig } from "./config/types.js";
+import { DEFAULT_MAX_ITERATIONS } from "./config/constants.js";
 import { parseConfig, parseMcpServers, toYaml } from "./config/parse.js";
 import { validateConfig, validateMcpServers } from "./config/validate.js";
 
@@ -75,6 +76,7 @@ export function createDefaultOrchestratorConfig(): OrchestratorConfig {
     bootstrap_repo_name: "cursor-orch-bootstrap",
     mcp_servers: {},
     inventory: null,
+    max_iterations: DEFAULT_MAX_ITERATIONS,
   };
 }
 const LEGACY_SESSION_ROOT = path.join(os.homedir(), ".cursor-orch");

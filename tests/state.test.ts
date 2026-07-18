@@ -19,10 +19,12 @@ describe("state", () => {
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "x", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const state = createInitialState(config, "run1");
     const s = serialize(state);
@@ -48,10 +50,12 @@ describe("state", () => {
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "x", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const state = createInitialState(config, "run1");
     state.delegation_phase_index = 2;

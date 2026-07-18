@@ -11,6 +11,7 @@ const base: OrchestratorConfig = {
   tasks: [],
   target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
   bootstrap_repo_name: "b",
+  max_iterations: 10,
 };
 
 const inventory: InventoryManifestV1 = {

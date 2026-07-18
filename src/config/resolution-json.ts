@@ -74,6 +74,7 @@ export function resolutionToJson(resolution: ConfigResolution, redact: string): 
       model: resolution.config.model,
       prompt: renderSecretValue("prompt", resolution.config.prompt, redact),
       bootstrap_repo_name: resolution.config.bootstrap_repo_name,
+      max_iterations: resolution.config.max_iterations,
       target: {
         auto_create_pr: resolution.config.target.auto_create_pr,
         consolidate_prs: resolution.config.target.consolidate_prs,

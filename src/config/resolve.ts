@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
 import { normalizeModelFromYaml } from "../lib/model-selection.js";
-import { DEFAULT_MODEL_ID } from "./constants.js";
+import { DEFAULT_MODEL_ID, DEFAULT_MAX_ITERATIONS } from "./constants.js";
 import { parseConfig } from "./parse.js";
 import type {
   BranchLayout,
@@ -1032,6 +1032,7 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
       branch_layout: String(branchLayout.value) as BranchLayout,
     },
     bootstrap_repo_name: String(bootstrapRepo.value),
+    max_iterations: projectConfig?.max_iterations ?? sessionConfig?.max_iterations ?? DEFAULT_MAX_ITERATIONS,
   };
 
   try {

@@ -395,6 +395,9 @@ export function parseTaskPlan(planJson: string, config: OrchestratorConfig): Tas
       timeout_minutes: timeout,
       create_repo: Boolean(o.create_repo),
       repo_config: (o.repo_config as Record<string, unknown>) ?? null,
+      allowed_paths: Array.isArray(o.allowed_paths)
+        ? (o.allowed_paths as unknown[]).map((p) => String(p))
+        : [],
     });
   }
   for (const task of tasks) {
