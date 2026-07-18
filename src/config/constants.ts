@@ -1,3 +1,6 @@
+export const DEFAULT_MODEL_ID = "cursor-grok-4.5-high";
+export const DEFAULT_MAX_ITERATIONS = 10;
+
 export const PRECEDENCE_ORDER: readonly string[] = ["flag", "env", "project", "session", "default"];
 
 export const FIELD_SOURCE_OF_TRUTH: Record<string, string> = {
