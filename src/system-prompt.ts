@@ -26,9 +26,9 @@ export const PLANNER_SYSTEM_PROMPT =
   "without needing context from other tasks. When you emit delegation_map, use phases and parallel_groups " +
   "as sequential waves (phase order, then group order within each phase), assign every task ID exactly once, " +
   "and align depends_on with that ordering. Default independent tasks on different repositories into the same parallel_group " +
-  "when depends_on allows so they share one wave; add extra groups or depends_on only for same-repo consolidated-PR serialization, " +
-  "real step ordering, or shared artifacts from another task. Under consolidated PR mode, tasks that share a canonical repository " +
-  "must sit in different parallel groups, not the same group. When several tasks in one group are ready together, " +
+  "when depends_on allows so they share one wave. Same-repo tasks may share a parallel_group when allowed_paths claims are disjoint; " +
+  "the orchestrator fans task branches into one run branch. Overlapping allowed_paths fail plan validation. " +
+  "Add extra groups or depends_on only for real step ordering or shared artifacts from another task. When several tasks in one group are ready together, " +
   "do not assume a fixed launch order; encode order with depends_on if needed.\n\n" +
   "MANDATORY COGNITIVE LOOP — follow these stages in order before producing any output:\n\n" +
   "1. DECOMPOSE: Break the user request into atomic, granular tasks. Each distinct route, endpoint, " +
