@@ -45,4 +45,30 @@ describe("buildFixTasks", () => {
     expect(built.ok).toBe(false);
     if (!built.ok) expect(built.claimCollision).toBe(true);
   });
+
+  it("flags collision when pathful fix overlaps pathless '.' claim", () => {
+    const built = buildFixTasks({
+      iteration: 3,
+      repoAlias: "svc",
+      results: [
+        {
+          gate: "code_quality",
+          passed: false,
+          summary: "",
+          findings: [{ severity: "blocking", message: "a", path: "src/foo.ts" }],
+        },
+        {
+          gate: "code_review",
+          passed: false,
+          summary: "",
+          findings: [{ severity: "blocking", message: "b" }],
+        },
+      ],
+    });
+    expect(built.ok).toBe(false);
+    if (!built.ok) {
+      expect(built.claimCollision).toBe(true);
+      expect(built.tasks.map((t) => t.allowed_paths)).toEqual([["src/foo.ts"], ["."]]);
+    }
+  });
 });
