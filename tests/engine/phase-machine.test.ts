@@ -14,6 +14,7 @@ describe("nextPhase", () => {
     expect(nextPhase("gate", "fix_scheduled")).toBe("fix");
     expect(nextPhase("gate", "replan_scheduled")).toBe("replan");
     expect(nextPhase("fix", "fix_scheduled")).toBe("implement");
+    expect(nextPhase("fix", "replan_scheduled")).toBe("replan");
     expect(nextPhase("replan", "replan_scheduled")).toBe("plan");
     expect(nextPhase("integrate", "integrate_conflict")).toBe("fix");
   });

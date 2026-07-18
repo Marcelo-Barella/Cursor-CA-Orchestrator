@@ -37,6 +37,7 @@ export function nextPhase(phase: OrchestrationPhase, event: PhaseEvent): Orchest
       break;
     case "fix":
       if (event === "fix_scheduled") return "implement";
+      if (event === "replan_scheduled") return "replan";
       break;
     case "replan":
       if (event === "replan_scheduled") return "plan";
