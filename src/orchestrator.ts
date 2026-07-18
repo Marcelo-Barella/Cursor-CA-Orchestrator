@@ -5,6 +5,7 @@ import type { ModelSelectionConfig, OrchestratorConfig, TaskConfig } from "./con
 import { canonicalizeOrchestratorConfig } from "./config/canonicalize.js";
 import { parseConfig, toYaml } from "./config/parse.js";
 import { validateConfig } from "./config/validate.js";
+import { usesClaimsPath } from "./engine/claims.js";
 import { buildPlannerPrompt, parseTaskPlan, waitForPlan } from "./planner.js";
 import { WORKER_OUTPUT_ARTIFACT_PATH, buildRepoCreationPrompt, buildWorkerPrompt } from "./prompt-builder.js";
 import { extractConstraintsFromPrompt, validateTaskPromptsAgainstConstraints } from "./lib/constraint-validator.js";
@@ -650,7 +651,9 @@ async function launchWorkerAgent(
   const agent = ctx.state.agents[taskId]!;
   const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
   const planRef = planRefForConsolidatedRunLine(task, ref);
+  const claimsPath = usesClaimsPath(ctx.config);
   const runLine =
+    !claimsPath &&
     Boolean(planRef) &&
     !task.create_repo &&
     ctx.config.target.branch_layout === "consolidated" &&
@@ -659,6 +662,7 @@ async function launchWorkerAgent(
   let workerBranch = computeBranchName(ctx.config.target.branch_prefix, ctx.runId, taskId, agent.retry_count);
   let runBranchForPrompt: string | undefined;
   let promptLaunchRef: string | undefined;
+  let claimsMode = false;
   if (runLine && planRef) {
     const ownerRepo = parseGithubOwnerRepo(repoUrl);
     const rb = runBranchName(ctx.config.target.branch_prefix, ctx.runId, planRef);
@@ -714,7 +718,13 @@ async function launchWorkerAgent(
       }
       startingRefForSdk = workerBranch;
     }
-    runBranchForPrompt = workerBranch;
+    if (claimsPath) {
+      claimsMode = true;
+      const baseRef = planRef || ref;
+      runBranchForPrompt = runBranchName(ctx.config.target.branch_prefix, ctx.runId, baseRef);
+    } else {
+      runBranchForPrompt = workerBranch;
+    }
     promptLaunchRef = undefined;
   }
   const exampleRunBranch = runBranchName(ctx.config.target.branch_prefix, ctx.runId, "main");
@@ -731,6 +741,7 @@ async function launchWorkerAgent(
         runBranch: runBranchForPrompt,
         launchRef: promptLaunchRef,
         perTaskBranch: computeBranchName(ctx.config.target.branch_prefix, ctx.runId, taskId, agent.retry_count),
+        claimsMode,
       });
   const model: ModelSelectionConfig = task.model != null ? { id: task.model } : ctx.config.model;
   let sdkAgent: SdkAgent;
