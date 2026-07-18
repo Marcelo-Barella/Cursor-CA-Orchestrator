@@ -15,4 +15,24 @@ describe("mirrorTasksFromOrchestrationState", () => {
   it("returns empty array for missing tasks", () => {
     expect(mirrorTasksFromOrchestrationState({})).toEqual([]);
   });
+
+  it("uses default task name and empty status when fields are absent", () => {
+    const result = mirrorTasksFromOrchestrationState({
+      tasks: [{}, { status: 42 }],
+    });
+    expect(result).toEqual([
+      { key: "task#0", status: "" },
+      { key: "task#1", status: "42" },
+    ]);
+  });
+
+  it("sorts by key lexicographically regardless of input order", () => {
+    const result = mirrorTasksFromOrchestrationState({
+      tasks: [
+        { name: "z", status: "b" },
+        { name: "a", status: "a" },
+      ],
+    });
+    expect(result.map((t) => t.key)).toEqual(["a#1", "z#0"]);
+  });
 });

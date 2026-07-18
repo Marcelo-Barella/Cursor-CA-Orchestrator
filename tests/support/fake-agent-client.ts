@@ -1,4 +1,4 @@
-import type { ModelSelection } from "@cursor/sdk";
+import type { ModelSelection, SDKUserMessage, SendOptions } from "@cursor/sdk";
 import type { ModelSelectionConfig } from "../../src/config/types.js";
 import type {
   AgentClient,
@@ -22,23 +22,27 @@ function modelConfigToSelection(c: ModelSelectionConfig): ModelSelection {
 
 export interface FakeRunScript {
   events?: SDKMessage[];
-  result: SdkRunResult;
+  /** Required unless sendThrows is set (run never starts). */
+  result?: SdkRunResult;
   artifacts?: Record<string, string>;
   throwOnWait?: unknown;
   throwOnStream?: unknown;
   /** When set, send() throws before starting the run (launch-time failure). */
   sendThrows?: unknown;
+  /** Delay before wait() resolves so background stop polling can observe stop-requested.json. */
+  waitDelayMs?: number;
 }
 
 export interface FakeLaunch {
   opts: CreateCloudAgentOpts;
   agent: FakeSdkAgent;
   run: FakeSdkRun;
+  prompt?: string;
 }
 
 let counter = 0;
 
-class FakeSdkRun implements SdkRun {
+export class FakeSdkRun implements SdkRun {
   readonly id: string;
   readonly agentId: string;
   readonly createdAt?: number;
@@ -77,8 +81,12 @@ class FakeSdkRun implements SdkRun {
     if (this.script.throwOnWait) {
       throw this.script.throwOnWait;
     }
-    this.status = this.script.result.status;
-    return this.script.result;
+    if (this.script.waitDelayMs && this.script.waitDelayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, this.script.waitDelayMs));
+    }
+    const result = this.requireResult();
+    this.status = result.status;
+    return result;
   }
 
   async cancel(): Promise<void> {
@@ -90,19 +98,26 @@ class FakeSdkRun implements SdkRun {
   }
 
   get result(): string | undefined {
-    return this.script.result.result;
+    return this.script.result?.result;
   }
 
   get model(): ModelSelection | undefined {
-    return this.script.result.model;
+    return this.script.result?.model;
   }
 
   get durationMs(): number | undefined {
-    return this.script.result.durationMs;
+    return this.script.result?.durationMs;
   }
 
   get git(): SdkRunGit | undefined {
-    return this.script.result.git;
+    return this.script.result?.git;
+  }
+
+  private requireResult(): SdkRunResult {
+    if (!this.script.result) {
+      throw new Error(`FakeSdkRun(${this.id}) missing result`);
+    }
+    return this.script.result;
   }
 }
 
@@ -120,7 +135,7 @@ class FakeSdkAgent implements SdkAgent {
     this.artifacts = { ...(scripts[0]?.artifacts ?? {}) };
   }
 
-  async send(): Promise<SdkRun> {
+  async send(_message: string | SDKUserMessage, _options?: SendOptions): Promise<SdkRun> {
     const script = this.scripts.shift();
     if (!script) {
       throw new Error(`FakeSdkAgent(${this.agentId}) received more send() calls than scripted`);
@@ -171,6 +186,7 @@ export interface FakeAgentClientOptions {
 export class FakeAgentClient implements AgentClient {
   readonly launches: FakeLaunch[] = [];
   readonly conversationCalls: string[] = [];
+  readonly sentPrompts: string[] = [];
   maxConcurrentSends = 0;
   private _activeSends = 0;
   private readonly sendPreDelayMs: number;
@@ -212,14 +228,18 @@ export class FakeAgentClient implements AgentClient {
     const agent = new FakeSdkAgent(agentId, modelConfigToSelection(opts.model), [...scripts]);
     this.launches.push({ opts, agent, run: null as unknown as FakeSdkRun });
     const originalSend = agent.send.bind(agent);
-    agent.send = async () => {
+    agent.send = async (message: string | SDKUserMessage, options?: SendOptions) => {
+      if (typeof message === "string") {
+        this.sentPrompts.push(message);
+        this.launches[this.launches.length - 1]!.prompt = message;
+      }
       this._activeSends += 1;
       this.maxConcurrentSends = Math.max(this.maxConcurrentSends, this._activeSends);
       try {
         if (this.sendPreDelayMs > 0) {
           await new Promise<void>((r) => setTimeout(r, this.sendPreDelayMs));
         }
-        const run = await originalSend();
+        const run = await originalSend(message, options);
         this.launches[this.launches.length - 1]!.run = run as FakeSdkRun;
         return run;
       } finally {
@@ -236,7 +256,7 @@ export class FakeAgentClient implements AgentClient {
 
   async promptOneShot(_message: string, _opts: SdkAgentOptions): Promise<SdkRunResult> {
     const script = this.defaultScripts.shift();
-    if (!script) {
+    if (!script?.result) {
       return { id: "fake-prompt", status: "finished", result: "" };
     }
     return script.result;
