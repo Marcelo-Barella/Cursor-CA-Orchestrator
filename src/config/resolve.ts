@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
 import { normalizeModelFromYaml } from "../lib/model-selection.js";
+import { DEFAULT_MODEL_ID } from "./constants.js";
 import { parseConfig } from "./parse.js";
 import type {
   BranchLayout,
@@ -891,7 +892,7 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
 
   const model = resolveModelValue({
     fieldName: "model",
-    defaultValue: "composer-2",
+    defaultValue: DEFAULT_MODEL_ID,
     flagValue: null,
     flagRef: "",
     envName: "CURSOR_ORCH_MODEL",

@@ -27,6 +27,7 @@ import {
 import { bootstrapEnvIssues, createBootstrapRepoStoreLoose } from "./lib/commands/bootstrap-repo-store.js";
 import { printRunsList } from "./lib/commands/runs-list-impl.js";
 import { StatusCommandExit, runStatusCommand } from "./lib/commands/status-impl.js";
+import { DEFAULT_MODEL_ID } from "./config/constants.js";
 import type { ModelSelectionConfig, OrchestratorConfig } from "./config/types.js";
 import { Session } from "./session.js";
 import { readReplLineTTY } from "./lib/repl/tty-line-editor.js";
@@ -276,10 +277,10 @@ export async function runBareModel(
 ): Promise<ModelSelectionConfig | null> {
   if (!ctx) {
     console.log(tui.dim("Model list unavailable; enter value manually."));
-    const raw = await readPromptLine(holder, useTtyEditor, "AI model [default: composer-2]: ");
+    const raw = await readPromptLine(holder, useTtyEditor, `AI model [default: ${DEFAULT_MODEL_ID}]: `);
     if (raw === null) return null;
     const t = raw.trim();
-    if (t === "" || isControl(t, "skip")) return { id: "composer-2" };
+    if (t === "" || isControl(t, "skip")) return { id: DEFAULT_MODEL_ID };
     return { id: t };
   }
   const apiKey = ctx.apiKey;
@@ -288,10 +289,10 @@ export async function runBareModel(
       ctx.cache.get(MODELS_CATALOG_CACHE_KEY, MODELS_TTL_MS, () => fetchModelsCatalog(apiKey)),
     pick: (items, opts) => pickFromList(items, opts),
     fallbackPrompt: async () => {
-      const raw = await readPromptLine(holder, useTtyEditor, "AI model [default: composer-2]: ");
+      const raw = await readPromptLine(holder, useTtyEditor, `AI model [default: ${DEFAULT_MODEL_ID}]: `);
       if (raw === null) return null;
       const t = raw.trim();
-      if (t === "" || isControl(t, "skip")) return "composer-2";
+      if (t === "" || isControl(t, "skip")) return DEFAULT_MODEL_ID;
       return t;
     },
     writeLine: (s) => console.log(s),
