@@ -485,7 +485,7 @@ describe("runOrchestration with SDK (happy path)", () => {
   });
 });
 
-function v3ClaimsHappyConfig(): OrchestratorConfig {
+function v3ClaimsHappyConfig(overrides: Partial<OrchestratorConfig> = {}): OrchestratorConfig {
   const mk = (id: string, path: string) => ({
     id,
     repo: "svc",
@@ -513,6 +513,71 @@ function v3ClaimsHappyConfig(): OrchestratorConfig {
     },
     bootstrap_repo_name: "cursor-orch-bootstrap",
     max_iterations: 10,
+    ...overrides,
+  };
+}
+
+function v3WorkerScript(runId: string, taskId: string) {
+  return {
+    events: [statusMessage("CREATING"), statusMessage("RUNNING"), assistantText("ok"), statusMessage("FINISHED")],
+    result: {
+      id: `r-${taskId}`,
+      status: "finished" as const,
+      git: runGit(`cursor-orch/${runId}/${taskId}`),
+    },
+    artifacts: {
+      "cursor-orch-output.json": JSON.stringify({
+        task_id: taskId,
+        status: "completed",
+        summary: "ok",
+        outputs: {},
+      }),
+    },
+  };
+}
+
+const v3GateScript = {
+  events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+  result: { id: "r-gate", status: "finished" as const },
+};
+
+function installV3GateResultWriter(
+  fake: FakeAgentClient,
+  store: RepoStoreClient,
+  runId: string,
+  decide: (gate: "code_quality" | "code_review" | "computer_use", wave: number) => {
+    passed: boolean;
+    findings?: { severity: "blocking" | "info"; message: string; path?: string }[];
+    summary?: string;
+  },
+): void {
+  let gateSendCount = 0;
+  const originalCreate = fake.createCloudAgent.bind(fake);
+  fake.createCloudAgent = async (opts) => {
+    const agent = await originalCreate(opts);
+    const originalSend = agent.send.bind(agent);
+    agent.send = async (prompt: string) => {
+      const run = await originalSend(prompt);
+      for (const gate of ["code_quality", "code_review", "computer_use"] as const) {
+        if (prompt.includes(`Gate: ${gate}`)) {
+          const wave = Math.floor(gateSendCount / 3);
+          gateSendCount += 1;
+          const decision = decide(gate, wave);
+          await store.writeFile(
+            runId,
+            `gate-results/${gate}.json`,
+            JSON.stringify({
+              gate,
+              passed: decision.passed,
+              findings: decision.findings ?? [],
+              summary: decision.summary ?? (decision.passed ? `${gate} ok` : `${gate} failed`),
+            }),
+          );
+        }
+      }
+      return run;
+    };
+    return agent;
   };
 }
 
@@ -596,55 +661,17 @@ describe("runOrchestration v3 claims path", () => {
     const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
     installV3GithubMock(tracker);
 
-    const workerScript = (taskId: string) => ({
-      events: [statusMessage("CREATING"), statusMessage("RUNNING"), assistantText("ok"), statusMessage("FINISHED")],
-      result: {
-        id: `r-${taskId}`,
-        status: "finished" as const,
-        git: runGit(`cursor-orch/${runId}/${taskId}`),
-      },
-      artifacts: {
-        "cursor-orch-output.json": JSON.stringify({
-          task_id: taskId,
-          status: "completed",
-          summary: "ok",
-          outputs: {},
-        }),
-      },
-    });
-    const gateScript = {
-      events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
-      result: { id: "r-gate", status: "finished" as const },
-    };
     const fake = new FakeAgentClient({
-      defaultScripts: [workerScript("t-a"), workerScript("t-b"), gateScript, gateScript, gateScript],
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
     });
     const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
-
-    const originalCreate = fake.createCloudAgent.bind(fake);
-    fake.createCloudAgent = async (opts) => {
-      const agent = await originalCreate(opts);
-      const originalSend = agent.send.bind(agent);
-      agent.send = async (prompt: string) => {
-        const run = await originalSend(prompt);
-        for (const gate of ["code_quality", "code_review", "computer_use"] as const) {
-          if (prompt.includes(`Gate: ${gate}`)) {
-            await store.writeFile(
-              runId,
-              `gate-results/${gate}.json`,
-              JSON.stringify({
-                gate,
-                passed: true,
-                findings: [],
-                summary: `${gate} ok`,
-              }),
-            );
-          }
-        }
-        return run;
-      };
-      return agent;
-    };
+    installV3GateResultWriter(fake, store, runId, () => ({ passed: true }));
 
     await runOrchestration(runId, fake, store);
 
@@ -669,5 +696,184 @@ describe("runOrchestration v3 claims path", () => {
     expect(files.get("gate-results/code_quality.json")).toBeTruthy();
     expect(files.get("gate-results/code_review.json")).toBeTruthy();
     expect(files.get("gate-results/computer_use.json")).toBeTruthy();
+  });
+
+  it("gate fail then fix: code_quality fails once, fix worker recovers, finalize", async () => {
+    const config = v3ClaimsHappyConfig();
+    const runId = "run-v3-gate-fix";
+    const runBranch = `cursor-orch/${runId}/main/run`;
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        v3WorkerScript(runId, "fix-iter-1-code_quality"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    installV3GateResultWriter(fake, store, runId, (gate, wave) => {
+      if (wave === 0 && gate === "code_quality") {
+        return {
+          passed: false,
+          summary: "complexity too high",
+          findings: [{ severity: "blocking", message: "too complex", path: "src/a.ts" }],
+        };
+      }
+      return { passed: true };
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.phase).toBe("completed");
+    expect(state.iteration).toBe(1);
+    expect(tracker.pulls).toBe(1);
+
+    const fixLaunches = fake.launches.filter((l) => (l.opts.startingRef ?? "").includes("fix-iter-1-code_quality"));
+    expect(fixLaunches.length).toBe(1);
+
+    const gateLaunches = fake.launches.filter((l) => l.opts.startingRef === runBranch);
+    expect(gateLaunches.length).toBe(6);
+
+    const fixPlan = JSON.parse(files.get("fix-plan.json")!) as { tasks: { id: string }[] };
+    expect(fixPlan.tasks.some((t) => t.id === "fix-iter-1-code_quality")).toBe(true);
+  });
+
+  it("replan escalation: same gate fails twice after fix", async () => {
+    const config = v3ClaimsHappyConfig({ prompt: "Rebuild the feature with clean review." });
+    const runId = "run-v3-replan";
+    const runBranch = `cursor-orch/${runId}/main/run`;
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        v3WorkerScript(runId, "fix-iter-1-code_review"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-planner", status: "finished" as const },
+        },
+        v3WorkerScript(runId, "t-replan"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    installV3GateResultWriter(fake, store, runId, (gate, wave) => {
+      if (wave < 2 && gate === "code_review") {
+        return {
+          passed: false,
+          summary: "review findings remain",
+          findings: [{ severity: "blocking", message: "needs redesign", path: "src/review.ts" }],
+        };
+      }
+      return { passed: true };
+    });
+
+    const originalCreate = fake.createCloudAgent.bind(fake);
+    fake.createCloudAgent = async (opts) => {
+      const agent = await originalCreate(opts);
+      if (opts.repoUrl.includes("cursor-orch-bootstrap")) {
+        const originalSend = agent.send.bind(agent);
+        agent.send = async (prompt: string) => {
+          const run = await originalSend(prompt);
+          await store.writeFile(
+            runId,
+            "task-plan.json",
+            JSON.stringify({
+              tasks: [
+                {
+                  id: "t-replan",
+                  repo: "svc",
+                  prompt: "Implement after replan",
+                  depends_on: [],
+                  allowed_paths: ["src/replan"],
+                },
+              ],
+            }),
+          );
+          return run;
+        };
+      }
+      return agent;
+    };
+
+    await runOrchestration(runId, fake, store);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.iteration).toBeGreaterThanOrEqual(2);
+    expect(state.status).toBe("completed");
+    expect(state.phase).toBe("completed");
+
+    const plannerLaunches = fake.launches.filter((l) => l.opts.repoUrl.includes("cursor-orch-bootstrap"));
+    expect(plannerLaunches.length).toBeGreaterThanOrEqual(1);
+
+    const fixLaunches = fake.launches.filter((l) => (l.opts.startingRef ?? "").includes("fix-iter-1-code_review"));
+    expect(fixLaunches.length).toBe(1);
+
+    const gateLaunches = fake.launches.filter((l) => l.opts.startingRef === runBranch);
+    expect(gateLaunches.length).toBe(9);
+  });
+
+  it("cap exhaustion: max_iterations 1 fails after second gate failure", async () => {
+    const config = v3ClaimsHappyConfig({ max_iterations: 1 });
+    const runId = "run-v3-cap";
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        v3WorkerScript(runId, "fix-iter-1-code_quality"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    installV3GateResultWriter(fake, store, runId, (gate, _wave) => {
+      if (gate === "code_quality") {
+        return {
+          passed: false,
+          summary: "quality still failing",
+          findings: [{ severity: "blocking", message: "lint error", path: "src/a.ts" }],
+        };
+      }
+      return { passed: true };
+    });
+
+    await expect(runOrchestration(runId, fake, store)).rejects.toThrow(/quality still failing|Orchestration failed/);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.phase).toBe("failed");
+    expect(String(state.error)).toMatch(/code_quality/);
+    expect(String(state.error)).toMatch(/quality still failing/);
+    expect(tracker.pulls).toBe(0);
+    expect(files.get("summary.md")).toBeTruthy();
+    expect(files.get("summary.md")).toMatch(/## Gate results/);
+    expect(files.get("summary.md")).toMatch(/quality still failing/);
   });
 });
