@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Orchestration v3:** Bounded iterate-until-clean phase machine (`plan → implement → integrate → gate → fix|replan → finalize`) with default `max_iterations: 10` (config or `CURSOR_ORCH_MAX_ITERATIONS`).
+- **Claims + fan-in:** Same-repo tasks may run in parallel with disjoint `allowed_paths`; workers use per-task branches; orchestrator fans into one run branch and opens one PR per repo after gates.
+- **Parallel gates:** After fan-in, `code_quality`, `code_review`, and `computer_use` run in parallel; computer-use targets the app locally in the cloud VM.
+- **Hybrid recovery:** Targeted fix wave first; escalate to replan when the same gate fails again or claims collide; cap exhaustion fails the run with a gate summary.
+- **Default model:** Cloud agents default to `cursor-grok-4.5-high`.
+
 ## 2.1.3 - 2026-05-14
 
 - **CLI:** `cursor-orch runs` lists orchestration runs in the bootstrap GitHub repo (sorted by `started_at`). `cursor-orch watch --run <run_id>` opens the same live dashboard as `cursor-orch status --run … --watch`.

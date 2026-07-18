@@ -6,6 +6,7 @@ export const PRECEDENCE_ORDER: readonly string[] = ["flag", "env", "project", "s
 export const FIELD_SOURCE_OF_TRUTH: Record<string, string> = {
   config_path: "flag (--config), env (CURSOR_ORCH_CONFIG), default file (.cursor-orch.yaml)",
   bootstrap_repo_name: "resolved runtime config input",
+  max_iterations: "resolved runtime config input",
   name: "resolved runtime config input",
   model: "resolved runtime config input",
   prompt: "resolved runtime config input",
@@ -25,6 +26,7 @@ export const FIELD_SOURCE_OF_TRUTH: Record<string, string> = {
 export const FIELD_PRECEDENCE: Record<string, string> = {
   config_path: "flag > env > default-file",
   bootstrap_repo_name: "flag > env > project > session > default",
+  max_iterations: "env > project > session > default",
   name: "env > project > session > default",
   model: "env > project > session > default",
   prompt: "env > project > session > default",

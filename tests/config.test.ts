@@ -829,6 +829,47 @@ target:
     expect(() => validateConfig(config)).toThrow(/branch_layout/);
   });
 
+  it("resolves max_iterations from env", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-orch-resolve-mi-"));
+    const yamlPath = path.join(dir, "orch.yaml");
+    const yaml = `
+name: test
+model: composer-2
+prompt: "seed"
+repositories:
+  svc:
+    url: https://github.com/o/r
+    ref: main
+tasks:
+  - id: t1
+    repo: svc
+    prompt: p
+target:
+  auto_create_pr: true
+  branch_prefix: cursor-orch
+  branch_layout: consolidated
+`;
+    fs.writeFileSync(yamlPath, yaml, "utf8");
+    const prevCk = process.env.CURSOR_API_KEY;
+    const prevGh = process.env.GH_TOKEN;
+    const prevMi = process.env.CURSOR_ORCH_MAX_ITERATIONS;
+    process.env.CURSOR_API_KEY = "test-key";
+    process.env.GH_TOKEN = "test-token";
+    process.env.CURSOR_ORCH_MAX_ITERATIONS = "4";
+    try {
+      const r = resolveConfigPrecedence(yamlPath, undefined);
+      expect(r.config.max_iterations).toBe(4);
+    } finally {
+      if (prevCk === undefined) delete process.env.CURSOR_API_KEY;
+      else process.env.CURSOR_API_KEY = prevCk;
+      if (prevGh === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = prevGh;
+      if (prevMi === undefined) delete process.env.CURSOR_ORCH_MAX_ITERATIONS;
+      else process.env.CURSOR_ORCH_MAX_ITERATIONS = prevMi;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("resolveConfigPrecedence applies CURSOR_ORCH_BRANCH_LAYOUT over project YAML", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-orch-resolve-bl-"));
     const yamlPath = path.join(dir, "orch.yaml");
