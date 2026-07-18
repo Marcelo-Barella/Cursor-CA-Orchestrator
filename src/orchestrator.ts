@@ -1937,6 +1937,17 @@ async function runGatePhase(ctx: LoopContext): Promise<void> {
       .join("; ");
     ctx.state.status = "failed";
     ctx.state.phase = nextPhase(ctx.state.phase, "cap_exceeded");
+    const gateSection = results
+      .map((r) => {
+        const findings = r.findings.map((f) => `- [${f.severity}] ${f.message}${f.path ? ` (${f.path})` : ""}`).join("\n");
+        return `### ${r.gate}\npassed: ${r.passed}\n${r.summary}${findings ? `\n${findings}` : ""}`;
+      })
+      .join("\n\n");
+    await ctx.repoStore.writeFile(
+      ctx.runId,
+      "summary.md",
+      `${buildSummaryMd(ctx.config, ctx.state)}\n\n## Gate results\n\n${gateSection}\n`,
+    );
     await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
     await appendEvent(
       ctx.repoStore,
