@@ -59,7 +59,8 @@ a file named \`task-plan.json\`.
       "depends_on": ["<task-id>", ...],
       "timeout_minutes": <integer>,
       "create_repo": false,
-      "repo_config": null
+      "repo_config": null,
+      "allowed_paths": ["<path-or-prefix>", "..."]
     }
   ]
 }
@@ -73,9 +74,9 @@ If you include \`delegation_map\`, the orchestrator runs **ordered waves**: \`ph
 
 **Dependencies vs waves:** a task may depend only on tasks in the **same** parallel group or an **earlier** group in map order (an earlier group in the same phase, or any group in an earlier phase). Config validation rejects before scheduling starts if a dependency points to a task in a later phase or a later parallel group in the same phase.
 
-**Parallelism defaults:** maximize concurrent workers. Tasks on **different** repositories that are independent (no shared-artifact need, no required step order) should default to the **same** \`parallel_group\` in the **earliest** wave where their existing \`depends_on\` allow — one wave should often hold all cross-repo work for that layer. Add extra \`parallel_groups\` or \`phases\` only when you need later waves for **same-repo serialization** under consolidated PR (multiple tasks on one canonical repo must sit in **different** groups so pushes use one run branch in order), for **real ordering** correctness requires, or for **shared artifacts** (a task must consume another task output, URL, schema, or contract — use \`depends_on\` and keep map order consistent). Do not add \`depends_on\` or extra groups solely to serialize unrelated cross-repo work.
+**Parallelism defaults:** maximize concurrent workers. Tasks on **different** repositories that are independent (no shared-artifact need, no required step order) should default to the **same** \`parallel_group\` in the **earliest** wave where their existing \`depends_on\` allow — one wave should often hold all cross-repo work for that layer. Same-repo tasks **may** share a \`parallel_group\` when their \`allowed_paths\` claims are disjoint; the orchestrator fans task branches into one run branch. Add extra \`parallel_groups\` or \`phases\` only when you need **real ordering** correctness requires, or for **shared artifacts** (a task must consume another task output, URL, schema, or contract — use \`depends_on\` and keep map order consistent). Do not add \`depends_on\` or extra groups solely to serialize unrelated cross-repo work.
 
-**Conflicts:** do not put the same task ID in more than one group. For the same canonical repository under consolidated PR mode, the runtime requires each task touching that repo to sit in a **different** \`parallel_group\` so agents push sequentially to one shared run branch; use \`depends_on\` when semantic order matters within or across those waves. For other same-repo conflicts, also separate groups and use \`depends_on\` as needed; keep unrelated different-repo tasks together in one group when \`depends_on\` allows.
+**Conflicts:** do not put the same task ID in more than one group. Every non-create task must include non-empty \`allowed_paths\` path claims. Overlapping \`allowed_paths\` on the same repository fail plan validation and the run will not launch. Keep unrelated different-repo tasks together in one group when \`depends_on\` allows.
 
 ## Dynamic Repository Creation
 
@@ -108,7 +109,7 @@ Use an empty list if there are no dependencies.
 - \`timeout_minutes\` is the estimated maximum time for the task (default 30).
 - Do NOT create circular dependencies.
 - Maximum 20 tasks.
-- Use \`delegation_map.phases[].parallel_groups[].tasks\` for launch waves; default independent different-repo tasks into the **same** group when \`depends_on\` allows; reserve extra groups or dependencies for same-repo serialization, ordering, or shared outputs.
+- Use \`delegation_map.phases[].parallel_groups[].tasks\` for launch waves; default independent different-repo tasks into the **same** group when \`depends_on\` allows; same-repo tasks may share a group with disjoint \`allowed_paths\`; reserve extra groups or dependencies for ordering or shared outputs.
 
 ### Output Write Instructions
 

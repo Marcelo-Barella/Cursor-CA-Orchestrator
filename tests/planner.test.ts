@@ -310,4 +310,35 @@ describe("planner", () => {
     });
     expect(() => parseTaskPlan(json, config)).toThrow(/Set "repo" to the id of the create_repo task/);
   });
+
+  it("parseTaskPlan reads allowed_paths", () => {
+    const baseConfig: OrchestratorConfig = {
+      name: "n",
+      model: { id: "m" },
+      prompt: "",
+      repositories: { svc: { url: "https://github.com/acme/svc", ref: "main" } },
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
+      bootstrap_repo_name: "b",
+      max_iterations: 10,
+    };
+    const tasks = parseTaskPlan(
+      JSON.stringify({
+        tasks: [
+          {
+            id: "a",
+            repo: "https://github.com/acme/svc",
+            prompt: "x",
+            depends_on: [],
+            timeout_minutes: 30,
+            create_repo: false,
+            repo_config: null,
+            allowed_paths: ["src/api"],
+          },
+        ],
+      }),
+      baseConfig,
+    );
+    expect(tasks[0]!.allowed_paths).toEqual(["src/api"]);
+  });
 });

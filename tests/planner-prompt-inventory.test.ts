@@ -35,6 +35,8 @@ describe("planner prompt inventory", () => {
   it("omits ## Inventory when inventory is unset", () => {
     const p = buildPlannerPrompt(base, "run-1", "o", "b");
     expect(p).not.toContain("## Inventory");
+    expect(p).toContain("allowed_paths");
+    expect(p).toMatch(/disjoint|fans? (task )?branches|overlapping/i);
   });
 
   it("planner prompt with inventory stays within a reasonable token budget", () => {
