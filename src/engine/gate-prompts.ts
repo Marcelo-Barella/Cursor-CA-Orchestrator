@@ -8,10 +8,11 @@ export type BuildGatePromptInput = {
   runBranch: string;
   bootstrapOwner: string;
   bootstrapRepo: string;
+  repoAlias?: string;
 };
 
 function boardWriteInstructions(input: BuildGatePromptInput): string {
-  const path = gateResultBoardPath(input.gate);
+  const path = gateResultBoardPath(input.gate, input.repoAlias);
   return [
     `Write the gate result JSON to the bootstrap board via gh api Contents API on branch run/${input.runId}.`,
     `Artifact path: ${path}`,

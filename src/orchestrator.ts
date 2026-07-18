@@ -13,7 +13,7 @@ import {
   GATE_IDS,
   allGatesPassed,
   failedGateIds,
-  gateResultBoardPath,
+  gateResultPathsForRepos,
   parseGateResult,
   type GateResult,
 } from "./engine/gates.js";
@@ -1833,6 +1833,10 @@ async function runIntegratePhase(ctx: LoopContext): Promise<void> {
   await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
 }
 
+function repoAliasesForGates(config: OrchestratorConfig, runId: string): string[] {
+  return runBranchesForConfig(config, runId).map((b) => b.alias);
+}
+
 async function launchGateAgent(
   ctx: LoopContext,
   gate: GateId,
@@ -1840,6 +1844,7 @@ async function launchGateAgent(
   runBranch: string,
   bootstrap: { owner: string; repo: string },
   otherRunBranches: string[],
+  repoAlias?: string,
 ): Promise<void> {
   let prompt = buildGatePrompt({
     gate,
@@ -1848,6 +1853,7 @@ async function launchGateAgent(
     runBranch,
     bootstrapOwner: bootstrap.owner,
     bootstrapRepo: bootstrap.repo,
+    repoAlias,
   });
   if (otherRunBranches.length > 0) {
     prompt = `${prompt}\nOther run branches in this orchestration: ${otherRunBranches.join(", ")}`;
@@ -1870,8 +1876,8 @@ async function launchGateAgent(
 }
 
 async function clearGateResultsOnBoard(ctx: LoopContext): Promise<void> {
-  for (const gate of GATE_IDS) {
-    await ctx.repoStore.deleteFile(ctx.runId, gateResultBoardPath(gate));
+  for (const target of gateResultPathsForRepos(repoAliasesForGates(ctx.config, ctx.runId))) {
+    await ctx.repoStore.deleteFile(ctx.runId, target.path);
   }
 }
 
@@ -1879,23 +1885,24 @@ async function inferResumePhase(
   repoStore: RepoStoreClient,
   runId: string,
   state: OrchestrationState,
+  config: OrchestratorConfig,
 ): Promise<OrchestrationState["phase"]> {
+  const targets = gateResultPathsForRepos(repoAliasesForGates(config, runId));
   const gateResults: GateResult[] = [];
   let anyGateFile = false;
-  for (const gate of GATE_IDS) {
-    const path = gateResultBoardPath(gate);
+  for (const target of targets) {
     try {
-      const raw = await repoStore.readFile(runId, path);
+      const raw = await repoStore.readFile(runId, target.path);
       if (!raw) continue;
       anyGateFile = true;
-      gateResults.push(parseGateResult(JSON.parse(raw) as unknown));
+      gateResults.push({ ...parseGateResult(JSON.parse(raw) as unknown), repoAlias: target.repoAlias });
     } catch {
       /* ignore */
     }
   }
   if (anyGateFile) {
     if (gateResults.some((r) => !r.passed)) return "fix";
-    if (allGatesPassed(gateResults)) return "finalize";
+    if (gateResults.length === targets.length && allGatesPassed(gateResults)) return "finalize";
     return "gate";
   }
 
@@ -1907,27 +1914,28 @@ async function inferResumePhase(
 
 async function readGateResultsFromBoard(ctx: LoopContext): Promise<GateResult[]> {
   const results: GateResult[] = [];
-  for (const gate of GATE_IDS) {
-    const path = gateResultBoardPath(gate);
-    const raw = await ctx.repoStore.readFile(ctx.runId, path);
+  for (const target of gateResultPathsForRepos(repoAliasesForGates(ctx.config, ctx.runId))) {
+    const raw = await ctx.repoStore.readFile(ctx.runId, target.path);
     if (!raw) {
       results.push({
-        gate,
+        gate: target.gate,
         passed: false,
-        findings: [{ severity: "blocking", message: `Missing gate result at ${path}` }],
-        summary: `Missing gate result for ${gate}`,
+        findings: [{ severity: "blocking", message: `Missing gate result at ${target.path}` }],
+        summary: `Missing gate result for ${target.gate}`,
+        repoAlias: target.repoAlias,
       });
       continue;
     }
     try {
-      results.push(parseGateResult(JSON.parse(raw) as unknown));
+      results.push({ ...parseGateResult(JSON.parse(raw) as unknown), repoAlias: target.repoAlias });
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       results.push({
-        gate,
+        gate: target.gate,
         passed: false,
         findings: [{ severity: "blocking", message: `Invalid gate result: ${detail}` }],
-        summary: `Invalid gate result for ${gate}`,
+        summary: `Invalid gate result for ${target.gate}`,
+        repoAlias: target.repoAlias,
       });
     }
   }
@@ -1935,20 +1943,27 @@ async function readGateResultsFromBoard(ctx: LoopContext): Promise<GateResult[]>
 }
 
 async function runGatePhase(ctx: LoopContext): Promise<void> {
-  const primaryAlias = selectPrimaryRepoAlias(ctx.config);
-  const primaryRc = ctx.config.repositories[primaryAlias];
-  if (!primaryRc) {
-    throw new Error(`Primary repo alias '${primaryAlias}' missing from repositories`);
-  }
-  const runBranch = runBranchName(ctx.config.target.branch_prefix, ctx.runId, primaryRc.ref);
   const allBranches = runBranchesForConfig(ctx.config, ctx.runId);
-  const otherRunBranches = allBranches.filter((b) => b.alias !== primaryAlias).map((b) => b.runBranch);
+  const multiRepo = allBranches.length > 1;
   const bootstrap = await resolveBootstrapCoords(ctx);
 
   await clearGateResultsOnBoard(ctx);
 
   await Promise.all(
-    GATE_IDS.map((gate) => launchGateAgent(ctx, gate, primaryRc.url, runBranch, bootstrap, otherRunBranches)),
+    allBranches.flatMap((branch) => {
+      const otherRunBranches = allBranches.filter((b) => b.alias !== branch.alias).map((b) => b.runBranch);
+      return GATE_IDS.map((gate) =>
+        launchGateAgent(
+          ctx,
+          gate,
+          branch.repoUrl,
+          branch.runBranch,
+          bootstrap,
+          otherRunBranches,
+          multiRepo ? branch.alias : undefined,
+        ),
+      );
+    }),
   );
 
   const results = await readGateResultsFromBoard(ctx);
@@ -2370,7 +2385,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
       const hadPersistedPhase = typeof raw.phase === "string";
       state = deserialize(stateJson);
       if (!hadPersistedPhase && state.status !== "pending") {
-        state.phase = await inferResumePhase(repoStore, runId, state);
+        state.phase = await inferResumePhase(repoStore, runId, state, config);
       }
     } catch (err) {
       throw new Error(
