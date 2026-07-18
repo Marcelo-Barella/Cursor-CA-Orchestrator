@@ -42,6 +42,9 @@ function shellState(agents: Record<string, AgentState>): OrchestrationState {
     consolidated_pr_urls: null,
     consolidated_pr_errors: null,
     repo_run_head: null,
+    phase: "plan",
+    iteration: 0,
+    gates_failed_after_fix: [],
   };
 }
 
