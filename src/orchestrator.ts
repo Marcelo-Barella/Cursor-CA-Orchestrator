@@ -1170,6 +1170,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
       info.ref = ref;
       info.planRef = planRefForConsolidatedRunLine(task, ref);
       info.runLine =
+        !usesClaimsPath(ctx.config) &&
         Boolean(info.planRef) &&
         !task.create_repo &&
         ctx.config.target.branch_layout === "consolidated" &&
@@ -1649,6 +1650,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
           info.ref = ref;
           info.planRef = planRefForConsolidatedRunLine(task, ref);
           info.runLine =
+            !usesClaimsPath(ctx.config) &&
             Boolean(info.planRef) &&
             !task.create_repo &&
             ctx.config.target.branch_layout === "consolidated" &&
@@ -1878,13 +1880,6 @@ async function inferResumePhase(
   runId: string,
   state: OrchestrationState,
 ): Promise<OrchestrationState["phase"]> {
-  try {
-    const fixPlan = await repoStore.readFile(runId, "fix-plan.json");
-    if (fixPlan) return "fix";
-  } catch {
-    /* ignore */
-  }
-
   const gateResults: GateResult[] = [];
   let anyGateFile = false;
   for (const gate of GATE_IDS) {
@@ -2359,17 +2354,30 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
 
   let state: OrchestrationState;
   let isFreshRun = false;
-  try {
-    const stateJson = await repoStore.readFile(runId, "state.json");
-    const raw = JSON.parse(stateJson) as Record<string, unknown>;
-    const hadPersistedPhase = typeof raw.phase === "string";
-    state = deserialize(stateJson);
-    if (!hadPersistedPhase && state.status !== "pending") {
-      state.phase = await inferResumePhase(repoStore, runId, state);
+  const stateJson = await repoStore.readFile(runId, "state.json");
+  if (!stateJson.trim()) {
+    const eventsJsonl = await repoStore.readFile(runId, "events.jsonl");
+    if (eventsJsonl.trim()) {
+      throw new Error(
+        `state.json is missing or empty but events.jsonl has content for run ${runId}; refusing to reset orchestration state`,
+      );
     }
-  } catch {
     state = createInitialState(config, runId);
     isFreshRun = true;
+  } else {
+    try {
+      const raw = JSON.parse(stateJson) as Record<string, unknown>;
+      const hadPersistedPhase = typeof raw.phase === "string";
+      state = deserialize(stateJson);
+      if (!hadPersistedPhase && state.status !== "pending") {
+        state.phase = await inferResumePhase(repoStore, runId, state);
+      }
+    } catch (err) {
+      throw new Error(
+        `Failed to load state.json for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
   }
 
   reconcileAgentsFromConfig(state, config);
