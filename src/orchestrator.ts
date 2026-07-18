@@ -1867,6 +1867,16 @@ async function launchGateAgent(
   }
 }
 
+async function clearGateResultsOnBoard(ctx: LoopContext): Promise<void> {
+  for (const gate of GATE_IDS) {
+    try {
+      await ctx.repoStore.deleteFile(ctx.runId, gateResultBoardPath(gate));
+    } catch {
+      /* absent is fine */
+    }
+  }
+}
+
 async function readGateResultsFromBoard(ctx: LoopContext): Promise<GateResult[]> {
   const results: GateResult[] = [];
   for (const gate of GATE_IDS) {
@@ -1906,6 +1916,8 @@ async function runGatePhase(ctx: LoopContext): Promise<void> {
   const allBranches = runBranchesForConfig(ctx.config, ctx.runId);
   const otherRunBranches = allBranches.filter((b) => b.alias !== primaryAlias).map((b) => b.runBranch);
   const bootstrap = await resolveBootstrapCoords(ctx);
+
+  await clearGateResultsOnBoard(ctx);
 
   await Promise.all(
     GATE_IDS.map((gate) => launchGateAgent(ctx, gate, primaryRc.url, runBranch, bootstrap, otherRunBranches)),
@@ -1979,22 +1991,15 @@ async function runFixPhase(ctx: LoopContext): Promise<void> {
   });
 
   if (!built.ok) {
-    const decision = decideRecovery({
-      failedGates: failedGateIds(ctx.lastGateResults),
-      gatesFailedAfterFix: ctx.state.gates_failed_after_fix as GateId[],
-      claimCollision: true,
-      iteration: ctx.state.iteration,
-      maxIterations: ctx.config.max_iterations,
-    });
-    ctx.state.iteration = decision.iteration;
-    if (decision.action === "fail_cap") {
+    // Iteration already bumped when entering fix from gate; escalate without a second bump.
+    if (ctx.state.iteration >= ctx.config.max_iterations) {
       ctx.state.error = "Fix plan claim collision and iteration cap exceeded";
       ctx.state.status = "failed";
       ctx.state.phase = nextPhase(ctx.state.phase, "cap_exceeded");
       await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
       return;
     }
-    ctx.state.phase = "replan";
+    ctx.state.phase = nextPhase(ctx.state.phase, "replan_scheduled");
     await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
     return;
   }
@@ -2014,7 +2019,12 @@ async function runFixPhase(ctx: LoopContext): Promise<void> {
       existingIds.add(task.id);
     }
   }
-  assertDisjointClaims(ctx.config.tasks);
+  const liveClaimTasks = ctx.config.tasks.filter((t) => {
+    if (built.tasks.some((ft) => ft.id === t.id)) return true;
+    const status = ctx.state.agents[t.id]?.status;
+    return !status || !isTerminalStatus(status);
+  });
+  assertDisjointClaims(liveClaimTasks);
   const canon = canonicalizeOrchestratorConfig(ctx.config);
   ctx.config.repositories = canon.repositories;
   ctx.config.tasks = canon.tasks;
@@ -2037,6 +2047,7 @@ async function runReplanPhase(ctx: LoopContext): Promise<void> {
   ctx.activeWorkers.clear();
   ctx.lastGateResults = [];
   ctx.pendingFixFromGates = false;
+  ctx.state.gates_failed_after_fix = [];
 
   if (!ctx.config.prompt) {
     ctx.state.error = "Replan required but config.prompt is empty";

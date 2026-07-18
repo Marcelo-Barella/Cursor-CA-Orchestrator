@@ -724,7 +724,7 @@ describe("runOrchestration v3 claims path", () => {
         return {
           passed: false,
           summary: "complexity too high",
-          findings: [{ severity: "blocking", message: "too complex", path: "src/a.ts" }],
+          findings: [{ severity: "blocking", message: "too complex", path: "src/a/foo.ts" }],
         };
       }
       return { passed: true };
@@ -744,8 +744,10 @@ describe("runOrchestration v3 claims path", () => {
     const gateLaunches = fake.launches.filter((l) => l.opts.startingRef === runBranch);
     expect(gateLaunches.length).toBe(6);
 
-    const fixPlan = JSON.parse(files.get("fix-plan.json")!) as { tasks: { id: string }[] };
-    expect(fixPlan.tasks.some((t) => t.id === "fix-iter-1-code_quality")).toBe(true);
+    const fixPlan = JSON.parse(files.get("fix-plan.json")!) as { tasks: { id: string; allowed_paths: string[] }[] };
+    const fixTask = fixPlan.tasks.find((t) => t.id === "fix-iter-1-code_quality");
+    expect(fixTask).toBeDefined();
+    expect(fixTask!.allowed_paths).toEqual(["src/a/foo.ts"]);
   });
 
   it("replan escalation: same gate fails twice after fix", async () => {
