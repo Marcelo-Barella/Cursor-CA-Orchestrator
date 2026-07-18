@@ -58,10 +58,12 @@ function singleTaskConfig(): OrchestratorConfig {
         timeout_minutes: 30,
         create_repo: false,
         repo_config: null,
+        allowed_paths: [],
       },
     ],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
+    max_iterations: 10,
   };
 }
 
@@ -108,6 +110,7 @@ function twoRepoParallelTaskConfig(): OrchestratorConfig {
     timeout_minutes: 30,
     create_repo: false,
     repo_config: null,
+    allowed_paths: [],
   });
   return {
     name: "demo",
@@ -123,6 +126,7 @@ function twoRepoParallelTaskConfig(): OrchestratorConfig {
     },
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
+    max_iterations: 10,
   };
 }
 

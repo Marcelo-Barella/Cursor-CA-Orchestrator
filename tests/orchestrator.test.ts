@@ -31,9 +31,11 @@ function createConfig(
       timeout_minutes: 30,
       create_repo: false,
       repo_config: null,
+      allowed_paths: [],
     })),
     target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
     bootstrap_repo_name: "b",
+    max_iterations: 10,
   };
 }
 
@@ -304,6 +306,7 @@ describe("buildRepoCreationPrompt consolidated run line", () => {
       timeout_minutes: 30,
       create_repo: true,
       repo_config: null,
+      allowed_paths: [],
     };
     const example = "p/run-x/main";
     const p = buildRepoCreationPrompt(task, "run-x", {}, { exampleRunBranch: example });
@@ -328,6 +331,7 @@ describe("runOrchestration validation gate", () => {
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       delegation_map: {
@@ -335,6 +339,7 @@ describe("runOrchestration validation gate", () => {
       },
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const yaml = toYaml(bad);
     let writeCount = 0;

@@ -20,6 +20,7 @@ describe("config", () => {
       timeout_minutes: 30,
       create_repo: false,
       repo_config: null,
+      allowed_paths: [],
     };
     expect(task.create_repo).toBe(false);
     expect(task.repo_config).toBeNull();
@@ -41,10 +42,12 @@ describe("config", () => {
           timeout_minutes: 30,
           create_repo: true,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     const output = toYaml(config);
     expect(output).toContain("create_repo: true");
@@ -63,6 +66,7 @@ describe("config", () => {
         timeout_minutes: 30,
         create_repo: true,
         repo_config: null,
+        allowed_paths: [],
       },
     ];
     validateRepoRefs(tasks, repos);
@@ -80,6 +84,7 @@ describe("config", () => {
         timeout_minutes: 30,
         create_repo: true,
         repo_config: null,
+        allowed_paths: [],
       },
       {
         id: "database-schema-multitenancy",
@@ -90,6 +95,7 @@ describe("config", () => {
         timeout_minutes: 30,
         create_repo: false,
         repo_config: null,
+        allowed_paths: [],
       },
     ];
     validateRepoRefs(tasks, repos);
@@ -107,6 +113,7 @@ describe("config", () => {
         timeout_minutes: 30,
         create_repo: false,
         repo_config: null,
+        allowed_paths: [],
       },
     ];
     validateRepoRefs(tasks, repos);
@@ -140,6 +147,7 @@ target:
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).toThrow(/bergamta/);
   });
@@ -160,10 +168,12 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     const c = canonicalizeOrchestratorConfig(config);
     expect(c.repositories["https://github.com/o/r"]).toEqual({ url: "https://github.com/o/r", ref: "main" });
@@ -182,6 +192,7 @@ target:
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     const c = canonicalizeOrchestratorConfig(config);
     expect(c.repositories["__bootstrap__"]).toEqual({ url: "https://github.com/u/b", ref: "main" });
@@ -262,6 +273,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       delegation_map: {
@@ -269,6 +281,7 @@ target:
       },
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).toThrow(/unknown task 'missing'/);
   });
@@ -289,6 +302,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
         {
           id: "t2",
@@ -299,6 +313,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       delegation_map: {
@@ -314,6 +329,7 @@ target:
       },
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).toThrow(/appears multiple times/);
   });
@@ -334,6 +350,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
         {
           id: "t2",
@@ -344,6 +361,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       delegation_map: {
@@ -351,6 +369,7 @@ target:
       },
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).toThrow(/must assign every task exactly once/);
   });
@@ -367,6 +386,7 @@ target:
       },
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).not.toThrow();
   });
@@ -387,6 +407,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
         {
           id: "t2",
@@ -397,6 +418,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       delegation_map: {
@@ -407,6 +429,7 @@ target:
       },
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).toThrow(/later phase/);
   });
@@ -427,6 +450,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
         {
           id: "t2",
@@ -437,6 +461,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       delegation_map: {
@@ -452,6 +477,7 @@ target:
       },
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).not.toThrow();
   });
@@ -472,6 +498,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
         {
           id: "t2",
@@ -482,6 +509,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       delegation_map: {
@@ -497,6 +525,7 @@ target:
       },
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).toThrow(/later parallel group/);
   });
@@ -517,6 +546,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
         {
           id: "t2",
@@ -527,10 +557,12 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).toThrow(/delegation_map/);
   });
@@ -551,6 +583,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
         {
           id: "t2",
@@ -561,6 +594,7 @@ target:
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       delegation_map: {
@@ -568,6 +602,7 @@ target:
       },
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).toThrow(/same parallel group/);
   });
@@ -709,6 +744,7 @@ target:
       tasks: [],
       target,
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
     };
     expect(() => validateConfig(config)).toThrow(/branch_layout/);
   });
@@ -806,6 +842,7 @@ mcp_servers:
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
       mcp_servers: {
         linear: {
           type: "http",
@@ -847,6 +884,7 @@ mcp_servers:
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
       mcp_servers: {
         "bad name": { type: "http", url: "https://x" },
       },
@@ -863,6 +901,7 @@ mcp_servers:
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
       mcp_servers: {
         gh: { type: "stdio", command: "   " },
       },
@@ -879,6 +918,7 @@ mcp_servers:
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
       mcp_servers: {},
     };
     expect(toYaml(config)).not.toMatch(/mcp_servers/);
@@ -1023,6 +1063,7 @@ inventory:
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "cursor-orch-bootstrap",
+      max_iterations: 10,
       inventory: {
         version: 1,
         source: "declared",
@@ -1035,5 +1076,57 @@ inventory:
     };
     const again = parseConfig(toYaml(config));
     expect(again.inventory).toEqual(config.inventory);
+  });
+
+  it("parses allowed_paths and max_iterations", () => {
+    const cfg = parseConfig(`
+name: demo
+model: cursor-grok-4.5-high
+prompt: ""
+max_iterations: 3
+repositories:
+  svc:
+    url: https://github.com/acme/svc
+    ref: main
+tasks:
+  - id: t1
+    repo: svc
+    prompt: do it
+    allowed_paths:
+      - src/api/
+      - src/lib/foo.ts
+target:
+  auto_create_pr: true
+  consolidate_prs: true
+  branch_prefix: cursor-orch
+  branch_layout: consolidated
+bootstrap_repo_name: cursor-orch-bootstrap
+`);
+    expect(cfg.max_iterations).toBe(3);
+    expect(cfg.tasks[0]!.allowed_paths).toEqual(["src/api/", "src/lib/foo.ts"]);
+  });
+
+  it("defaults max_iterations to 10 and allowed_paths to empty", () => {
+    const cfg = parseConfig(`
+name: demo
+model: cursor-grok-4.5-high
+prompt: ""
+repositories:
+  svc:
+    url: https://github.com/acme/svc
+    ref: main
+tasks:
+  - id: t1
+    repo: svc
+    prompt: do it
+target:
+  auto_create_pr: true
+  consolidate_prs: true
+  branch_prefix: cursor-orch
+  branch_layout: consolidated
+bootstrap_repo_name: cursor-orch-bootstrap
+`);
+    expect(cfg.max_iterations).toBe(10);
+    expect(cfg.tasks[0]!.allowed_paths).toEqual([]);
   });
 });
