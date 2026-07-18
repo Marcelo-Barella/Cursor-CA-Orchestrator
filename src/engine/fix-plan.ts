@@ -1,6 +1,24 @@
 import type { TaskConfig } from "../config/types.js";
+import { runBranchName } from "../lib/github-consolidated-pr.js";
 import { findClaimOverlaps } from "./claims.js";
 import type { GateResult } from "./gates.js";
+
+export function isFixWaveTaskId(taskId: string): boolean {
+  return taskId.startsWith("fix-iter-");
+}
+
+export function resolveClaimsWorkerForkBase(input: {
+  taskId: string;
+  branchPrefix: string;
+  runId: string;
+  repoRef: string;
+  planRef: string | null;
+}): string {
+  if (isFixWaveTaskId(input.taskId)) {
+    return runBranchName(input.branchPrefix, input.runId, input.planRef ?? input.repoRef);
+  }
+  return input.repoRef;
+}
 
 export type FixPlanBuildResult =
   | { ok: true; tasks: TaskConfig[] }

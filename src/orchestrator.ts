@@ -7,7 +7,7 @@ import { parseConfig, toYaml } from "./config/parse.js";
 import { validateConfig } from "./config/validate.js";
 import { assertDisjointClaims, usesClaimsPath } from "./engine/claims.js";
 import { fanInTaskBranches } from "./engine/fan-in.js";
-import { buildFixPlanDocument, buildFixTasks } from "./engine/fix-plan.js";
+import { buildFixPlanDocument, buildFixTasks, resolveClaimsWorkerForkBase } from "./engine/fix-plan.js";
 import { buildGatePrompt } from "./engine/gate-prompts.js";
 import {
   GATE_IDS,
@@ -711,7 +711,16 @@ async function launchWorkerAgent(
   } else if (!task.create_repo) {
     const ownerRepo = parseGithubOwnerRepo(repoUrl);
     if (ownerRepo && ctx.ghToken) {
-      const ensured = await ensureRunBranchFromBase(ctx.ghToken, ownerRepo.owner, ownerRepo.repo, ref, workerBranch);
+      const forkBaseRef = claimsPath
+        ? resolveClaimsWorkerForkBase({
+            taskId,
+            branchPrefix: ctx.config.target.branch_prefix,
+            runId: ctx.runId,
+            repoRef: ref,
+            planRef,
+          })
+        : ref;
+      const ensured = await ensureRunBranchFromBase(ctx.ghToken, ownerRepo.owner, ownerRepo.repo, forkBaseRef, workerBranch);
       if (ensured.error) {
         const summary = `Failed to prepare task branch for task ${taskId}: ${ensured.error}`;
         console.error(summary);
@@ -1979,6 +1988,9 @@ async function runGatePhase(ctx: LoopContext): Promise<void> {
 }
 
 async function runFixPhase(ctx: LoopContext): Promise<void> {
+  if (ctx.lastGateResults.length === 0) {
+    ctx.lastGateResults = await readGateResultsFromBoard(ctx);
+  }
   const primaryAlias = selectPrimaryRepoAlias(ctx.config);
   const built = buildFixTasks({
     results: ctx.lastGateResults,

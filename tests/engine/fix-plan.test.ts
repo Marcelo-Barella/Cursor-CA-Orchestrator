@@ -1,5 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { buildFixTasks } from "../../src/engine/fix-plan.js";
+import { buildFixTasks, isFixWaveTaskId, resolveClaimsWorkerForkBase } from "../../src/engine/fix-plan.js";
+
+describe("fix wave task helpers", () => {
+  it("detects fix wave task ids", () => {
+    expect(isFixWaveTaskId("fix-iter-1-code_quality")).toBe(true);
+    expect(isFixWaveTaskId("t-a")).toBe(false);
+  });
+
+  it("forks fix workers from the integrated run branch", () => {
+    expect(
+      resolveClaimsWorkerForkBase({
+        taskId: "fix-iter-2-code_review",
+        branchPrefix: "cursor-orch",
+        runId: "run-1",
+        repoRef: "main",
+        planRef: "main",
+      }),
+    ).toBe("cursor-orch/run-1/main/run");
+  });
+
+  it("forks initial implement workers from the repo ref", () => {
+    expect(
+      resolveClaimsWorkerForkBase({
+        taskId: "t-a",
+        branchPrefix: "cursor-orch",
+        runId: "run-1",
+        repoRef: "main",
+        planRef: "main",
+      }),
+    ).toBe("main");
+  });
+});
 
 describe("buildFixTasks", () => {
   it("builds fix tasks with path claims from findings", () => {

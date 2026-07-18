@@ -584,7 +584,12 @@ function installV3GateResultWriter(
   };
 }
 
-function installV3GithubMock(tracker: { pulls: number; merges: string[]; createdRefs: Set<string> }): void {
+function installV3GithubMock(tracker: {
+  pulls: number;
+  merges: string[];
+  createdRefs: Set<string>;
+  refReads?: string[];
+}): void {
   unmockedFetch = globalThis.fetch;
   tracker.createdRefs.add("main");
   globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -602,6 +607,7 @@ function installV3GithubMock(tracker: { pulls: number; merges: string[]; created
     if (url.includes("/git/ref/heads/")) {
       const tail = url.split("/git/ref/heads/")[1] ?? "";
       const decoded = decodeURIComponent(tail);
+      tracker.refReads?.push(decoded);
       if (tracker.createdRefs.has(decoded)) {
         return new Response(JSON.stringify({ object: { sha: "0123456789abcdef0123456789abcdef01234567" } }), {
           status: 200,
@@ -705,7 +711,7 @@ describe("runOrchestration v3 claims path", () => {
     const config = v3ClaimsHappyConfig();
     const runId = "run-v3-gate-fix";
     const runBranch = `cursor-orch/${runId}/main/run`;
-    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>(), refReads: [] as string[] };
     installV3GithubMock(tracker);
 
     const fake = new FakeAgentClient({
@@ -743,6 +749,7 @@ describe("runOrchestration v3 claims path", () => {
 
     const fixLaunches = fake.launches.filter((l) => (l.opts.startingRef ?? "").includes("fix-iter-1-code_quality"));
     expect(fixLaunches.length).toBe(1);
+    expect(tracker.refReads).toContain(runBranch);
 
     const gateLaunches = fake.launches.filter((l) => l.opts.startingRef === runBranch);
     expect(gateLaunches.length).toBe(6);
