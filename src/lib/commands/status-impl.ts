@@ -1,3 +1,4 @@
+import type { RepoStoreClient } from "../../api/repo-store.js";
 import { parseConfig } from "../../config/index.js";
 import { renderLive, renderSnapshot } from "../../dashboard.js";
 import { formatFailureLogHint, partitionFailedAgents } from "../failure-diagnostics.js";
@@ -52,19 +53,25 @@ function finishFatal(opts: FailOptions, finish: (code: number) => never): never 
 
 export async function runStatusCommand(
   opts: { run: string; watch: boolean },
-  deps: { finish: (code: number) => never } = { finish: (c: number): never => process.exit(c) },
+  deps: {
+    finish: (code: number) => never;
+    repoStore?: RepoStoreClient;
+  } = { finish: (c: number): never => process.exit(c) },
 ): Promise<void> {
-  const env = cliRequireEnv(["GH_TOKEN"], {
-    code: "STATUS-001",
-    severity: "FATAL",
-    title: "Missing GH_TOKEN",
-    what_happened: "status requires GitHub access.",
-    next_step: "Set GH_TOKEN and rerun status.",
-    alternative: "Export GH_TOKEN inline.",
-    example: "GH_TOKEN=... cursor-orch status --run <run_id>",
-    exitCode: 1,
-  });
-  const repoStore = createBootstrapRepoStore(env.GH_TOKEN);
+  let repoStore = deps.repoStore;
+  if (!repoStore) {
+    const env = cliRequireEnv(["GH_TOKEN"], {
+      code: "STATUS-001",
+      severity: "FATAL",
+      title: "Missing GH_TOKEN",
+      what_happened: "status requires GitHub access.",
+      next_step: "Set GH_TOKEN and rerun status.",
+      alternative: "Export GH_TOKEN inline.",
+      example: "GH_TOKEN=... cursor-orch status --run <run_id>",
+      exitCode: 1,
+    });
+    repoStore = createBootstrapRepoStore(env.GH_TOKEN);
+  }
   let content: string;
   try {
     content = await repoStore.readFile(opts.run, "state.json");

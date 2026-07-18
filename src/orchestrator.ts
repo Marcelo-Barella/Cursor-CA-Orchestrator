@@ -29,10 +29,11 @@ import {
   appendEvent,
   assignTaskPhase,
   createInitialState,
+  deserialize,
   ensureLifecycleAgents,
+  readEvents,
   seedMainAgent,
   setPhaseStatus,
-  syncFromRepo,
   syncToRepo,
 } from "./state.js";
 import {
@@ -69,7 +70,7 @@ const WORKER_ARTIFACT_ERROR_RETRY_MS_DEFAULT = 2_000;
 const TASK_FAILURE_MAX_RETRIES_DEFAULT = 0;
 const TASK_FAILURE_MAX_RETRIES_CAP = 32;
 
-function readTaskFailureRetryCap(): number {
+export function readTaskFailureRetryCap(): number {
   const raw = process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES;
   if (raw !== undefined && raw !== "") {
     const n = Number(raw);
@@ -128,7 +129,7 @@ async function handleTaskFailureWithOptionalRetry(
   return "terminal";
 }
 
-function readWorkerArtifactErrorRetryPlan(): { maxRetries: number; delayMs: number } {
+export function readWorkerArtifactErrorRetryPlan(): { maxRetries: number; delayMs: number } {
   let maxRetries = WORKER_ARTIFACT_ERROR_RETRIES_DEFAULT;
   const retriesRaw = process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES;
   if (retriesRaw !== undefined && retriesRaw !== "") {
@@ -271,8 +272,84 @@ function isTerminalStatus(status: string): boolean {
   return status === "finished" || status === "failed" || status === "stopped";
 }
 
+const IN_FLIGHT_LAUNCH_TERMINAL_EVENTS = new Set(["task_finished", "task_failed", "task_stopped"]);
+
+export function agentIdFromTaskLaunchedEvent(event: OrchestrationEvent): string | null {
+  const fromPayload = event.payload.agent_id?.trim();
+  if (fromPayload) return fromPayload;
+  const match = /^Launched\s+\S+\s+\(([^)]+)\)\s*$/.exec(event.detail);
+  return match?.[1]?.trim() ?? null;
+}
+
+export function pickReattachRun(runs: SdkRun[]): SdkRun | null {
+  if (runs.length === 0) return null;
+  const running = runs.find((run) => run.status === "running");
+  if (running) return running;
+  let best = runs[0]!;
+  let bestCreated = best.createdAt ?? 0;
+  for (let i = 1; i < runs.length; i += 1) {
+    const run = runs[i]!;
+    const created = run.createdAt ?? 0;
+    if (created >= bestCreated) {
+      best = run;
+      bestCreated = created;
+    }
+  }
+  return best;
+}
+
+export function reconcileInFlightLaunchesFromEvents(state: OrchestrationState, events: OrchestrationEvent[]): boolean {
+  let changed = false;
+  for (const agent of Object.values(state.agents)) {
+    if (agent.agent_id || agent.status !== "pending") continue;
+    let lastLaunch: OrchestrationEvent | null = null;
+    for (const event of events) {
+      if (event.task_id !== agent.task_id) continue;
+      if (IN_FLIGHT_LAUNCH_TERMINAL_EVENTS.has(event.event_type)) {
+        lastLaunch = null;
+        continue;
+      }
+      if (event.event_type === "task_launched") {
+        lastLaunch = event;
+      }
+    }
+    if (!lastLaunch) continue;
+    const agentId = agentIdFromTaskLaunchedEvent(lastLaunch);
+    if (!agentId) continue;
+    agent.agent_id = agentId;
+    agent.status = "launching";
+    if (!agent.started_at) {
+      agent.started_at = lastLaunch.timestamp;
+    }
+    const branch = lastLaunch.payload.branch?.trim();
+    if (branch && !agent.branch_name) {
+      agent.branch_name = branch;
+    }
+    changed = true;
+  }
+  return changed;
+}
+
 function groupIsTerminal(state: OrchestrationState, group: DelegationGroup): boolean {
-  return group.task_ids.every((taskId) => isTerminalStatus(state.agents[taskId]?.status ?? "finished"));
+  return group.task_ids.every((taskId) => {
+    const agent = state.agents[taskId];
+    return agent !== undefined && isTerminalStatus(agent.status);
+  });
+}
+
+function findFirstNonTerminalDelegationPosition(
+  state: OrchestrationState,
+  phases: DelegationPhase[],
+): { phaseIndex: number; groupIndex: number } | null {
+  for (let pi = 0; pi < phases.length; pi += 1) {
+    const groups = phases[pi]!.groups;
+    for (let gi = 0; gi < groups.length; gi += 1) {
+      if (!groupIsTerminal(state, groups[gi]!)) {
+        return { phaseIndex: pi, groupIndex: gi };
+      }
+    }
+  }
+  return null;
 }
 
 function normalizeDelegationCursors(state: OrchestrationState, phases: DelegationPhase[]): { phaseIndex: number; groupIndex: number } {
@@ -280,6 +357,13 @@ function normalizeDelegationCursors(state: OrchestrationState, phases: Delegatio
   let g = state.delegation_group_index ?? 0;
   if (p < 0) p = 0;
   if (g < 0) g = 0;
+  if (p >= phases.length) {
+    const repair = findFirstNonTerminalDelegationPosition(state, phases);
+    if (repair) {
+      return repair;
+    }
+    return { phaseIndex: phases.length, groupIndex: 0 };
+  }
   while (p < phases.length) {
     const phase = phases[p]!;
     const groups = phase.groups;
@@ -412,16 +496,19 @@ function shrinkOutputs(outputs: Record<string, unknown>): void {
   }
 }
 
-function normalizeWorkerPayload(raw: unknown, taskId: string): Record<string, unknown> | null {
+const WORKER_PAYLOAD_STATUSES = new Set(["completed", "blocked", "failed"]);
+
+export function normalizeWorkerPayload(raw: unknown, taskId: string): Record<string, unknown> | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return null;
   }
   const obj = raw as Record<string, unknown>;
+  const status = obj.status;
+  if (typeof status !== "string" || !WORKER_PAYLOAD_STATUSES.has(status)) {
+    return null;
+  }
   if (typeof obj.task_id !== "string") {
     obj.task_id = taskId;
-  }
-  if (typeof obj.status !== "string") {
-    obj.status = "completed";
   }
   if (typeof obj.summary !== "string" && obj.summary !== null) {
     obj.summary = null;
@@ -440,7 +527,7 @@ async function readWorkerOutputFromRepo(repoStore: RepoStoreClient, runId: strin
   if (!content) return null;
   try {
     const data = JSON.parse(content) as Record<string, unknown>;
-    return truncateOutput(data, taskId);
+    return normalizeWorkerPayload(data, taskId);
   } catch {
     return null;
   }
@@ -583,6 +670,7 @@ function reconcileAgentsFromConfig(state: OrchestrationState, config: Orchestrat
         blocked_reason: null,
         blocked_since: null,
         retry_count: 0,
+        blocked_retry_count: 0,
         cascade_source_task_id: null,
       };
     }
@@ -825,9 +913,16 @@ async function launchWorkerAgent(
       phase_id: "execution",
       agent_node_id: taskId,
       agent_kind: "task",
-      payload: { run_id: run.id, repository: repoUrl, ref: startingRefForSdk, branch: workerBranch },
+      payload: {
+        agent_id: sdkAgent.agentId,
+        run_id: run.id,
+        repository: repoUrl,
+        ref: startingRefForSdk,
+        branch: workerBranch,
+      },
     }),
   );
+  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
   const transcript = createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId });
   const handle: WorkerHandle = {
     taskId,
@@ -932,7 +1027,7 @@ async function runWorkerStream(
   const resolveWorkerOutput = async (): Promise<{ raw: unknown | null; source: "artifact" | "assistant" | "conversation" | "none" }> => {
     try {
       const artifact = await tryDownloadJsonArtifact(sdkAgent, WORKER_OUTPUT_ARTIFACT_PATH);
-      if (artifact.value !== null) {
+      if (artifact.value !== null && normalizeWorkerPayload(artifact.value, taskId) !== null) {
         return { raw: artifact.value, source: "artifact" };
       }
     } catch {
@@ -975,9 +1070,11 @@ async function runWorkerStream(
   }
   const payload = normalizeWorkerPayload(payloadRaw, taskId);
 
+  let agentFilePersisted = false;
   if (payload) {
     try {
       await ctx.repoStore.writeFile(ctx.runId, `agent-${taskId}.json`, JSON.stringify(payload, null, 2));
+      agentFilePersisted = true;
     } catch (err) {
       console.warn(`Failed to write agent-${taskId}.json: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1023,6 +1120,14 @@ async function runWorkerStream(
 
   const finalizedAt = nowIso();
 
+  if (ctx.stopRequested.value) {
+    agent.status = "stopped";
+    agent.finished_at = finalizedAt;
+    ctx.activeWorkers.delete(taskId);
+    await safeDisposeAgent(sdkAgent);
+    return;
+  }
+
   if (payloadStatus === "blocked") {
     agent.status = "blocked";
     agent.blocked_reason = payloadBlockedReason ?? "Worker reported blocked without reason";
@@ -1042,7 +1147,7 @@ async function runWorkerStream(
       ctx.runId,
       makeEvent("task_stopped", `Task ${taskId} stopped`, taskId),
     );
-  } else if (payloadStatus === "completed") {
+  } else if (payloadStatus === "completed" && agentFilePersisted) {
     agent.status = "finished";
     agent.finished_at = finalizedAt;
     agent.summary = payloadSummary ?? "Task completed";
@@ -1056,6 +1161,21 @@ async function runWorkerStream(
         agent_kind: "task",
         payload: { status: agent.status, payload_source: payloadSource },
       }),
+    );
+  } else if (payloadStatus === "completed" && !agentFilePersisted) {
+    const summaryLine = `Failed to persist worker output to agent-${taskId}.json on the run branch`;
+    await handleTaskFailureWithOptionalRetry(
+      ctx,
+      taskId,
+      () =>
+        appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed: ${summaryLine}`, taskId, {
+            payload: { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
+          }),
+        ),
+      { finishedAt: finalizedAt, summary: summaryLine },
     );
   } else if (result.status === "error" || payloadStatus === "failed" || streamError) {
     const errText = streamError instanceof Error ? streamError.message : streamError !== null ? String(streamError) : null;
@@ -1076,19 +1196,20 @@ async function runWorkerStream(
       { finishedAt: finalizedAt, summary: summaryLine },
     );
   } else if (result.status === "finished") {
-    agent.status = "finished";
-    agent.finished_at = finalizedAt;
-    agent.summary = payloadSummary ?? "Task completed";
-    const phaseId = ctx.state.task_phase_map[taskId];
-    await appendEvent(
-      ctx.repoStore,
-      ctx.runId,
-      makeEvent("task_finished", `Task ${taskId} finished`, taskId, {
-        phase_id: phaseId ?? null,
-        agent_node_id: taskId,
-        agent_kind: "task",
-        payload: { status: agent.status, payload_source: payloadSource },
-      }),
+    const summaryLine =
+      payloadSummary ?? "Worker run finished without valid cursor-orch-output (missing or incomplete worker JSON)";
+    await handleTaskFailureWithOptionalRetry(
+      ctx,
+      taskId,
+      () =>
+        appendEvent(
+          ctx.repoStore,
+          ctx.runId,
+          makeEvent("task_failed", `Task ${taskId} failed: ${summaryLine}`, taskId, {
+            payload: { payload_source: payloadSource, last_status: String(lastStatus ?? "") },
+          }),
+        ),
+      { finishedAt: finalizedAt, summary: summaryLine },
     );
   } else {
     const summaryLine = payloadSummary ?? `Worker run status=${result.status}`;
@@ -1107,7 +1228,9 @@ async function runWorkerStream(
     );
   }
 
-  ctx.activeWorkers.delete(taskId);
+  if (ctx.activeWorkers.get(taskId) === handle) {
+    ctx.activeWorkers.delete(taskId);
+  }
   await safeDisposeAgent(sdkAgent);
   markStateDirty(ctx);
 }
@@ -1115,7 +1238,7 @@ async function runWorkerStream(
 async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<void> {
   const handle = ctx.activeWorkers.get(agent.task_id);
   if (!handle) {
-    agent.retry_count += 1;
+    agent.blocked_retry_count += 1;
     agent.status = "pending";
     agent.blocked_reason = null;
     agent.blocked_since = null;
@@ -1138,7 +1261,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
     markStateDirty(ctx);
     return;
   }
-  agent.retry_count += 1;
+  agent.blocked_retry_count += 1;
   agent.status = "running";
   agent.blocked_reason = null;
   agent.blocked_since = null;
@@ -1191,7 +1314,7 @@ async function handleBlockedTasks(ctx: LoopContext): Promise<void> {
     const blockedAt = new Date(agent.blocked_since);
     const elapsed = (now.getTime() - blockedAt.getTime()) / 1000;
     if (elapsed <= BLOCKED_TIMEOUT_SECONDS) continue;
-    if (agent.retry_count < MAX_RETRY_COUNT && agent.agent_id) {
+    if (agent.blocked_retry_count < MAX_RETRY_COUNT && agent.agent_id) {
       await retryBlockedAgent(ctx, agent);
       continue;
     }
@@ -1213,7 +1336,9 @@ async function launchReadyTasks(ctx: LoopContext): Promise<void> {
   const taskMap = Object.fromEntries(ctx.config.tasks.map((t) => [t.id, t]));
   for (;;) {
     const readyTasks = getReadyTasks(ctx.graph, ctx.state.agents);
-    const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks);
+    const eligible = filterEligibleReadyTasks(ctx.state, ctx.config, readyTasks).filter(
+      (taskId) => !ctx.activeWorkers.has(taskId),
+    );
     if (eligible.length === 0) return;
     await Promise.all(
       eligible.map(async (taskId) => {
@@ -1501,14 +1626,15 @@ async function checkFailure(ctx: LoopContext): Promise<boolean> {
   return true;
 }
 
+type PlanningPhaseResult = { ok: true } | { ok: false; error: string };
+
 async function runPlanningPhase(
   config: OrchestratorConfig,
   runId: string,
   agentClient: AgentClient,
   repoStore: RepoStoreClient,
   apiKey: string,
-): Promise<boolean> {
-  await appendEvent(repoStore, runId, makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }));
+): Promise<PlanningPhaseResult> {
   try {
     const ghToken = process.env.GH_TOKEN!;
     const ghUser = await resolveGithubUsername(ghToken);
@@ -1565,15 +1691,9 @@ async function runPlanningPhase(
     config.tasks = canonPlan.tasks;
     config.delegation_map = canonPlan.delegation_map;
     await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-    await appendEvent(
-      repoStore,
-      runId,
-      makeEvent("planning_completed", `Planning completed: ${parsedTasks.length} tasks`, null, { phase_id: "planning", agent_kind: "phase" }),
-    );
-    return true;
+    return { ok: true };
   } catch (exc) {
-    await appendEvent(repoStore, runId, makeEvent("planning_failed", String(exc), null, { phase_id: "planning", agent_kind: "phase" }));
-    throw exc;
+    return { ok: false, error: String(exc) };
   }
 }
 
@@ -1607,11 +1727,41 @@ async function persistUnexpectedFailure(state: OrchestrationState, repoStore: Re
   }
 }
 
+const PERSISTED_STATE_READ_ATTEMPTS = 3;
+const PERSISTED_STATE_READ_RETRY_MS = 250;
+
+async function readStateJsonContent(repoStore: RepoStoreClient, runId: string): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < PERSISTED_STATE_READ_ATTEMPTS; attempt++) {
+    try {
+      return await repoStore.readFile(runId, "state.json");
+    } catch (err) {
+      lastErr = err;
+      if (attempt + 1 < PERSISTED_STATE_READ_ATTEMPTS) {
+        await delay(PERSISTED_STATE_READ_RETRY_MS);
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+async function refuseResumeWithEmptyState(repoStore: RepoStoreClient, runId: string, stateContent: string): Promise<void> {
+  if (stateContent.trim()) {
+    return;
+  }
+  const eventsContent = await repoStore.readFile(runId, "events.jsonl");
+  if (eventsContent.trim()) {
+    throw new Error(
+      `state.json is empty or missing for run ${runId} but events.jsonl has prior entries; refusing to reset orchestration progress`,
+    );
+  }
+}
+
 async function reattachWorkers(ctx: LoopContext): Promise<void> {
   const { Agent } = await import("@cursor/sdk");
   for (const [taskId, agent] of Object.entries(ctx.state.agents)) {
     if (!agent.agent_id) continue;
-    if (agent.status !== "launching" && agent.status !== "running" && agent.status !== "blocked") continue;
+    if (agent.status !== "launching" && agent.status !== "running") continue;
     if (ctx.activeWorkers.has(taskId)) continue;
     try {
       const resumeOptions: Parameters<typeof ctx.agentClient.resumeCloudAgent>[1] = {
@@ -1624,8 +1774,8 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       }
       const sdkAgent = await ctx.agentClient.resumeCloudAgent(agent.agent_id, resumeOptions);
       const runs = await Agent.listRuns(agent.agent_id, { runtime: "cloud", apiKey: ctx.apiKey });
-      const latest = runs.items[0];
-      if (!latest) {
+      const reattachRun = pickReattachRun(runs.items);
+      if (!reattachRun) {
         await safeDisposeAgent(sdkAgent);
         agent.status = "failed";
         agent.summary = "Resume: no runs found for agent";
@@ -1634,7 +1784,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       const handle: WorkerHandle = {
         taskId,
         sdkAgent,
-        run: latest,
+        run: reattachRun,
         assistantMessages: [],
         transcript: createTranscriptWriter({ repoStore: ctx.repoStore, runId: ctx.runId, taskId }),
         done: Promise.resolve(),
@@ -2207,6 +2357,10 @@ async function claimsOrchestrationLoop(ctx: LoopContext): Promise<void> {
 }
 
 async function orchestrationLoop(ctx: LoopContext): Promise<void> {
+  if (ctx.state.status === "stopped") {
+    console.info(`Run ${ctx.runId} is already stopped; skipping orchestration loop`);
+    return;
+  }
   ctx.wakeup = createWakeup();
   try {
     const existing = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
@@ -2240,6 +2394,16 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
 
   try {
     while (true) {
+      if (!ctx.stopRequested.value) {
+        try {
+          const stopContent = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+          if (stopContent) {
+            ctx.stopRequested.value = true;
+          }
+        } catch {
+          /* poller will retry */
+        }
+      }
       if (ctx.stopRequested.value) {
         await checkStopRequested(ctx);
         return;
@@ -2273,8 +2437,27 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   const apiKey = process.env.CURSOR_API_KEY ?? "";
   const ghToken = process.env.GH_TOKEN ?? "";
 
+  const stateContent = await readStateJsonContent(repoStore, runId);
+  await refuseResumeWithEmptyState(repoStore, runId, stateContent);
+  let parsedState: OrchestrationState | null = null;
+  let stateParseDetail: string | null = null;
+  if (stateContent.trim()) {
+    try {
+      parsedState = deserialize(stateContent);
+    } catch (parseErr) {
+      stateParseDetail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    }
+  }
+  if (parsedState?.status === "stopped") {
+    console.info(`Run ${runId} is already stopped; skipping orchestration`);
+    return;
+  }
+
   let planningRan = false;
   let planningOk = false;
+  let planningUsedFullPhase = false;
+  let planningFailedDetail: string | null = null;
+  let planningEvents: { emitStarted: boolean; completedDetail: string } | null = null;
   if (config.prompt && !config.tasks.length) {
     planningRan = true;
     const planContent = await repoStore.readFile(runId, "task-plan.json");
@@ -2290,21 +2473,25 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
         config.tasks = canonReuse.tasks;
         config.delegation_map = canonReuse.delegation_map;
         await repoStore.writeFile(runId, "config.yaml", toYaml(config));
-        await appendEvent(
-          repoStore,
-          runId,
-          makeEvent("planning_completed", `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`, null, {
-            phase_id: "planning",
-            agent_kind: "phase",
-          }),
-        );
+        planningEvents = {
+          emitStarted: false,
+          completedDetail: `Planning completed: ${parsedTasks.length} tasks (reused existing plan)`,
+        };
         planningOk = true;
-      } catch {
-        /* try full planning */
-      }
+      } catch {}
     }
     if (!planningOk) {
-      planningOk = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
+      planningUsedFullPhase = true;
+      const planningResult = await runPlanningPhase(config, runId, agentClient, repoStore, apiKey);
+      if (planningResult.ok) {
+        planningOk = true;
+        planningEvents = {
+          emitStarted: true,
+          completedDetail: `Planning completed: ${config.tasks.length} tasks`,
+        };
+      } else {
+        planningFailedDetail = planningResult.error;
+      }
     }
   }
 
@@ -2314,13 +2501,19 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   let state: OrchestrationState;
-  try {
-    state = await syncFromRepo(repoStore, runId);
-  } catch {
+  if (!stateContent.trim()) {
     state = createInitialState(config, runId);
+  } else if (parsedState) {
+    state = parsedState;
+  } else {
+    throw new Error(`Invalid state.json for run ${runId}: ${stateParseDetail ?? "parse failed"}`);
   }
 
   reconcileAgentsFromConfig(state, config);
+  const launchEvents = await readEvents(repoStore, runId);
+  if (reconcileInFlightLaunchesFromEvents(state, launchEvents)) {
+    await syncToRepo(repoStore, runId, state);
+  }
 
   if (state.status === "pending") {
     state.status = "running";
@@ -2335,7 +2528,46 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
   if (planningRan) {
     setPhaseStatus(state, "planning", planningOk ? "finished" : "failed", { timestamp: nowIso() });
+    if (planningOk && planningEvents) {
+      if (planningEvents.emitStarted) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_completed", planningEvents.completedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+      );
+    } else if (!planningOk && planningFailedDetail !== null) {
+      if (planningUsedFullPhase) {
+        await appendEvent(
+          repoStore,
+          runId,
+          makeEvent("planning_started", "Planning phase started", null, { phase_id: "planning", agent_kind: "phase" }),
+        );
+      }
+      await appendEvent(
+        repoStore,
+        runId,
+        makeEvent("planning_failed", planningFailedDetail, null, { phase_id: "planning", agent_kind: "phase" }),
+      );
+    }
     await syncToRepo(repoStore, runId, state);
+  }
+
+  if (planningRan && !planningOk) {
+    const failureMessage = planningFailedDetail ?? "Planning failed";
+    state.status = "failed";
+    state.error = failureMessage;
+    if (state.main_agent) {
+      state.main_agent.status = "failed";
+      state.main_agent.finished_at = nowIso();
+    }
+    await syncToRepo(repoStore, runId, state);
+    throw new Error(failureMessage);
   }
 
   if (usesClaimsPath(config) && state.phase === "plan") {

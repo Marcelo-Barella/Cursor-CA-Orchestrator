@@ -914,6 +914,174 @@ target:
     }
   });
 
+  it("resolveConfigPrecedence preserves mcp_servers from project YAML", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-orch-resolve-mcp-"));
+    const yamlPath = path.join(dir, "orch.yaml");
+    const yaml = `
+name: test
+model: composer-2
+prompt: "seed"
+repositories:
+  svc:
+    url: https://github.com/o/r
+    ref: main
+tasks:
+  - id: t1
+    repo: svc
+    prompt: p
+mcp_servers:
+  github:
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+target:
+  auto_create_pr: true
+  branch_prefix: cursor-orch
+`;
+    fs.writeFileSync(yamlPath, yaml, "utf8");
+    const prevCk = process.env.CURSOR_API_KEY;
+    const prevGh = process.env.GH_TOKEN;
+    process.env.CURSOR_API_KEY = "test-key";
+    process.env.GH_TOKEN = "test-token";
+    try {
+      const r = resolveConfigPrecedence(yamlPath, undefined);
+      const blocking = r.findings.filter((f) => f.is_blocking);
+      expect(blocking).toEqual([]);
+      expect(r.config.mcp_servers).toEqual({
+        github: {
+          type: "stdio",
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-github"],
+        },
+      });
+      expect(r.provenance.mcp_servers?.source).toBe("project");
+      const roundTrip = parseConfig(toYaml(r.config));
+      expect(roundTrip.mcp_servers).toEqual(r.config.mcp_servers);
+    } finally {
+      if (prevCk === undefined) delete process.env.CURSOR_API_KEY;
+      else process.env.CURSOR_API_KEY = prevCk;
+      if (prevGh === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = prevGh;
+    }
+  });
+
+  it("resolveConfigPrecedence preserves inventory from project YAML", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-orch-resolve-inv-"));
+    const yamlPath = path.join(dir, "orch.yaml");
+    const yaml = `
+name: test
+model: composer-2
+prompt: "seed"
+repositories:
+  svc:
+    url: https://github.com/o/r
+    ref: main
+tasks:
+  - id: t1
+    repo: svc
+    prompt: p
+inventory:
+  version: 1
+  source: declared
+  product_class: web_app
+  layers: [frontend, api]
+  explicit_deferrals: []
+  required_integrations: []
+  greenfield: false
+target:
+  auto_create_pr: true
+  branch_prefix: cursor-orch
+`;
+    fs.writeFileSync(yamlPath, yaml, "utf8");
+    const prevCk = process.env.CURSOR_API_KEY;
+    const prevGh = process.env.GH_TOKEN;
+    process.env.CURSOR_API_KEY = "test-key";
+    process.env.GH_TOKEN = "test-token";
+    try {
+      const r = resolveConfigPrecedence(yamlPath, undefined);
+      const blocking = r.findings.filter((f) => f.is_blocking);
+      expect(blocking).toEqual([]);
+      expect(r.config.inventory).toEqual({
+        version: 1,
+        source: "declared",
+        product_class: "web_app",
+        layers: ["frontend", "api"],
+        explicit_deferrals: [],
+        required_integrations: [],
+        greenfield: false,
+      });
+      expect(r.provenance.inventory?.source).toBe("project");
+      const roundTrip = parseConfig(toYaml(r.config));
+      expect(roundTrip.inventory).toEqual(r.config.inventory);
+    } finally {
+      if (prevCk === undefined) delete process.env.CURSOR_API_KEY;
+      else process.env.CURSOR_API_KEY = prevCk;
+      if (prevGh === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = prevGh;
+    }
+  });
+
+  it("resolveConfigPrecedence preserves inventory from inventory_file in project YAML", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-orch-resolve-inv-file-"));
+    const invPath = path.join(dir, "inv.json");
+    fs.writeFileSync(
+      invPath,
+      JSON.stringify({
+        version: 1,
+        source: "discovered",
+        product_class: "web_app",
+        layers: ["client", "api"],
+        explicit_deferrals: [],
+        required_integrations: [],
+        greenfield: false,
+      }),
+      "utf8",
+    );
+    const yamlPath = path.join(dir, "orch.yaml");
+    const yaml = `
+name: test
+model: composer-2
+prompt: "seed"
+repositories:
+  svc:
+    url: https://github.com/o/r
+    ref: main
+tasks:
+  - id: t1
+    repo: svc
+    prompt: p
+inventory_file: inv.json
+target:
+  auto_create_pr: true
+  branch_prefix: cursor-orch
+`;
+    fs.writeFileSync(yamlPath, yaml, "utf8");
+    const prevCk = process.env.CURSOR_API_KEY;
+    const prevGh = process.env.GH_TOKEN;
+    process.env.CURSOR_API_KEY = "test-key";
+    process.env.GH_TOKEN = "test-token";
+    try {
+      const r = resolveConfigPrecedence(yamlPath, undefined);
+      const blocking = r.findings.filter((f) => f.is_blocking);
+      expect(blocking).toEqual([]);
+      expect(r.config.inventory).toEqual({
+        version: 1,
+        source: "discovered",
+        product_class: "web_app",
+        layers: ["client", "api"],
+        explicit_deferrals: [],
+        required_integrations: [],
+        greenfield: false,
+      });
+      expect(r.provenance.inventory?.source).toBe("project");
+    } finally {
+      if (prevCk === undefined) delete process.env.CURSOR_API_KEY;
+      else process.env.CURSOR_API_KEY = prevCk;
+      if (prevGh === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = prevGh;
+    }
+  });
+
   it("parses mcp_servers with stdio and http entries", () => {
     const yaml = `
 name: t
