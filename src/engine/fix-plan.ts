@@ -16,7 +16,7 @@ export function buildFixTasks(input: {
   iteration: number;
 }): FixPlanBuildResult {
   const failed = input.results.filter((r) => !r.passed);
-  const withPaths: { gate: string; paths: string[]; summary: string; findingsText: string }[] = [];
+  const withPaths: { gate: string; repoAlias?: string; paths: string[]; summary: string; findingsText: string }[] = [];
   const withoutPaths: typeof withPaths = [];
 
   for (const r of failed) {
@@ -28,7 +28,7 @@ export function buildFixTasks(input: {
       ),
     ];
     const findingsText = r.findings.map((f) => `- [${f.severity}] ${f.message}${f.path ? ` (${f.path})` : ""}`).join("\n");
-    const entry = { gate: r.gate, paths, summary: r.summary, findingsText };
+    const entry = { gate: r.gate, repoAlias: r.repoAlias, paths, summary: r.summary, findingsText };
     if (paths.length > 0) withPaths.push(entry);
     else withoutPaths.push(entry);
   }
@@ -37,7 +37,7 @@ export function buildFixTasks(input: {
   for (const entry of withPaths) {
     tasks.push({
       id: `fix-iter-${input.iteration}-${entry.gate}`,
-      repo: input.repoAlias,
+      repo: entry.repoAlias ?? input.repoAlias,
       prompt: `Fix gate ${entry.gate} failures.\nSummary: ${entry.summary}\nFindings:\n${entry.findingsText}`,
       model: null,
       depends_on: [],
@@ -52,7 +52,7 @@ export function buildFixTasks(input: {
     const entry = withoutPaths[0]!;
     tasks.push({
       id: `fix-iter-${input.iteration}-${entry.gate}`,
-      repo: input.repoAlias,
+      repo: entry.repoAlias ?? input.repoAlias,
       prompt: `Fix gate ${entry.gate} failures.\nSummary: ${entry.summary}\nFindings:\n${entry.findingsText}`,
       model: null,
       depends_on: [],
@@ -63,9 +63,12 @@ export function buildFixTasks(input: {
     });
   } else if (withoutPaths.length > 1) {
     const findingsText = withoutPaths.map((e) => `## ${e.gate}\n${e.findingsText}`).join("\n");
+    const mergedRepo = withoutPaths.every((e) => (e.repoAlias ?? input.repoAlias) === (withoutPaths[0]!.repoAlias ?? input.repoAlias))
+      ? (withoutPaths[0]!.repoAlias ?? input.repoAlias)
+      : input.repoAlias;
     tasks.push({
       id: `fix-iter-${input.iteration}-merged`,
-      repo: input.repoAlias,
+      repo: mergedRepo,
       prompt: `Fix multiple gate failures without path claims.\n${findingsText}`,
       model: null,
       depends_on: [],

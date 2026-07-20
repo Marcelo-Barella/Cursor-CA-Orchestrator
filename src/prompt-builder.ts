@@ -18,7 +18,7 @@ export function buildWorkerPrompt(
   dependencyOutputs: Record<string, Record<string, unknown>>,
   opts?: WorkerPromptOpts,
 ): string {
-  const claimsMode = Boolean(opts?.claimsMode) || task.allowed_paths.length > 0;
+  const claimsMode = Boolean(opts?.claimsMode);
   const gitSection = claimsMode
     ? sectionGitClaims(opts?.runBranch, opts?.perTaskBranch)
     : opts?.runBranch
