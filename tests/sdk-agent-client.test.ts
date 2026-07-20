@@ -1,4 +1,4 @@
-import { UnsupportedRunOperationError } from "@cursor/sdk";
+import { UnsupportedRunOperationError, type RunOperation } from "@cursor/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SDKAssistantMessage, SdkAgent, SdkRun } from "../src/sdk/agent-client.js";
 import {
@@ -258,7 +258,7 @@ describe("tryDownloadJsonArtifact", () => {
   it("returns artifacts unsupported when listArtifacts is unsupported", async () => {
     const agent = mockAgent({
       listArtifacts: async () => {
-        throw new UnsupportedRunOperationError("listArtifacts");
+        throw new UnsupportedRunOperationError("listArtifacts" as RunOperation);
       },
     });
     const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");
@@ -269,7 +269,7 @@ describe("tryDownloadJsonArtifact", () => {
     const agent = mockAgent({
       listArtifacts: async () => [{ path: "cursor-orch-output.json", sizeBytes: 1, updatedAt: "" }],
       downloadArtifact: async () => {
-        throw new UnsupportedRunOperationError("downloadArtifact");
+        throw new UnsupportedRunOperationError("downloadArtifact" as RunOperation);
       },
     });
     const result = await tryDownloadJsonArtifact(agent, "cursor-orch-output.json");

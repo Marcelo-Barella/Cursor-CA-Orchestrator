@@ -184,7 +184,7 @@ export async function ensureRunBranchFromBase(
   return { error: null };
 }
 
-async function mergeBranches(
+export async function mergeBranches(
   token: string,
   owner: string,
   repo: string,

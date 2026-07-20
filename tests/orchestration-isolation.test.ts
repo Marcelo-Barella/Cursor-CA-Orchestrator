@@ -13,6 +13,7 @@ const workerTask: TaskConfig = {
   timeout_minutes: 30,
   create_repo: false,
   repo_config: null,
+  allowed_paths: [],
 };
 
 const LEAK_PROBE = "gh-token-leak-check";
@@ -26,6 +27,7 @@ const repoCreateTask: TaskConfig = {
   timeout_minutes: 30,
   create_repo: true,
   repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+  allowed_paths: [],
 };
 
 const plannerConfig: OrchestratorConfig = {
@@ -38,6 +40,7 @@ const plannerConfig: OrchestratorConfig = {
   tasks: [],
   target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "cursor-orch", branch_layout: "consolidated" },
   bootstrap_repo_name: "cursor-orch-bootstrap",
+  max_iterations: 10,
 };
 
 describe("orchestration isolation", () => {

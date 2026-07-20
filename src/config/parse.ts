@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import YAML from "yaml";
 import { normalizeModelFromYaml } from "../lib/model-selection.js";
+import { DEFAULT_MAX_ITERATIONS } from "./constants.js";
 import type {
   BranchLayout,
   DelegationGroupConfig,
@@ -98,6 +99,10 @@ function parseConfigFromRecord(r: Record<string, unknown>, inventory: InventoryM
     bootstrap_repo_name: (r.bootstrap_repo_name as string) ?? "cursor-orch-bootstrap",
     mcp_servers: mcpServers,
     inventory,
+    max_iterations:
+      typeof r.max_iterations === "number" && Number.isInteger(r.max_iterations) && r.max_iterations > 0
+        ? r.max_iterations
+        : DEFAULT_MAX_ITERATIONS,
   };
 }
 
@@ -152,6 +157,9 @@ export function toYaml(config: OrchestratorConfig): string {
   if (config.prompt) {
     data.prompt = config.prompt;
   }
+  if (config.max_iterations !== DEFAULT_MAX_ITERATIONS) {
+    data.max_iterations = config.max_iterations;
+  }
   if (Object.keys(config.repositories).length > 0) {
     data.repositories = Object.fromEntries(
       Object.entries(config.repositories).map(([k, v]) => [k, { url: v.url, ref: v.ref }]),
@@ -165,6 +173,7 @@ export function toYaml(config: OrchestratorConfig): string {
       if (t.timeout_minutes !== 30) td.timeout_minutes = t.timeout_minutes;
       if (t.create_repo) td.create_repo = t.create_repo;
       if (t.repo_config !== null) td.repo_config = t.repo_config;
+      if (t.allowed_paths?.length) td.allowed_paths = t.allowed_paths;
       return td;
     });
   }
@@ -247,6 +256,9 @@ function parseTasks(raw: unknown[]): TaskConfig[] {
       timeout_minutes: typeof o.timeout_minutes === "number" ? o.timeout_minutes : 30,
       create_repo: Boolean(o.create_repo),
       repo_config: (o.repo_config as Record<string, unknown>) ?? null,
+      allowed_paths: Array.isArray(o.allowed_paths)
+        ? (o.allowed_paths as unknown[]).map((p) => String(p))
+        : [],
     };
   });
 }

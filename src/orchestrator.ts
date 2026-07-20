@@ -5,6 +5,20 @@ import type { ModelSelectionConfig, OrchestratorConfig, TaskConfig } from "./con
 import { canonicalizeOrchestratorConfig } from "./config/canonicalize.js";
 import { parseConfig, toYaml } from "./config/parse.js";
 import { validateConfig } from "./config/validate.js";
+import { assertDisjointClaims, usesClaimsPath } from "./engine/claims.js";
+import { fanInTaskBranches } from "./engine/fan-in.js";
+import { buildFixPlanDocument, buildFixTasks } from "./engine/fix-plan.js";
+import { buildGatePrompt } from "./engine/gate-prompts.js";
+import {
+  GATE_IDS,
+  allGatesPassed,
+  failedGateIds,
+  gateResultPathsForRepos,
+  parseGateResult,
+  type GateResult,
+} from "./engine/gates.js";
+import { decideRecovery, type GateId } from "./engine/iteration-policy.js";
+import { nextPhase, shouldHonorStopBetweenPhases } from "./engine/phase-machine.js";
 import { buildPlannerPrompt, parseTaskPlan, waitForPlan } from "./planner.js";
 import { WORKER_OUTPUT_ARTIFACT_PATH, buildRepoCreationPrompt, buildWorkerPrompt } from "./prompt-builder.js";
 import { extractConstraintsFromPrompt, validateTaskPromptsAgainstConstraints } from "./lib/constraint-validator.js";
@@ -700,6 +714,8 @@ type LoopContext = {
   dirty: { value: boolean };
   wakeup: { resolve: () => void; promise: Promise<void> };
   stopRequested: { value: boolean };
+  lastGateResults: GateResult[];
+  pendingFixFromGates: boolean;
 };
 
 function markStateDirty(ctx: LoopContext): void {
@@ -738,7 +754,9 @@ async function launchWorkerAgent(
   const agent = ctx.state.agents[taskId]!;
   const [repoUrl, ref] = await resolveRepoForTask(task, ctx.config, depOutputs, ctx.ghToken);
   const planRef = planRefForConsolidatedRunLine(task, ref);
+  const claimsPath = usesClaimsPath(ctx.config);
   const runLine =
+    !claimsPath &&
     Boolean(planRef) &&
     !task.create_repo &&
     ctx.config.target.branch_layout === "consolidated" &&
@@ -747,6 +765,7 @@ async function launchWorkerAgent(
   let workerBranch = computeBranchName(ctx.config.target.branch_prefix, ctx.runId, taskId, agent.retry_count);
   let runBranchForPrompt: string | undefined;
   let promptLaunchRef: string | undefined;
+  let claimsMode = false;
   if (runLine && planRef) {
     const ownerRepo = parseGithubOwnerRepo(repoUrl);
     const rb = runBranchName(ctx.config.target.branch_prefix, ctx.runId, planRef);
@@ -802,7 +821,13 @@ async function launchWorkerAgent(
       }
       startingRefForSdk = workerBranch;
     }
-    runBranchForPrompt = workerBranch;
+    if (claimsPath) {
+      claimsMode = true;
+      const baseRef = planRef || ref;
+      runBranchForPrompt = runBranchName(ctx.config.target.branch_prefix, ctx.runId, baseRef);
+    } else {
+      runBranchForPrompt = workerBranch;
+    }
     promptLaunchRef = undefined;
   }
   const exampleRunBranch = runBranchName(ctx.config.target.branch_prefix, ctx.runId, "main");
@@ -819,6 +844,7 @@ async function launchWorkerAgent(
         runBranch: runBranchForPrompt,
         launchRef: promptLaunchRef,
         perTaskBranch: computeBranchName(ctx.config.target.branch_prefix, ctx.runId, taskId, agent.retry_count),
+        claimsMode,
       });
   const model: ModelSelectionConfig = task.model != null ? { id: task.model } : ctx.config.model;
   let sdkAgent: SdkAgent;
@@ -1267,6 +1293,7 @@ async function retryBlockedAgent(ctx: LoopContext, agent: AgentState): Promise<v
       info.ref = ref;
       info.planRef = planRefForConsolidatedRunLine(task, ref);
       info.runLine =
+        !usesClaimsPath(ctx.config) &&
         Boolean(info.planRef) &&
         !task.create_repo &&
         ctx.config.target.branch_layout === "consolidated" &&
@@ -1773,6 +1800,7 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
           info.ref = ref;
           info.planRef = planRefForConsolidatedRunLine(task, ref);
           info.runLine =
+            !usesClaimsPath(ctx.config) &&
             Boolean(info.planRef) &&
             !task.create_repo &&
             ctx.config.target.branch_layout === "consolidated" &&
@@ -1787,6 +1815,611 @@ async function reattachWorkers(ctx: LoopContext): Promise<void> {
       agent.status = "failed";
       agent.summary = `Resume failed: ${err instanceof Error ? err.message : String(err)}`;
       markStateDirty(ctx);
+    }
+  }
+}
+
+async function waitForWakeup(ctx: LoopContext): Promise<void> {
+  const wakeController = new AbortController();
+  const timer = delay(MAX_WAKEUP_INTERVAL_MS, undefined, { signal: wakeController.signal }).catch(() => {});
+  await Promise.race([ctx.wakeup.promise, timer]);
+  wakeController.abort();
+}
+
+function selectPrimaryRepoAlias(config: OrchestratorConfig): string {
+  const hints = config.inventory?.repo_hints;
+  if (hints) {
+    for (const [alias, hint] of Object.entries(hints)) {
+      if (hint.has_server && config.repositories[alias] && config.tasks.some((t) => !t.create_repo && t.repo === alias)) {
+        return alias;
+      }
+    }
+  }
+  const first = config.tasks.find((t) => !t.create_repo);
+  if (!first) {
+    throw new Error("No non-create task available for gate primary repo");
+  }
+  return first.repo;
+}
+
+function runBranchesForConfig(config: OrchestratorConfig, runId: string): { alias: string; runBranch: string; repoUrl: string; baseRef: string }[] {
+  const seen = new Set<string>();
+  const out: { alias: string; runBranch: string; repoUrl: string; baseRef: string }[] = [];
+  for (const task of config.tasks) {
+    if (task.create_repo) continue;
+    const rc = config.repositories[task.repo];
+    if (!rc) continue;
+    const key = `${task.repo}\0${rc.ref}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      alias: task.repo,
+      runBranch: runBranchName(config.target.branch_prefix, runId, rc.ref),
+      repoUrl: rc.url,
+      baseRef: rc.ref,
+    });
+  }
+  return out;
+}
+
+async function resolveBootstrapCoords(ctx: LoopContext): Promise<{ owner: string; repo: string }> {
+  const owner = process.env.BOOTSTRAP_OWNER?.trim() || (await resolveGithubUsername(ctx.ghToken));
+  const repo = process.env.BOOTSTRAP_REPO?.trim() || ctx.config.bootstrap_repo_name;
+  return { owner, repo };
+}
+
+async function applyStopIfRequested(ctx: LoopContext): Promise<boolean> {
+  if (!ctx.stopRequested.value) {
+    const content = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+    if (!content) return false;
+    ctx.stopRequested.value = true;
+  }
+  if (!shouldHonorStopBetweenPhases(ctx.state.phase)) return false;
+  const stopped = await checkStopRequested(ctx);
+  if (stopped) {
+    ctx.state.phase = nextPhase(ctx.state.phase, "stop");
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+  }
+  return stopped;
+}
+
+async function runImplementPhase(ctx: LoopContext): Promise<void> {
+  while (true) {
+    if (ctx.stopRequested.value) return;
+    await handleBlockedTasks(ctx);
+    await launchReadyTasks(ctx);
+    await writeProgress(ctx);
+    if (await checkFailure(ctx)) {
+      ctx.state.phase = "failed";
+      return;
+    }
+    if (ctx.activeWorkers.size === 0 && checkAllFinished(ctx.state)) {
+      ctx.state.phase = nextPhase(ctx.state.phase, "implement_done");
+      markStateDirty(ctx);
+      await writeProgress(ctx);
+      return;
+    }
+    await waitForWakeup(ctx);
+  }
+}
+
+async function runIntegratePhase(ctx: LoopContext): Promise<void> {
+  const groups = new Map<
+    string,
+    {
+      owner: string;
+      repo: string;
+      baseRef: string;
+      runBranch: string;
+      taskBranchesById: Record<string, string>;
+      taskIds: string[];
+    }
+  >();
+
+  for (const task of ctx.config.tasks) {
+    if (task.create_repo) continue;
+    const agent = ctx.state.agents[task.id];
+    if (!agent || agent.status !== "finished") continue;
+    if (!agent.branch_name) {
+      ctx.state.error = `Task '${task.id}' finished without branch_name; cannot fan-in`;
+      ctx.state.status = "failed";
+      ctx.state.phase = "failed";
+      await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+      return;
+    }
+    const rc = ctx.config.repositories[task.repo];
+    if (!rc) continue;
+    const ownerRepo = parseGithubOwnerRepo(rc.url);
+    if (!ownerRepo) continue;
+    const key = groupKeyForRepo(rc.url, rc.ref);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        owner: ownerRepo.owner,
+        repo: ownerRepo.repo,
+        baseRef: rc.ref,
+        runBranch: runBranchName(ctx.config.target.branch_prefix, ctx.runId, rc.ref),
+        taskBranchesById: {},
+        taskIds: [],
+      });
+    }
+    const g = groups.get(key)!;
+    g.taskIds.push(task.id);
+    g.taskBranchesById[task.id] = agent.branch_name;
+  }
+
+  for (const g of groups.values()) {
+    const result = await fanInTaskBranches(ctx.ghToken, {
+      owner: g.owner,
+      repo: g.repo,
+      baseRef: g.baseRef,
+      runBranch: g.runBranch,
+      taskBranchesById: g.taskBranchesById,
+      taskIds: g.taskIds,
+      graph: ctx.graph,
+    });
+    if (!result.ok) {
+      if (result.conflict) {
+        const decision = decideRecovery({
+          failedGates: [],
+          gatesFailedAfterFix: ctx.state.gates_failed_after_fix as GateId[],
+          claimCollision: true,
+          iteration: ctx.state.iteration,
+          maxIterations: ctx.config.max_iterations,
+        });
+        ctx.state.iteration = decision.iteration;
+        if (decision.action === "fail_cap") {
+          ctx.state.error = result.error;
+          ctx.state.status = "failed";
+          ctx.state.phase = nextPhase(ctx.state.phase, "cap_exceeded");
+          await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+          return;
+        }
+        ctx.state.phase = nextPhase(ctx.state.phase, "replan_scheduled");
+        await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+        return;
+      }
+      ctx.state.error = result.error;
+      ctx.state.status = "failed";
+      ctx.state.phase = "failed";
+      await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+      return;
+    }
+  }
+
+  ctx.state.phase = nextPhase(ctx.state.phase, "integrate_ok");
+  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+}
+
+function repoAliasesForGates(config: OrchestratorConfig, runId: string): string[] {
+  return runBranchesForConfig(config, runId).map((b) => b.alias);
+}
+
+async function launchGateAgent(
+  ctx: LoopContext,
+  gate: GateId,
+  repoUrl: string,
+  runBranch: string,
+  bootstrap: { owner: string; repo: string },
+  otherRunBranches: string[],
+  repoAlias?: string,
+): Promise<void> {
+  let prompt = buildGatePrompt({
+    gate,
+    runId: ctx.runId,
+    repoUrl,
+    runBranch,
+    bootstrapOwner: bootstrap.owner,
+    bootstrapRepo: bootstrap.repo,
+    repoAlias,
+  });
+  if (otherRunBranches.length > 0) {
+    prompt = `${prompt}\nOther run branches in this orchestration: ${otherRunBranches.join(", ")}`;
+  }
+  const sdkAgent = await ctx.agentClient.createCloudAgent({
+    apiKey: ctx.apiKey,
+    model: ctx.config.model,
+    repoUrl,
+    startingRef: runBranch,
+    autoCreatePR: false,
+    skipReviewerRequest: true,
+    mcpServers: nonEmptyMcpServers(ctx.config.mcp_servers),
+  });
+  try {
+    const run = await sdkAgent.send(prompt);
+    await run.wait();
+  } finally {
+    await safeDisposeAgent(sdkAgent);
+  }
+}
+
+async function clearGateResultsOnBoard(ctx: LoopContext): Promise<void> {
+  for (const target of gateResultPathsForRepos(repoAliasesForGates(ctx.config, ctx.runId))) {
+    await ctx.repoStore.deleteFile(ctx.runId, target.path);
+  }
+}
+
+async function inferResumePhase(
+  repoStore: RepoStoreClient,
+  runId: string,
+  state: OrchestrationState,
+  config: OrchestratorConfig,
+): Promise<OrchestrationState["phase"]> {
+  const targets = gateResultPathsForRepos(repoAliasesForGates(config, runId));
+  const gateResults: GateResult[] = [];
+  let anyGateFile = false;
+  for (const target of targets) {
+    try {
+      const raw = await repoStore.readFile(runId, target.path);
+      if (!raw) continue;
+      anyGateFile = true;
+      gateResults.push({ ...parseGateResult(JSON.parse(raw) as unknown), repoAlias: target.repoAlias });
+    } catch {
+      /* ignore */
+    }
+  }
+  if (anyGateFile) {
+    if (gateResults.some((r) => !r.passed)) return "fix";
+    if (gateResults.length === targets.length && allGatesPassed(gateResults)) return "finalize";
+    return "gate";
+  }
+
+  const agents = Object.values(state.agents);
+  if (agents.length === 0) return "plan";
+  if (agents.some((a) => !isTerminalStatus(a.status))) return "implement";
+  return "integrate";
+}
+
+async function readGateResultsFromBoard(ctx: LoopContext): Promise<GateResult[]> {
+  const results: GateResult[] = [];
+  for (const target of gateResultPathsForRepos(repoAliasesForGates(ctx.config, ctx.runId))) {
+    const raw = await ctx.repoStore.readFile(ctx.runId, target.path);
+    if (!raw) {
+      results.push({
+        gate: target.gate,
+        passed: false,
+        findings: [{ severity: "blocking", message: `Missing gate result at ${target.path}` }],
+        summary: `Missing gate result for ${target.gate}`,
+        repoAlias: target.repoAlias,
+      });
+      continue;
+    }
+    try {
+      results.push({ ...parseGateResult(JSON.parse(raw) as unknown), repoAlias: target.repoAlias });
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      results.push({
+        gate: target.gate,
+        passed: false,
+        findings: [{ severity: "blocking", message: `Invalid gate result: ${detail}` }],
+        summary: `Invalid gate result for ${target.gate}`,
+        repoAlias: target.repoAlias,
+      });
+    }
+  }
+  return results;
+}
+
+async function runGatePhase(ctx: LoopContext): Promise<void> {
+  const allBranches = runBranchesForConfig(ctx.config, ctx.runId);
+  const multiRepo = allBranches.length > 1;
+  const bootstrap = await resolveBootstrapCoords(ctx);
+
+  await clearGateResultsOnBoard(ctx);
+
+  await Promise.all(
+    allBranches.flatMap((branch) => {
+      const otherRunBranches = allBranches.filter((b) => b.alias !== branch.alias).map((b) => b.runBranch);
+      return GATE_IDS.map((gate) =>
+        launchGateAgent(
+          ctx,
+          gate,
+          branch.repoUrl,
+          branch.runBranch,
+          bootstrap,
+          otherRunBranches,
+          multiRepo ? branch.alias : undefined,
+        ),
+      );
+    }),
+  );
+
+  const results = await readGateResultsFromBoard(ctx);
+  ctx.lastGateResults = results;
+
+  if (allGatesPassed(results)) {
+    ctx.state.gates_failed_after_fix = [];
+    ctx.state.phase = nextPhase(ctx.state.phase, "gates_pass");
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+    return;
+  }
+
+  const failed = failedGateIds(results);
+  const decision = decideRecovery({
+    failedGates: failed,
+    gatesFailedAfterFix: ctx.state.gates_failed_after_fix as GateId[],
+    claimCollision: false,
+    iteration: ctx.state.iteration,
+    maxIterations: ctx.config.max_iterations,
+  });
+
+  if (decision.action === "fail_cap") {
+    ctx.state.error = results
+      .filter((r) => !r.passed)
+      .map((r) => `${r.gate}: ${r.summary}`)
+      .join("; ");
+    ctx.state.status = "failed";
+    ctx.state.phase = nextPhase(ctx.state.phase, "cap_exceeded");
+    const gateSection = results
+      .map((r) => {
+        const findings = r.findings.map((f) => `- [${f.severity}] ${f.message}${f.path ? ` (${f.path})` : ""}`).join("\n");
+        return `### ${r.gate}\npassed: ${r.passed}\n${r.summary}${findings ? `\n${findings}` : ""}`;
+      })
+      .join("\n\n");
+    await ctx.repoStore.writeFile(
+      ctx.runId,
+      "summary.md",
+      `${buildSummaryMd(ctx.config, ctx.state)}\n\n## Gate results\n\n${gateSection}\n`,
+    );
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+    await appendEvent(
+      ctx.repoStore,
+      ctx.runId,
+      makeEvent("orchestration_failed", `Orchestration failed: ${ctx.state.error}`, null, {
+        agent_node_id: "main-orchestrator",
+        agent_kind: "main",
+      }),
+    );
+    return;
+  }
+
+  ctx.state.iteration = decision.iteration;
+  ctx.pendingFixFromGates = decision.action === "fix";
+  if (decision.action === "fix") {
+    ctx.state.phase = nextPhase(ctx.state.phase, "fix_scheduled");
+  } else {
+    ctx.state.phase = nextPhase(ctx.state.phase, "replan_scheduled");
+  }
+  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+}
+
+async function runFixPhase(ctx: LoopContext): Promise<void> {
+  if (ctx.lastGateResults.length === 0) {
+    ctx.lastGateResults = await readGateResultsFromBoard(ctx);
+    if (ctx.lastGateResults.some((r) => !r.passed)) {
+      ctx.pendingFixFromGates = true;
+    }
+  }
+
+  const primaryAlias = selectPrimaryRepoAlias(ctx.config);
+  const built = buildFixTasks({
+    results: ctx.lastGateResults,
+    repoAlias: primaryAlias,
+    iteration: ctx.state.iteration,
+  });
+
+  if (!built.ok) {
+    // Iteration already bumped when entering fix from gate; escalate without a second bump.
+    if (ctx.state.iteration >= ctx.config.max_iterations) {
+      ctx.state.error = "Fix plan claim collision and iteration cap exceeded";
+      ctx.state.status = "failed";
+      ctx.state.phase = nextPhase(ctx.state.phase, "cap_exceeded");
+      await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+      return;
+    }
+    ctx.state.phase = nextPhase(ctx.state.phase, "replan_scheduled");
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+    return;
+  }
+
+  await ctx.repoStore.writeFile(ctx.runId, "fix-plan.json", JSON.stringify(buildFixPlanDocument(built.tasks), null, 2));
+
+  if (ctx.pendingFixFromGates) {
+    ctx.state.gates_failed_after_fix = [];
+    ctx.state.gates_failed_after_fix = failedGateIds(ctx.lastGateResults);
+    ctx.pendingFixFromGates = false;
+  }
+
+  const existingIds = new Set(ctx.config.tasks.map((t) => t.id));
+  for (const task of built.tasks) {
+    if (!existingIds.has(task.id)) {
+      ctx.config.tasks.push(task);
+      existingIds.add(task.id);
+    }
+  }
+  const liveClaimTasks = ctx.config.tasks.filter((t) => {
+    if (built.tasks.some((ft) => ft.id === t.id)) return true;
+    const status = ctx.state.agents[t.id]?.status;
+    return !status || !isTerminalStatus(status);
+  });
+  assertDisjointClaims(liveClaimTasks);
+  const canon = canonicalizeOrchestratorConfig(ctx.config);
+  ctx.config.repositories = canon.repositories;
+  ctx.config.tasks = canon.tasks;
+  ctx.config.delegation_map = canon.delegation_map;
+  await ctx.repoStore.writeFile(ctx.runId, "config.yaml", toYaml(ctx.config));
+  reconcileAgentsFromConfig(ctx.state, ctx.config);
+  ctx.graph = buildDependencyGraph(ctx.config.tasks);
+  ctx.state.phase = nextPhase(ctx.state.phase, "fix_scheduled");
+  markStateDirty(ctx);
+  await writeProgress(ctx);
+}
+
+async function runReplanPhase(ctx: LoopContext): Promise<void> {
+  ctx.config.tasks = [];
+  ctx.config.delegation_map = null;
+  ctx.state.agents = {};
+  ctx.state.delegation_phase_index = null;
+  ctx.state.delegation_group_index = null;
+  ctx.state.task_phase_map = {};
+  ctx.activeWorkers.clear();
+  ctx.lastGateResults = [];
+  ctx.pendingFixFromGates = false;
+  ctx.state.gates_failed_after_fix = [];
+
+  if (!ctx.config.prompt) {
+    ctx.state.error = "Replan required but config.prompt is empty";
+    ctx.state.status = "failed";
+    ctx.state.phase = "failed";
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+    return;
+  }
+
+  const planningResult = await runPlanningPhase(ctx.config, ctx.runId, ctx.agentClient, ctx.repoStore, ctx.apiKey);
+  if (!planningResult.ok) {
+    ctx.state.error = planningResult.error;
+    ctx.state.status = "failed";
+    ctx.state.phase = "failed";
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+    return;
+  }
+  validateConfig(ctx.config);
+  assertDisjointClaims(ctx.config.tasks);
+  reconcileAgentsFromConfig(ctx.state, ctx.config);
+  ctx.graph = buildDependencyGraph(ctx.config.tasks);
+  ctx.state.phase = nextPhase(ctx.state.phase, "replan_scheduled");
+  ctx.state.phase = nextPhase(ctx.state.phase, "plan_ready");
+  markStateDirty(ctx);
+  await writeProgress(ctx);
+}
+
+async function runFinalizePhase(ctx: LoopContext): Promise<void> {
+  if (ctx.config.target.auto_create_pr) {
+    const urls: Record<string, string> = {};
+    const errors: Record<string, string> = {};
+    for (const group of runBranchesForConfig(ctx.config, ctx.runId)) {
+      const ownerRepo = parseGithubOwnerRepo(group.repoUrl);
+      if (!ownerRepo) {
+        errors[group.alias] = `not a GitHub repo URL: ${group.repoUrl}`;
+        continue;
+      }
+      const title = `cursor-orch: ${ctx.config.name} (${ctx.runId})`;
+      const body = `Orchestration run ${ctx.runId}\n\nRepo: ${group.alias}`;
+      const r = await openPullRequestForRunBranch(ctx.ghToken, {
+        groupKey: groupKeyForRepo(group.repoUrl, group.baseRef),
+        owner: ownerRepo.owner,
+        repo: ownerRepo.repo,
+        baseRef: group.baseRef,
+        runBranch: group.runBranch,
+        title,
+        body,
+      });
+      if (r.error) {
+        errors[group.alias] = r.error;
+      } else if (r.prUrl) {
+        urls[group.alias] = r.prUrl;
+      }
+      await appendEvent(
+        ctx.repoStore,
+        ctx.runId,
+        makeEvent(
+          r.error ? "consolidated_pr_failed" : "consolidated_pr_created",
+          r.error ?? `Pull request ${r.prUrl ?? ""}`,
+          null,
+          { agent_node_id: "main-orchestrator", agent_kind: "main", payload: { group_key: group.alias } },
+        ),
+      );
+    }
+    ctx.state.consolidated_pr_urls = Object.keys(urls).length ? urls : null;
+    ctx.state.consolidated_pr_errors = Object.keys(errors).length ? errors : null;
+  }
+
+  ctx.state.status = "completed";
+  ctx.state.phase = nextPhase(ctx.state.phase, "finalize_done");
+  await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+  await ctx.repoStore.writeFile(ctx.runId, "summary.md", buildSummaryMd(ctx.config, ctx.state));
+  await appendEvent(
+    ctx.repoStore,
+    ctx.runId,
+    makeEvent("orchestration_completed", "All tasks completed", null, {
+      agent_node_id: "main-orchestrator",
+      agent_kind: "main",
+    }),
+  );
+  console.info("Orchestration completed successfully");
+}
+
+async function claimsOrchestrationLoop(ctx: LoopContext): Promise<void> {
+  ctx.wakeup = createWakeup();
+  try {
+    const existing = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+    if (existing) {
+      ctx.stopRequested.value = true;
+    }
+  } catch {
+    /* ignore */
+  }
+  const pollController = new AbortController();
+  const stopPoller = (async () => {
+    while (!ctx.stopRequested.value) {
+      try {
+        await delay(STOP_POLL_INTERVAL_MS, undefined, { signal: pollController.signal });
+      } catch {
+        return;
+      }
+      if (ctx.stopRequested.value) return;
+      try {
+        const content = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
+        if (content) {
+          ctx.stopRequested.value = true;
+          triggerWakeup(ctx);
+          return;
+        }
+      } catch {
+        /* retry */
+      }
+    }
+  })();
+
+  try {
+    while (true) {
+      if (await applyStopIfRequested(ctx)) return;
+
+      const phase = ctx.state.phase;
+      switch (phase) {
+        case "plan":
+          ctx.state.phase = nextPhase(phase, "plan_ready");
+          await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+          break;
+        case "implement":
+          await runImplementPhase(ctx);
+          break;
+        case "integrate":
+          await runIntegratePhase(ctx);
+          break;
+        case "gate":
+          await runGatePhase(ctx);
+          break;
+        case "fix":
+          await runFixPhase(ctx);
+          break;
+        case "replan":
+          await runReplanPhase(ctx);
+          break;
+        case "finalize":
+          await runFinalizePhase(ctx);
+          break;
+        case "completed":
+        case "failed":
+        case "stopped":
+          return;
+        default: {
+          const _exhaustive: never = phase;
+          throw new Error(`Unhandled phase: ${String(_exhaustive)}`);
+        }
+      }
+
+      if (ctx.state.phase === "completed" || ctx.state.phase === "failed" || ctx.state.phase === "stopped") {
+        return;
+      }
+      if (await applyStopIfRequested(ctx)) return;
+    }
+  } finally {
+    ctx.stopRequested.value = true;
+    triggerWakeup(ctx);
+    pollController.abort();
+    await stopPoller.catch(() => {});
+    for (const handle of ctx.activeWorkers.values()) {
+      await safeDisposeAgent(handle.sdkAgent);
     }
   }
 }
@@ -1931,12 +2564,22 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   validateConfig(config);
+  if (usesClaimsPath(config)) {
+    assertDisjointClaims(config.tasks);
+  }
 
   let state: OrchestrationState;
+  let isFreshRun = false;
   if (!stateContent.trim()) {
     state = createInitialState(config, runId);
+    isFreshRun = true;
   } else if (parsedState) {
+    const raw = JSON.parse(stateContent) as Record<string, unknown>;
+    const hadPersistedPhase = typeof raw.phase === "string";
     state = parsedState;
+    if (!hadPersistedPhase && state.status !== "pending") {
+      state.phase = await inferResumePhase(repoStore, runId, state, config);
+    }
   } else {
     throw new Error(`Invalid state.json for run ${runId}: ${stateParseDetail ?? "parse failed"}`);
   }
@@ -1948,6 +2591,7 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   if (state.status === "pending") {
+    isFreshRun = true;
     state.status = "running";
     state.started_at = nowIso();
     seedMainAgent(state, { agent_id: state.orchestrator_agent_id, status: "running", started_at: state.started_at });
@@ -2002,6 +2646,11 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     throw new Error(failureMessage);
   }
 
+  if (usesClaimsPath(config) && state.phase === "plan" && isFreshRun) {
+    state.phase = nextPhase(state.phase, "plan_ready");
+    await syncToRepo(repoStore, runId, state);
+  }
+
   const graph = buildDependencyGraph(config.tasks);
   const ctx: LoopContext = {
     state,
@@ -2016,11 +2665,17 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
     dirty: { value: true },
     wakeup: createWakeup(),
     stopRequested: { value: false },
+    lastGateResults: [],
+    pendingFixFromGates: false,
   };
 
   try {
     await reattachWorkers(ctx);
-    await orchestrationLoop(ctx);
+    if (usesClaimsPath(config)) {
+      await claimsOrchestrationLoop(ctx);
+    } else {
+      await orchestrationLoop(ctx);
+    }
   } catch (exc) {
     console.error("Orchestration loop failed", exc);
     await persistUnexpectedFailure(state, repoStore, runId, exc);

@@ -26,3 +26,18 @@ If the local summary below is ambiguous or outdated, fetch that page (for exampl
 - Errors (`AuthenticationError`, `RateLimitError`, `ConfigurationError`, `NetworkError`, `UnsupportedRunOperationError`)
 
 Agents working in this repo should load that documentation into context before reasoning about `@cursor/sdk` SDK behavior.
+
+## Learned User Preferences
+
+- Default cloud agent model should be Grok 4.5 high (non-fast); resolve the real id from `Cursor.models.list` (for example `cursor-grok-4.5-high`) before hardcoding — never invent suffix ids like `gpt-5.5-high`.
+- The orchestrator Cloud Agent should delegate implementation to worker agents (repos, gists, code), not write product code itself.
+- Plan "missing constraint" failures should auto-repair via a spawned fix agent so the run continues.
+- Planner parallelism: put independent different-repo tasks in the same `parallel_group`; same-repo tasks may share a group when `allowed_paths` claims are disjoint (orchestrator fans task branches into one run branch / PR); serialize only for real ordering or shared artifacts.
+- Orchestration v3: bounded iterate-until-clean (default `max_iterations` 10, override via config or `CURSOR_ORCH_MAX_ITERATIONS`); same-repo parallelism via claims + per-task branches + orchestrator fan-in; parallel `code_quality`, `code_review`, and `computer_use` gates after fan-in; computer-use tests target a local app in the cloud VM.
+
+## Learned Workspace Facts
+
+- CLI package is `cursor-orch` in repo `cursor-ca-orchestrator`: Node 20+ TypeScript CLI that orchestrates Cursor Cloud Agents across GitHub repos.
+- Coordination uses a bootstrap GitHub board repo (commonly `cursor-orch-bootstrap`; `BOOTSTRAP_OWNER` / `BOOTSTRAP_REPO`) with per-run branches as the bulletin board.
+- Agent runtime uses `@cursor/sdk` (not legacy `@cursor/february`); `/model` must use catalog ids plus params/variants.
+- SaaS UI companion is a separate repo named `curcitric-orch` (Next.js + Supabase; plans use Stitch MCP for screens).

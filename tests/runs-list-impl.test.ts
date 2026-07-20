@@ -15,9 +15,10 @@ function baseCfg(): OrchestratorConfig {
     model: { id: "m" },
     prompt: "",
     repositories: {},
-    tasks: [{ id: "a", repo: "o/r", prompt: "", model: null, depends_on: [], timeout_minutes: 1, create_repo: false, repo_config: null }],
+    tasks: [{ id: "a", repo: "o/r", prompt: "", model: null, depends_on: [], timeout_minutes: 1, create_repo: false, repo_config: null, allowed_paths: [] }],
     target: { auto_create_pr: true, consolidate_prs: false, branch_prefix: "x", branch_layout: "consolidated" },
     bootstrap_repo_name: "b",
+    max_iterations: 10,
   };
 }
 

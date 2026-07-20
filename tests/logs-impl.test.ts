@@ -21,6 +21,7 @@ function baseConfig(): OrchestratorConfig {
         timeout_minutes: 30,
         create_repo: false,
         repo_config: null,
+        allowed_paths: [],
       },
       {
         id: "t2",
@@ -31,10 +32,12 @@ function baseConfig(): OrchestratorConfig {
         timeout_minutes: 30,
         create_repo: false,
         repo_config: null,
+        allowed_paths: [],
       },
     ],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "p", branch_layout: "per_task" },
     bootstrap_repo_name: "b",
+    max_iterations: 10,
   };
 }
 

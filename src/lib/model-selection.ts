@@ -1,7 +1,8 @@
 import type { ModelListItem } from "@cursor/sdk";
+import { DEFAULT_MODEL_ID } from "../config/constants.js";
 import type { ModelParameterConfig, ModelSelectionConfig } from "../config/types.js";
 
-export function normalizeModelFromYaml(raw: unknown, fallbackId = "composer-2"): ModelSelectionConfig {
+export function normalizeModelFromYaml(raw: unknown, fallbackId = DEFAULT_MODEL_ID): ModelSelectionConfig {
   if (raw === undefined || raw === null) {
     return { id: fallbackId };
   }

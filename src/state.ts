@@ -32,6 +32,18 @@ export interface LifecycleAgentState {
   finished_at: string | null;
 }
 
+export type OrchestrationPhase =
+  | "plan"
+  | "implement"
+  | "integrate"
+  | "gate"
+  | "fix"
+  | "replan"
+  | "finalize"
+  | "completed"
+  | "failed"
+  | "stopped";
+
 export interface OrchestrationState {
   orchestration_id: string;
   run_id: string;
@@ -48,6 +60,9 @@ export interface OrchestrationState {
   consolidated_pr_urls: Record<string, string> | null;
   consolidated_pr_errors: Record<string, string> | null;
   repo_run_head: Record<string, string> | null;
+  phase: OrchestrationPhase;
+  iteration: number;
+  gates_failed_after_fix: string[];
 }
 
 export interface OrchestrationEvent {
@@ -149,6 +164,9 @@ export function createInitialState(config: OrchestratorConfig, runId: string): O
     consolidated_pr_urls: null,
     consolidated_pr_errors: null,
     repo_run_head: null,
+    phase: "plan",
+    iteration: 0,
+    gates_failed_after_fix: [],
   };
   ensureLifecycleAgents(state);
   return state;
@@ -332,6 +350,11 @@ export function deserialize(jsonStr: string): OrchestrationState {
       raw.repo_run_head && typeof raw.repo_run_head === "object" && raw.repo_run_head !== null
         ? (raw.repo_run_head as Record<string, string>)
         : null,
+    phase: (typeof raw.phase === "string" ? raw.phase : "plan") as OrchestrationPhase,
+    iteration: typeof raw.iteration === "number" ? raw.iteration : 0,
+    gates_failed_after_fix: Array.isArray(raw.gates_failed_after_fix)
+      ? (raw.gates_failed_after_fix as unknown[]).map((g) => String(g))
+      : [],
   };
   ensureLifecycleAgents(state);
   return state;

@@ -81,10 +81,12 @@ function singleTaskConfig(): OrchestratorConfig {
         timeout_minutes: 30,
         create_repo: false,
         repo_config: null,
+        allowed_paths: [],
       },
     ],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
+    max_iterations: 10,
   };
 }
 
@@ -99,6 +101,7 @@ function promptOnlyConfig(): OrchestratorConfig {
     tasks: [],
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
+    max_iterations: 10,
   };
 }
 
@@ -116,6 +119,7 @@ function twoTaskChainConfig(): OrchestratorConfig {
         timeout_minutes: 30,
         create_repo: false,
         repo_config: null,
+        allowed_paths: [],
       },
       {
         id: "t2",
@@ -126,6 +130,7 @@ function twoTaskChainConfig(): OrchestratorConfig {
         timeout_minutes: 30,
         create_repo: false,
         repo_config: null,
+        allowed_paths: [],
       },
     ],
   };
@@ -195,6 +200,7 @@ function twoRepoParallelTaskConfig(): OrchestratorConfig {
     timeout_minutes: 30,
     create_repo: false,
     repo_config: null,
+    allowed_paths: [],
   });
   return {
     name: "demo",
@@ -210,6 +216,7 @@ function twoRepoParallelTaskConfig(): OrchestratorConfig {
     },
     target: { auto_create_pr: false, consolidate_prs: false, branch_prefix: "cursor-orch", branch_layout: "per_task" },
     bootstrap_repo_name: "cursor-orch-bootstrap",
+    max_iterations: 10,
   };
 }
 
@@ -698,7 +705,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.status).toBe("failed");
     expect(state.agents.t1.status).toBe("failed");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
+    expect(events.some((e: { event_type: string; task_id?: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
   });
 
   it("stays failed when persisting agent output to the run branch fails", async () => {
@@ -733,7 +740,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.status).toBe("failed");
     expect(state.agents.t1.summary).toBe("Failed to persist worker output to agent-t1.json on the run branch");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
+    expect(events.some((e: { event_type: string; task_id?: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
     const failedEvent = events.find((e: { event_type: string; task_id: string }) => e.event_type === "task_failed" && e.task_id === "t1");
     expect(failedEvent?.detail).toContain("Failed to persist worker output");
     expect(failedEvent?.detail).not.toBe("Task t1 failed: ok");
@@ -816,7 +823,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
     const failedEvent = events.find((e) => e.event_type === "task_failed" && e.task_id === "t1");
     expect(failedEvent?.payload?.payload_source).toBe("none");
-    expect(events.some((e: { event_type: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
+    expect(events.some((e: { event_type: string; task_id?: string }) => e.event_type === "task_finished" && e.task_id === "t1")).toBe(false);
   });
 
   it("writes a per-worker transcript from streamed SDK events", async () => {
@@ -1123,7 +1130,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.blocked_retry_count).toBe(0);
     expect(state.agents.t1.retry_count).toBe(0);
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string }) => e.event_type === "task_blocked" && e.task_id === "t1")).toBe(true);
+    expect(events.some((e: { event_type: string; task_id?: string }) => e.event_type === "task_blocked" && e.task_id === "t1")).toBe(true);
     expect(state.status).toBe("stopped");
   }, 20_000);
 
@@ -1152,7 +1159,7 @@ describe("runOrchestration with SDK (happy path)", () => {
     expect(state.agents.t1.status).toBe("failed");
     expect(state.agents.t1.summary).toBe("worker could not finish");
     const events = files.get("events.jsonl")!.trim().split("\n").map((l) => JSON.parse(l));
-    expect(events.some((e: { event_type: string }) => e.event_type === "task_failed" && e.task_id === "t1")).toBe(true);
+    expect(events.some((e: { event_type: string; task_id?: string }) => e.event_type === "task_failed" && e.task_id === "t1")).toBe(true);
   });
 
   it("runs dependent tasks sequentially and injects upstream outputs into the worker prompt", async () => {
@@ -1430,5 +1437,464 @@ describe("runOrchestration with SDK (happy path)", () => {
     await expect(runOrchestration("run-empty-state", new FakeAgentClient(), store)).rejects.toThrow(
       /refusing to reset orchestration progress/,
     );
+  });
+});
+
+function v3ClaimsHappyConfig(overrides: Partial<OrchestratorConfig> = {}): OrchestratorConfig {
+  const mk = (id: string, path: string) => ({
+    id,
+    repo: "svc",
+    prompt: `task ${id}`,
+    model: null,
+    depends_on: [] as string[],
+    timeout_minutes: 30,
+    create_repo: false,
+    repo_config: null,
+    allowed_paths: [path],
+  });
+  return {
+    name: "v3-demo",
+    model: { id: "composer-2" },
+    prompt: "",
+    repositories: {
+      svc: { url: "https://github.com/acme/svc", ref: "main" },
+    },
+    tasks: [mk("t-a", "src/a"), mk("t-b", "src/b")],
+    target: {
+      auto_create_pr: true,
+      consolidate_prs: true,
+      branch_prefix: "cursor-orch",
+      branch_layout: "per_task",
+    },
+    bootstrap_repo_name: "cursor-orch-bootstrap",
+    max_iterations: 10,
+    ...overrides,
+  };
+}
+
+function v3WorkerScript(runId: string, taskId: string) {
+  return {
+    events: [statusMessage("CREATING"), statusMessage("RUNNING"), assistantText("ok"), statusMessage("FINISHED")],
+    result: {
+      id: `r-${taskId}`,
+      status: "finished" as const,
+      git: runGit(`cursor-orch/${runId}/${taskId}`),
+    },
+    artifacts: {
+      "cursor-orch-output.json": JSON.stringify({
+        task_id: taskId,
+        status: "completed",
+        summary: "ok",
+        outputs: {},
+      }),
+    },
+  };
+}
+
+const v3GateScript = {
+  events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+  result: { id: "r-gate", status: "finished" as const },
+};
+
+function installV3GateResultWriter(
+  fake: FakeAgentClient,
+  store: RepoStoreClient,
+  runId: string,
+  decide: (gate: "code_quality" | "code_review" | "computer_use", wave: number) => {
+    passed: boolean;
+    findings?: { severity: "blocking" | "info"; message: string; path?: string }[];
+    summary?: string;
+    skipWrite?: boolean;
+  },
+): void {
+  let gateSendCount = 0;
+  const originalCreate = fake.createCloudAgent.bind(fake);
+  fake.createCloudAgent = async (opts) => {
+    const agent = await originalCreate(opts);
+    const originalSend = agent.send.bind(agent);
+    agent.send = async (prompt: string) => {
+      const run = await originalSend(prompt);
+      for (const gate of ["code_quality", "code_review", "computer_use"] as const) {
+        if (prompt.includes(`Gate: ${gate}`)) {
+          const wave = Math.floor(gateSendCount / 3);
+          gateSendCount += 1;
+          const decision = decide(gate, wave);
+          if (!decision.skipWrite) {
+            await store.writeFile(
+              runId,
+              `gate-results/${gate}.json`,
+              JSON.stringify({
+                gate,
+                passed: decision.passed,
+                findings: decision.findings ?? [],
+                summary: decision.summary ?? (decision.passed ? `${gate} ok` : `${gate} failed`),
+              }),
+            );
+          }
+        }
+      }
+      return run;
+    };
+    return agent;
+  };
+}
+
+function installV3GithubMock(tracker: { pulls: number; merges: string[]; createdRefs: Set<string> }): void {
+  unmockedFetch = globalThis.fetch;
+  tracker.createdRefs.add("main");
+  globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (!url.startsWith("https://api.github.com/")) {
+      return unmockedFetch(input, init);
+    }
+    if (url.endsWith("/user") || url.includes("/user?")) {
+      return new Response(JSON.stringify({ login: "acme" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("/git/ref/heads/")) {
+      const tail = url.split("/git/ref/heads/")[1] ?? "";
+      const decoded = decodeURIComponent(tail);
+      if (tracker.createdRefs.has(decoded)) {
+        return new Response(JSON.stringify({ object: { sha: "0123456789abcdef0123456789abcdef01234567" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ message: "Not Found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("/git/refs") && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { ref?: string };
+      const ref = (body.ref ?? "").replace(/^refs\/heads\//, "");
+      if (ref) tracker.createdRefs.add(ref);
+      return new Response(JSON.stringify({ ref: body.ref }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("/merges") && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { head?: string; base?: string };
+      tracker.merges.push(`${body.head ?? ""}->${body.base ?? ""}`);
+      return new Response(JSON.stringify({ sha: "mergedsha" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("/pulls") && method === "POST") {
+      tracker.pulls += 1;
+      return new Response(JSON.stringify({ html_url: "https://github.com/acme/svc/pull/1" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return unmockedFetch(input, init);
+  }) as typeof fetch;
+}
+
+describe("runOrchestration v3 claims path", () => {
+  const originalEnv = { ...process.env };
+  beforeEach(() => {
+    process.env.CURSOR_API_KEY = "sk-fake";
+    process.env.GH_TOKEN = "ghp-fake";
+    process.env.BOOTSTRAP_OWNER = "acme";
+    process.env.BOOTSTRAP_REPO = "cursor-orch-bootstrap";
+    process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRIES = "0";
+    delete process.env.CURSOR_ORCH_WORKER_ARTIFACT_ERROR_RETRY_MS;
+    delete process.env.CURSOR_ORCH_TASK_FAILURE_MAX_RETRIES;
+  });
+  afterEach(() => {
+    globalThis.fetch = unmockedFetch;
+    process.env = { ...originalEnv };
+  });
+
+  it("v3 happy path: implement, fan-in, gates, finalize one PR", async () => {
+    const config = v3ClaimsHappyConfig();
+    const runId = "run-v3-happy";
+    const runBranch = `cursor-orch/${runId}/main/run`;
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    installV3GateResultWriter(fake, store, runId, () => ({ passed: true }));
+
+    await runOrchestration(runId, fake, store);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.phase).toBe("completed");
+    expect(tracker.pulls).toBe(1);
+    expect(state.consolidated_pr_urls).toBeTruthy();
+
+    const workerLaunches = fake.launches.filter((l) => {
+      const ref = l.opts.startingRef ?? "";
+      return ref.includes("/t-a") || ref.includes("/t-b");
+    });
+    expect(workerLaunches.length).toBe(2);
+    for (const launch of workerLaunches) {
+      expect(launch.opts.startingRef).not.toBe(runBranch);
+      expect(launch.opts.startingRef).not.toMatch(/\/run$/);
+    }
+
+    const gateLaunches = fake.launches.filter((l) => l.opts.startingRef === runBranch);
+    expect(gateLaunches.length).toBe(3);
+    expect(files.get("gate-results/code_quality.json")).toBeTruthy();
+    expect(files.get("gate-results/code_review.json")).toBeTruthy();
+    expect(files.get("gate-results/computer_use.json")).toBeTruthy();
+  });
+
+  it("gate fail then fix: code_quality fails once, fix worker recovers, finalize", async () => {
+    const config = v3ClaimsHappyConfig();
+    const runId = "run-v3-gate-fix";
+    const runBranch = `cursor-orch/${runId}/main/run`;
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        v3WorkerScript(runId, "fix-iter-1-code_quality"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    installV3GateResultWriter(fake, store, runId, (gate, wave) => {
+      if (wave === 0 && gate === "code_quality") {
+        return {
+          passed: false,
+          summary: "complexity too high",
+          findings: [{ severity: "blocking", message: "too complex", path: "src/a/foo.ts" }],
+        };
+      }
+      return { passed: true };
+    });
+
+    await runOrchestration(runId, fake, store);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("completed");
+    expect(state.phase).toBe("completed");
+    expect(state.iteration).toBe(1);
+    expect(tracker.pulls).toBe(1);
+
+    const fixLaunches = fake.launches.filter((l) => (l.opts.startingRef ?? "").includes("fix-iter-1-code_quality"));
+    expect(fixLaunches.length).toBe(1);
+
+    const gateLaunches = fake.launches.filter((l) => l.opts.startingRef === runBranch);
+    expect(gateLaunches.length).toBe(6);
+
+    const fixPlan = JSON.parse(files.get("fix-plan.json")!) as { tasks: { id: string; allowed_paths: string[] }[] };
+    const fixTask = fixPlan.tasks.find((t) => t.id === "fix-iter-1-code_quality");
+    expect(fixTask).toBeDefined();
+    expect(fixTask!.allowed_paths).toEqual(["src/a/foo.ts"]);
+  });
+
+  it("replan escalation: same gate fails twice after fix", async () => {
+    const config = v3ClaimsHappyConfig({ prompt: "Rebuild the feature with clean review." });
+    const runId = "run-v3-replan";
+    const runBranch = `cursor-orch/${runId}/main/run`;
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        v3WorkerScript(runId, "fix-iter-1-code_review"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        {
+          events: [statusMessage("RUNNING"), statusMessage("FINISHED")],
+          result: { id: "r-planner", status: "finished" as const },
+        },
+        v3WorkerScript(runId, "t-replan"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    installV3GateResultWriter(fake, store, runId, (gate, wave) => {
+      if (wave < 2 && gate === "code_review") {
+        return {
+          passed: false,
+          summary: "review findings remain",
+          findings: [{ severity: "blocking", message: "needs redesign", path: "src/review.ts" }],
+        };
+      }
+      return { passed: true };
+    });
+
+    const originalCreate = fake.createCloudAgent.bind(fake);
+    fake.createCloudAgent = async (opts) => {
+      const agent = await originalCreate(opts);
+      if (opts.repoUrl.includes("cursor-orch-bootstrap")) {
+        const originalSend = agent.send.bind(agent);
+        agent.send = async (prompt: string) => {
+          const run = await originalSend(prompt);
+          await store.writeFile(
+            runId,
+            "task-plan.json",
+            JSON.stringify({
+              tasks: [
+                {
+                  id: "t-replan",
+                  repo: "svc",
+                  prompt: "Implement after replan",
+                  depends_on: [],
+                  allowed_paths: ["src/replan"],
+                },
+              ],
+            }),
+          );
+          return run;
+        };
+      }
+      return agent;
+    };
+
+    await runOrchestration(runId, fake, store);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.iteration).toBeGreaterThanOrEqual(2);
+    expect(state.status).toBe("completed");
+    expect(state.phase).toBe("completed");
+
+    const plannerLaunches = fake.launches.filter((l) => l.opts.repoUrl.includes("cursor-orch-bootstrap"));
+    expect(plannerLaunches.length).toBeGreaterThanOrEqual(1);
+
+    const fixLaunches = fake.launches.filter((l) => (l.opts.startingRef ?? "").includes("fix-iter-1-code_review"));
+    expect(fixLaunches.length).toBe(1);
+
+    const gateLaunches = fake.launches.filter((l) => l.opts.startingRef === runBranch);
+    expect(gateLaunches.length).toBe(9);
+  });
+
+  it("cap exhaustion: max_iterations 1 fails after second gate failure", async () => {
+    const config = v3ClaimsHappyConfig({ max_iterations: 1 });
+    const runId = "run-v3-cap";
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        v3WorkerScript(runId, "fix-iter-1-code_quality"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({ "config.yaml": toYaml(config) });
+    installV3GateResultWriter(fake, store, runId, (gate, _wave) => {
+      if (gate === "code_quality") {
+        return {
+          passed: false,
+          summary: "quality still failing",
+          findings: [{ severity: "blocking", message: "lint error", path: "src/a.ts" }],
+        };
+      }
+      return { passed: true };
+    });
+
+    await expect(runOrchestration(runId, fake, store)).rejects.toThrow(/quality still failing|Orchestration failed/);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.phase).toBe("failed");
+    expect(String(state.error)).toMatch(/code_quality/);
+    expect(String(state.error)).toMatch(/quality still failing/);
+    expect(tracker.pulls).toBe(0);
+    expect(files.get("summary.md")).toBeTruthy();
+    expect(files.get("summary.md")).toMatch(/## Gate results/);
+    expect(files.get("summary.md")).toMatch(/quality still failing/);
+  });
+
+  it("clears stale gate passes so a missing rewrite fails the wave", async () => {
+    const config = v3ClaimsHappyConfig({
+      max_iterations: 1,
+      prompt: "Keep iterating until gates pass.",
+    });
+    const runId = "run-v3-stale-gate";
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    installV3GithubMock(tracker);
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "t-a"),
+        v3WorkerScript(runId, "t-b"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+        v3WorkerScript(runId, "fix-iter-1-code_quality"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "gate-results/code_quality.json": JSON.stringify({
+        gate: "code_quality",
+        passed: true,
+        findings: [],
+        summary: "stale pass",
+      }),
+      "gate-results/code_review.json": JSON.stringify({
+        gate: "code_review",
+        passed: true,
+        findings: [],
+        summary: "stale pass",
+      }),
+      "gate-results/computer_use.json": JSON.stringify({
+        gate: "computer_use",
+        passed: true,
+        findings: [],
+        summary: "stale pass",
+      }),
+    });
+    installV3GateResultWriter(fake, store, runId, (gate) => {
+      if (gate === "code_quality") {
+        return { passed: true, skipWrite: true };
+      }
+      return { passed: true };
+    });
+
+    await expect(runOrchestration(runId, fake, store)).rejects.toThrow(/Missing gate result|Orchestration failed/);
+
+    const state = JSON.parse(files.get("state.json")!);
+    expect(state.status).toBe("failed");
+    expect(state.phase).toBe("failed");
+    expect(String(state.error)).toMatch(/code_quality/);
+    expect(String(state.error)).toMatch(/Missing gate result/);
+    expect(files.get("gate-results/code_quality.json") ?? "").not.toMatch(/stale pass/);
+    expect(tracker.pulls).toBe(0);
   });
 });

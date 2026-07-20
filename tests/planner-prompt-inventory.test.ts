@@ -11,6 +11,7 @@ const base: OrchestratorConfig = {
   tasks: [],
   target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
   bootstrap_repo_name: "b",
+  max_iterations: 10,
 };
 
 const inventory: InventoryManifestV1 = {
@@ -34,6 +35,8 @@ describe("planner prompt inventory", () => {
   it("omits ## Inventory when inventory is unset", () => {
     const p = buildPlannerPrompt(base, "run-1", "o", "b");
     expect(p).not.toContain("## Inventory");
+    expect(p).toContain("allowed_paths");
+    expect(p).toMatch(/disjoint|fans? (task )?branches|overlapping/i);
   });
 
   it("planner prompt with inventory stays within a reasonable token budget", () => {
