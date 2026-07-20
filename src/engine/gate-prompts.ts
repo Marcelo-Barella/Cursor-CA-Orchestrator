@@ -11,23 +11,17 @@ export type BuildGatePromptInput = {
   repoAlias?: string;
 };
 
-function boardWriteInstructions(input: BuildGatePromptInput): string {
-  const path = gateResultBoardPath(input.gate, input.repoAlias);
-  return [
-    `Write the gate result JSON to the bootstrap board via gh api Contents API on branch run/${input.runId}.`,
-    `Artifact path: ${path}`,
-    `Bootstrap repo: ${input.bootstrapOwner}/${input.bootstrapRepo}`,
-    "JSON shape: { gate, passed: boolean, findings: [{ severity: \"blocking\"|\"info\", message, path? }], summary: string }.",
-    "Use severity \"blocking\" for failures that must fail the gate.",
-  ].join("\n");
-}
-
 export function buildGatePrompt(input: BuildGatePromptInput): string {
+  const artifactPath = gateResultBoardPath(input.gate, input.repoAlias);
   const common = [
     `Gate: ${input.gate}`,
     `Product repo: ${input.repoUrl}`,
     `Inspect run branch: ${input.runBranch}`,
-    boardWriteInstructions(input),
+    `Write the gate result JSON to the bootstrap board via gh api Contents API on branch run/${input.runId}.`,
+    `Artifact path: ${artifactPath}`,
+    `Bootstrap repo: ${input.bootstrapOwner}/${input.bootstrapRepo}`,
+    "JSON shape: { gate, passed: boolean, findings: [{ severity: \"blocking\"|\"info\", message, path? }], summary: string }.",
+    "Use severity \"blocking\" for failures that must fail the gate.",
   ].join("\n");
 
   switch (input.gate) {
