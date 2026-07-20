@@ -4,6 +4,7 @@ import type { RepoStoreClient } from "../src/api/repo-store.js";
 import { runOrchestration } from "../src/orchestrator.js";
 import { toYaml } from "../src/config/parse.js";
 import type { OrchestratorConfig } from "../src/config/types.js";
+import { createInitialState, serialize } from "../src/state.js";
 import {
   FakeAgentClient,
   assistantText,
@@ -584,9 +585,15 @@ function installV3GateResultWriter(
   };
 }
 
-function installV3GithubMock(tracker: { pulls: number; merges: string[]; createdRefs: Set<string> }): void {
+function installV3GithubMock(tracker: {
+  pulls: number;
+  merges: string[];
+  createdRefs: Set<string>;
+  refLookups?: string[];
+}): void {
   unmockedFetch = globalThis.fetch;
   tracker.createdRefs.add("main");
+  if (!tracker.refLookups) tracker.refLookups = [];
   globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = (init?.method ?? "GET").toUpperCase();
@@ -602,6 +609,7 @@ function installV3GithubMock(tracker: { pulls: number; merges: string[]; created
     if (url.includes("/git/ref/heads/")) {
       const tail = url.split("/git/ref/heads/")[1] ?? "";
       const decoded = decodeURIComponent(tail);
+      tracker.refLookups!.push(`GET ${decoded}`);
       if (tracker.createdRefs.has(decoded)) {
         return new Response(JSON.stringify({ object: { sha: "0123456789abcdef0123456789abcdef01234567" } }), {
           status: 200,
@@ -616,7 +624,10 @@ function installV3GithubMock(tracker: { pulls: number; merges: string[]; created
     if (url.includes("/git/refs") && method === "POST") {
       const body = JSON.parse(String(init?.body ?? "{}")) as { ref?: string };
       const ref = (body.ref ?? "").replace(/^refs\/heads\//, "");
-      if (ref) tracker.createdRefs.add(ref);
+      if (ref) {
+        tracker.createdRefs.add(ref);
+        tracker.refLookups!.push(`POST ${ref}`);
+      }
       return new Response(JSON.stringify({ ref: body.ref }), {
         status: 201,
         headers: { "Content-Type": "application/json" },
@@ -661,7 +672,7 @@ describe("runOrchestration v3 claims path", () => {
     const config = v3ClaimsHappyConfig();
     const runId = "run-v3-happy";
     const runBranch = `cursor-orch/${runId}/main/run`;
-    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>(), refLookups: [] as string[] };
     installV3GithubMock(tracker);
 
     const fake = new FakeAgentClient({
@@ -705,7 +716,7 @@ describe("runOrchestration v3 claims path", () => {
     const config = v3ClaimsHappyConfig();
     const runId = "run-v3-gate-fix";
     const runBranch = `cursor-orch/${runId}/main/run`;
-    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>(), refLookups: [] as string[] };
     installV3GithubMock(tracker);
 
     const fake = new FakeAgentClient({
@@ -751,13 +762,83 @@ describe("runOrchestration v3 claims path", () => {
     const fixTask = fixPlan.tasks.find((t) => t.id === "fix-iter-1-code_quality");
     expect(fixTask).toBeDefined();
     expect(fixTask!.allowed_paths).toEqual(["src/a/foo.ts"]);
+
+    const fixBranch = `cursor-orch/${runId}/fix-iter-1-code_quality`;
+    const postIdx = tracker.refLookups!.findIndex((l) => l === `POST ${fixBranch}`);
+    expect(postIdx).toBeGreaterThan(0);
+    const getsBeforeFixPost = tracker.refLookups!
+      .slice(0, postIdx)
+      .filter((l) => l.startsWith("GET "));
+    expect(getsBeforeFixPost.at(-1)).toBe(`GET ${runBranch}`);
+  });
+
+  it("resumes fix phase from persisted gate results after restart", async () => {
+    const config = v3ClaimsHappyConfig();
+    const runId = "run-v3-fix-resume";
+    const runBranch = `cursor-orch/${runId}/main/run`;
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set(["main", runBranch]), refLookups: [] as string[] };
+    installV3GithubMock(tracker);
+
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.phase = "fix";
+    state.iteration = 1;
+    for (const task of config.tasks) {
+      const agent = state.agents[task.id]!;
+      agent.status = "finished";
+      agent.branch_name = `cursor-orch/${runId}/${task.id}`;
+      agent.finished_at = new Date().toISOString();
+    }
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "fix-iter-1-code_quality"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+      "gate-results/code_quality.json": JSON.stringify({
+        gate: "code_quality",
+        passed: false,
+        findings: [{ severity: "blocking", message: "lint error", path: "src/a/foo.ts" }],
+        summary: "quality failed",
+      }),
+      "gate-results/code_review.json": JSON.stringify({
+        gate: "code_review",
+        passed: true,
+        findings: [],
+        summary: "review ok",
+      }),
+      "gate-results/computer_use.json": JSON.stringify({
+        gate: "computer_use",
+        passed: true,
+        findings: [],
+        summary: "cu ok",
+      }),
+    });
+    installV3GateResultWriter(fake, store, runId, () => ({ passed: true }));
+
+    await runOrchestration(runId, fake, store);
+
+    const finalState = JSON.parse(files.get("state.json")!);
+    expect(finalState.status).toBe("completed");
+    expect(finalState.phase).toBe("completed");
+    expect(files.get("fix-plan.json")).toBeTruthy();
+    const fixPlan = JSON.parse(files.get("fix-plan.json")!) as { tasks: { id: string }[] };
+    expect(fixPlan.tasks.some((t) => t.id === "fix-iter-1-code_quality")).toBe(true);
+    const fixLaunches = fake.launches.filter((l) => (l.opts.startingRef ?? "").includes("fix-iter-1-code_quality"));
+    expect(fixLaunches.length).toBe(1);
   });
 
   it("replan escalation: same gate fails twice after fix", async () => {
     const config = v3ClaimsHappyConfig({ prompt: "Rebuild the feature with clean review." });
     const runId = "run-v3-replan";
     const runBranch = `cursor-orch/${runId}/main/run`;
-    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>(), refLookups: [] as string[] };
     installV3GithubMock(tracker);
 
     const fake = new FakeAgentClient({
@@ -841,7 +922,7 @@ describe("runOrchestration v3 claims path", () => {
   it("cap exhaustion: max_iterations 1 fails after second gate failure", async () => {
     const config = v3ClaimsHappyConfig({ max_iterations: 1 });
     const runId = "run-v3-cap";
-    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>(), refLookups: [] as string[] };
     installV3GithubMock(tracker);
 
     const fake = new FakeAgentClient({
@@ -888,7 +969,7 @@ describe("runOrchestration v3 claims path", () => {
       prompt: "Keep iterating until gates pass.",
     });
     const runId = "run-v3-stale-gate";
-    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>() };
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set<string>(), refLookups: [] as string[] };
     installV3GithubMock(tracker);
 
     const fake = new FakeAgentClient({

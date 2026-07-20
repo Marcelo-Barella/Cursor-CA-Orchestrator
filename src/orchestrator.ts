@@ -7,7 +7,7 @@ import { parseConfig, toYaml } from "./config/parse.js";
 import { validateConfig } from "./config/validate.js";
 import { assertDisjointClaims, usesClaimsPath } from "./engine/claims.js";
 import { fanInTaskBranches } from "./engine/fan-in.js";
-import { buildFixTasks } from "./engine/fix-plan.js";
+import { buildFixTasks, isFixIterationTask } from "./engine/fix-plan.js";
 import { buildGatePrompt } from "./engine/gate-prompts.js";
 import {
   GATE_IDS,
@@ -710,8 +710,13 @@ async function launchWorkerAgent(
     promptLaunchRef = startingRefForSdk;
   } else if (!task.create_repo) {
     const ownerRepo = parseGithubOwnerRepo(repoUrl);
+    const baseRef = planRef || ref;
+    const forkBase =
+      claimsPath && isFixIterationTask(taskId)
+        ? runBranchName(ctx.config.target.branch_prefix, ctx.runId, baseRef)
+        : ref;
     if (ownerRepo && ctx.ghToken) {
-      const ensured = await ensureRunBranchFromBase(ctx.ghToken, ownerRepo.owner, ownerRepo.repo, ref, workerBranch);
+      const ensured = await ensureRunBranchFromBase(ctx.ghToken, ownerRepo.owner, ownerRepo.repo, forkBase, workerBranch);
       if (ensured.error) {
         const summary = `Failed to prepare task branch for task ${taskId}: ${ensured.error}`;
         console.error(summary);
@@ -735,7 +740,6 @@ async function launchWorkerAgent(
     }
     if (claimsPath) {
       claimsMode = true;
-      const baseRef = planRef || ref;
       runBranchForPrompt = runBranchName(ctx.config.target.branch_prefix, ctx.runId, baseRef);
     } else {
       runBranchForPrompt = workerBranch;
@@ -1980,8 +1984,16 @@ async function runGatePhase(ctx: LoopContext): Promise<void> {
 
 async function runFixPhase(ctx: LoopContext): Promise<void> {
   const primaryAlias = selectPrimaryRepoAlias(ctx.config);
+  let gateResults = ctx.lastGateResults;
+  if (gateResults.length === 0) {
+    gateResults = await readGateResultsFromBoard(ctx);
+    ctx.lastGateResults = gateResults;
+    if (!allGatesPassed(gateResults)) {
+      ctx.pendingFixFromGates = true;
+    }
+  }
   const built = buildFixTasks({
-    results: ctx.lastGateResults,
+    results: gateResults,
     repoAlias: primaryAlias,
     iteration: ctx.state.iteration,
   });
@@ -2002,7 +2014,7 @@ async function runFixPhase(ctx: LoopContext): Promise<void> {
   await ctx.repoStore.writeFile(ctx.runId, "fix-plan.json", JSON.stringify({ tasks: built.tasks }, null, 2));
 
   if (ctx.pendingFixFromGates) {
-    ctx.state.gates_failed_after_fix = failedGateIds(ctx.lastGateResults);
+    ctx.state.gates_failed_after_fix = failedGateIds(gateResults);
     ctx.pendingFixFromGates = false;
   }
 

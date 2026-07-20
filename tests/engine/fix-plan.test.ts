@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildFixTasks } from "../../src/engine/fix-plan.js";
+import { buildFixTasks, isFixIterationTask } from "../../src/engine/fix-plan.js";
+
+describe("isFixIterationTask", () => {
+  it("matches fix-iter task ids", () => {
+    expect(isFixIterationTask("fix-iter-1-code_quality")).toBe(true);
+    expect(isFixIterationTask("t-a")).toBe(false);
+  });
+});
 
 describe("buildFixTasks", () => {
   it("builds fix tasks with path claims from findings", () => {

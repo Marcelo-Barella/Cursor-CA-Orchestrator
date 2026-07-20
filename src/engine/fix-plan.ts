@@ -6,6 +6,10 @@ export type FixPlanBuildResult =
   | { ok: true; tasks: TaskConfig[] }
   | { ok: false; claimCollision: true; tasks: TaskConfig[] };
 
+export function isFixIterationTask(taskId: string): boolean {
+  return taskId.startsWith("fix-iter-");
+}
+
 type FixEntry = { gate: string; paths: string[]; summary: string; findingsText: string };
 
 function makeFixTask(
