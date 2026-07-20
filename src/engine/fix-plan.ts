@@ -6,8 +6,25 @@ export type FixPlanBuildResult =
   | { ok: true; tasks: TaskConfig[] }
   | { ok: false; claimCollision: true; tasks: TaskConfig[] };
 
-export function buildFixPlanDocument(tasks: TaskConfig[]): { tasks: TaskConfig[] } {
-  return { tasks };
+type FixEntry = { gate: string; repoAlias?: string; paths: string[]; summary: string; findingsText: string };
+
+function makeFixTask(
+  repoAlias: string,
+  taskId: string,
+  prompt: string,
+  allowed_paths: string[],
+): TaskConfig {
+  return {
+    id: taskId,
+    repo: repoAlias,
+    prompt,
+    model: null,
+    depends_on: [],
+    timeout_minutes: 30,
+    create_repo: false,
+    repo_config: null,
+    allowed_paths,
+  };
 }
 
 export function buildFixTasks(input: {
@@ -16,8 +33,8 @@ export function buildFixTasks(input: {
   iteration: number;
 }): FixPlanBuildResult {
   const failed = input.results.filter((r) => !r.passed);
-  const withPaths: { gate: string; repoAlias?: string; paths: string[]; summary: string; findingsText: string }[] = [];
-  const withoutPaths: typeof withPaths = [];
+  const withPaths: FixEntry[] = [];
+  const withoutPaths: FixEntry[] = [];
 
   for (const r of failed) {
     const paths = [
@@ -28,55 +45,46 @@ export function buildFixTasks(input: {
       ),
     ];
     const findingsText = r.findings.map((f) => `- [${f.severity}] ${f.message}${f.path ? ` (${f.path})` : ""}`).join("\n");
-    const entry = { gate: r.gate, repoAlias: r.repoAlias, paths, summary: r.summary, findingsText };
+    const entry: FixEntry = { gate: r.gate, repoAlias: r.repoAlias, paths, summary: r.summary, findingsText };
     if (paths.length > 0) withPaths.push(entry);
     else withoutPaths.push(entry);
   }
 
   const tasks: TaskConfig[] = [];
   for (const entry of withPaths) {
-    tasks.push({
-      id: `fix-iter-${input.iteration}-${entry.gate}`,
-      repo: entry.repoAlias ?? input.repoAlias,
-      prompt: `Fix gate ${entry.gate} failures.\nSummary: ${entry.summary}\nFindings:\n${entry.findingsText}`,
-      model: null,
-      depends_on: [],
-      timeout_minutes: 30,
-      create_repo: false,
-      repo_config: null,
-      allowed_paths: entry.paths,
-    });
+    tasks.push(
+      makeFixTask(
+        entry.repoAlias ?? input.repoAlias,
+        `fix-iter-${input.iteration}-${entry.gate}`,
+        `Fix gate ${entry.gate} failures.\nSummary: ${entry.summary}\nFindings:\n${entry.findingsText}`,
+        entry.paths,
+      ),
+    );
   }
 
   if (withoutPaths.length === 1) {
     const entry = withoutPaths[0]!;
-    tasks.push({
-      id: `fix-iter-${input.iteration}-${entry.gate}`,
-      repo: entry.repoAlias ?? input.repoAlias,
-      prompt: `Fix gate ${entry.gate} failures.\nSummary: ${entry.summary}\nFindings:\n${entry.findingsText}`,
-      model: null,
-      depends_on: [],
-      timeout_minutes: 30,
-      create_repo: false,
-      repo_config: null,
-      allowed_paths: ["."],
-    });
+    tasks.push(
+      makeFixTask(
+        entry.repoAlias ?? input.repoAlias,
+        `fix-iter-${input.iteration}-${entry.gate}`,
+        `Fix gate ${entry.gate} failures.\nSummary: ${entry.summary}\nFindings:\n${entry.findingsText}`,
+        ["."],
+      ),
+    );
   } else if (withoutPaths.length > 1) {
     const findingsText = withoutPaths.map((e) => `## ${e.gate}\n${e.findingsText}`).join("\n");
     const mergedRepo = withoutPaths.every((e) => (e.repoAlias ?? input.repoAlias) === (withoutPaths[0]!.repoAlias ?? input.repoAlias))
       ? (withoutPaths[0]!.repoAlias ?? input.repoAlias)
       : input.repoAlias;
-    tasks.push({
-      id: `fix-iter-${input.iteration}-merged`,
-      repo: mergedRepo,
-      prompt: `Fix multiple gate failures without path claims.\n${findingsText}`,
-      model: null,
-      depends_on: [],
-      timeout_minutes: 30,
-      create_repo: false,
-      repo_config: null,
-      allowed_paths: ["."],
-    });
+    tasks.push(
+      makeFixTask(
+        mergedRepo,
+        `fix-iter-${input.iteration}-merged`,
+        `Fix multiple gate failures without path claims.\n${findingsText}`,
+        ["."],
+      ),
+    );
   }
 
   const overlaps = findClaimOverlaps(tasks);
