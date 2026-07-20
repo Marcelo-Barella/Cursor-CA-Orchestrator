@@ -49,6 +49,31 @@ export function assertDisjointClaims(tasks: TaskConfig[]): void {
   throw new Error(`Overlapping allowed_paths claims: ${detail}`);
 }
 
+function isTerminalAgentStatus(status: string): boolean {
+  return status === "finished" || status === "failed" || status === "stopped";
+}
+
+export function filterLiveClaimTasks(
+  tasks: TaskConfig[],
+  agents: Record<string, { status: string }>,
+  alwaysIncludeIds?: Iterable<string>,
+): TaskConfig[] {
+  const include = alwaysIncludeIds ? new Set(alwaysIncludeIds) : null;
+  return tasks.filter((t) => {
+    if (include?.has(t.id)) return true;
+    const status = agents[t.id]?.status;
+    return !status || !isTerminalAgentStatus(status);
+  });
+}
+
+export function assertDisjointLiveClaims(
+  tasks: TaskConfig[],
+  agents: Record<string, { status: string }>,
+  alwaysIncludeIds?: Iterable<string>,
+): void {
+  assertDisjointClaims(filterLiveClaimTasks(tasks, agents, alwaysIncludeIds));
+}
+
 export function usesClaimsPath(config: OrchestratorConfig): boolean {
   const impl = config.tasks.filter((t) => !t.create_repo);
   return impl.length > 0 && impl.every((t) => t.allowed_paths.length > 0);

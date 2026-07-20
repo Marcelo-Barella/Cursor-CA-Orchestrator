@@ -8,6 +8,7 @@ import type {
 } from "./types.js";
 import { resolveRepoTarget } from "../lib/repo-target.js";
 import { assertDisjointClaims, usesClaimsPath } from "../engine/claims.js";
+import { isFixIterationTask } from "../engine/fix-plan.js";
 
 const BRANCH_LAYOUT_VALUES = new Set<BranchLayout>(["consolidated", "per_task"]);
 
@@ -423,6 +424,9 @@ export function validateConfig(config: OrchestratorConfig): void {
     throw new Error(`Circular dependency detected: ${cycle}`);
   }
   validateBranchNames(config);
-  assertDisjointClaims(config.tasks);
+  const baselineClaimTasks = config.tasks.filter((t) => !isFixIterationTask(t.id));
+  if (baselineClaimTasks.length > 0) {
+    assertDisjointClaims(baselineClaimTasks);
+  }
   validateRunLineForConsolidated(config);
 }

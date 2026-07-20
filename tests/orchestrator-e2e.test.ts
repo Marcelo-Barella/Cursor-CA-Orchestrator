@@ -834,6 +834,73 @@ describe("runOrchestration v3 claims path", () => {
     expect(fixLaunches.length).toBe(1);
   });
 
+  it("resumes implement phase after fix tasks were persisted to config", async () => {
+    const base = v3ClaimsHappyConfig();
+    const fixTask = {
+      id: "fix-iter-1-code_quality",
+      repo: "svc",
+      prompt: "Fix gate code_quality failures.",
+      model: null,
+      depends_on: [] as string[],
+      timeout_minutes: 30,
+      create_repo: false,
+      repo_config: null,
+      allowed_paths: ["src/a/foo.ts"],
+    };
+    const config = { ...base, tasks: [...base.tasks, fixTask] };
+    const runId = "run-v3-implement-resume";
+    const runBranch = `cursor-orch/${runId}/main/run`;
+    const tracker = { pulls: 0, merges: [] as string[], createdRefs: new Set(["main", runBranch]), refLookups: [] as string[] };
+    installV3GithubMock(tracker);
+
+    const state = createInitialState(config, runId);
+    state.status = "running";
+    state.phase = "implement";
+    state.iteration = 1;
+    for (const task of base.tasks) {
+      const agent = state.agents[task.id]!;
+      agent.status = "finished";
+      agent.branch_name = `cursor-orch/${runId}/${task.id}`;
+      agent.finished_at = new Date().toISOString();
+    }
+    state.agents["fix-iter-1-code_quality"] = {
+      task_id: "fix-iter-1-code_quality",
+      agent_id: null,
+      status: "pending",
+      started_at: null,
+      finished_at: null,
+      branch_name: null,
+      pr_url: null,
+      summary: null,
+      blocked_reason: null,
+      blocked_since: null,
+      retry_count: 0,
+      cascade_source_task_id: null,
+    };
+
+    const fake = new FakeAgentClient({
+      defaultScripts: [
+        v3WorkerScript(runId, "fix-iter-1-code_quality"),
+        v3GateScript,
+        v3GateScript,
+        v3GateScript,
+      ],
+    });
+    const { store, files } = createInMemoryRepoStore({
+      "config.yaml": toYaml(config),
+      "state.json": serialize(state),
+    });
+    installV3GateResultWriter(fake, store, runId, () => ({ passed: true }));
+
+    await runOrchestration(runId, fake, store);
+
+    const finalState = JSON.parse(files.get("state.json")!);
+    expect(finalState.status).toBe("completed");
+    expect(finalState.phase).toBe("completed");
+    const fixLaunches = fake.launches.filter((l) => (l.opts.startingRef ?? "").includes("fix-iter-1-code_quality"));
+    expect(fixLaunches.length).toBe(1);
+  });
+
   it("replan escalation: same gate fails twice after fix", async () => {
     const config = v3ClaimsHappyConfig({ prompt: "Rebuild the feature with clean review." });
     const runId = "run-v3-replan";

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { claimsOverlap, findClaimOverlaps, normalizeClaimPath } from "../../src/engine/claims.js";
+import {
+  assertDisjointLiveClaims,
+  claimsOverlap,
+  filterLiveClaimTasks,
+  findClaimOverlaps,
+  normalizeClaimPath,
+} from "../../src/engine/claims.js";
 import type { TaskConfig } from "../../src/config/types.js";
 
 function task(id: string, paths: string[]): TaskConfig {
@@ -62,5 +68,16 @@ describe("claims", () => {
       repo: "__new__",
     };
     expect(findClaimOverlaps([create, task("a", ["src"])])).toEqual([]);
+  });
+
+  it("filterLiveClaimTasks excludes finished tasks that overlap fix claims", () => {
+    const tasks = [task("t-a", ["src/a"]), task("fix-iter-1-code_quality", ["src/a/foo.ts"])];
+    const agents = {
+      "t-a": { status: "finished" },
+      "fix-iter-1-code_quality": { status: "pending" },
+    };
+    const live = filterLiveClaimTasks(tasks, agents);
+    expect(live.map((t) => t.id)).toEqual(["fix-iter-1-code_quality"]);
+    expect(() => assertDisjointLiveClaims(tasks, agents)).not.toThrow();
   });
 });

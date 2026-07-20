@@ -5,7 +5,7 @@ import type { ModelSelectionConfig, OrchestratorConfig, TaskConfig } from "./con
 import { canonicalizeOrchestratorConfig } from "./config/canonicalize.js";
 import { parseConfig, toYaml } from "./config/parse.js";
 import { validateConfig } from "./config/validate.js";
-import { assertDisjointClaims, usesClaimsPath } from "./engine/claims.js";
+import { assertDisjointLiveClaims, usesClaimsPath } from "./engine/claims.js";
 import { fanInTaskBranches } from "./engine/fan-in.js";
 import { buildFixTasks, isFixIterationTask } from "./engine/fix-plan.js";
 import { buildGatePrompt } from "./engine/gate-prompts.js";
@@ -2025,12 +2025,11 @@ async function runFixPhase(ctx: LoopContext): Promise<void> {
       existingIds.add(task.id);
     }
   }
-  const liveClaimTasks = ctx.config.tasks.filter((t) => {
-    if (built.tasks.some((ft) => ft.id === t.id)) return true;
-    const status = ctx.state.agents[t.id]?.status;
-    return !status || !isTerminalStatus(status);
-  });
-  assertDisjointClaims(liveClaimTasks);
+  assertDisjointLiveClaims(
+    ctx.config.tasks,
+    ctx.state.agents,
+    built.tasks.map((t) => t.id),
+  );
   const canon = canonicalizeOrchestratorConfig(ctx.config);
   ctx.config.repositories = canon.repositories;
   ctx.config.tasks = canon.tasks;
@@ -2065,7 +2064,7 @@ async function runReplanPhase(ctx: LoopContext): Promise<void> {
 
   await runPlanningPhase(ctx.config, ctx.runId, ctx.agentClient, ctx.repoStore, ctx.apiKey);
   validateConfig(ctx.config);
-  assertDisjointClaims(ctx.config.tasks);
+  assertDisjointLiveClaims(ctx.config.tasks, ctx.state.agents);
   reconcileAgentsFromConfig(ctx.state, ctx.config);
   ctx.graph = buildDependencyGraph(ctx.config.tasks);
   ctx.state.phase = nextPhase(ctx.state.phase, "replan_scheduled");
@@ -2280,9 +2279,6 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   validateConfig(config);
-  if (usesClaimsPath(config)) {
-    assertDisjointClaims(config.tasks);
-  }
 
   let state: OrchestrationState;
   try {
@@ -2292,6 +2288,10 @@ export async function runOrchestration(runId: string, agentClient: AgentClient, 
   }
 
   reconcileAgentsFromConfig(state, config);
+
+  if (usesClaimsPath(config)) {
+    assertDisjointLiveClaims(config.tasks, state.agents);
+  }
 
   if (state.status === "pending") {
     state.status = "running";
