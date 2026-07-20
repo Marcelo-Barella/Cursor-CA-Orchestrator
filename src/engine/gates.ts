@@ -1,12 +1,31 @@
 import type { GateId } from "./iteration-policy.js";
 
 export type GateFinding = { severity: "blocking" | "info"; message: string; path?: string };
-export type GateResult = { gate: GateId; passed: boolean; findings: GateFinding[]; summary: string };
+export type GateResult = {
+  gate: GateId;
+  passed: boolean;
+  findings: GateFinding[];
+  summary: string;
+  repoAlias?: string;
+};
 
 export const GATE_IDS: GateId[] = ["code_quality", "code_review", "computer_use"];
 
-export function gateResultBoardPath(gate: GateId): string {
-  return `gate-results/${gate}.json`;
+export function gateResultBoardPath(gate: GateId, repoAlias?: string): string {
+  return repoAlias ? `gate-results/${repoAlias}/${gate}.json` : `gate-results/${gate}.json`;
+}
+
+export function gateResultPathsForRepos(
+  repoAliases: string[],
+): { gate: GateId; repoAlias?: string; path: string }[] {
+  const multiRepo = repoAliases.length > 1;
+  return repoAliases.flatMap((alias) =>
+    GATE_IDS.map((gate) => ({
+      gate,
+      repoAlias: multiRepo ? alias : undefined,
+      path: gateResultBoardPath(gate, multiRepo ? alias : undefined),
+    })),
+  );
 }
 
 function isGateId(v: unknown): v is GateId {
