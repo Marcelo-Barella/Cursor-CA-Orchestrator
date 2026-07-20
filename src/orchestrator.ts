@@ -7,7 +7,7 @@ import { parseConfig, toYaml } from "./config/parse.js";
 import { validateConfig } from "./config/validate.js";
 import { assertDisjointClaims, usesClaimsPath } from "./engine/claims.js";
 import { fanInTaskBranches } from "./engine/fan-in.js";
-import { buildFixPlanDocument, buildFixTasks } from "./engine/fix-plan.js";
+import { buildFixTasks } from "./engine/fix-plan.js";
 import { buildGatePrompt } from "./engine/gate-prompts.js";
 import {
   GATE_IDS,
@@ -2198,7 +2198,6 @@ async function runFixPhase(ctx: LoopContext): Promise<void> {
   });
 
   if (!built.ok) {
-    // Iteration already bumped when entering fix from gate; escalate without a second bump.
     if (ctx.state.iteration >= ctx.config.max_iterations) {
       ctx.state.error = "Fix plan claim collision and iteration cap exceeded";
       ctx.state.status = "failed";
@@ -2211,10 +2210,9 @@ async function runFixPhase(ctx: LoopContext): Promise<void> {
     return;
   }
 
-  await ctx.repoStore.writeFile(ctx.runId, "fix-plan.json", JSON.stringify(buildFixPlanDocument(built.tasks), null, 2));
+  await ctx.repoStore.writeFile(ctx.runId, "fix-plan.json", JSON.stringify({ tasks: built.tasks }, null, 2));
 
   if (ctx.pendingFixFromGates) {
-    ctx.state.gates_failed_after_fix = [];
     ctx.state.gates_failed_after_fix = failedGateIds(ctx.lastGateResults);
     ctx.pendingFixFromGates = false;
   }
@@ -2338,16 +2336,15 @@ async function runFinalizePhase(ctx: LoopContext): Promise<void> {
   console.info("Orchestration completed successfully");
 }
 
-async function claimsOrchestrationLoop(ctx: LoopContext): Promise<void> {
+async function withStopPoller(ctx: LoopContext, run: () => Promise<void>): Promise<void> {
   ctx.wakeup = createWakeup();
   try {
     const existing = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
     if (existing) {
       ctx.stopRequested.value = true;
     }
-  } catch {
-    /* ignore */
-  }
+  } catch {}
+
   const pollController = new AbortController();
   const stopPoller = (async () => {
     while (!ctx.stopRequested.value) {
@@ -2364,13 +2361,25 @@ async function claimsOrchestrationLoop(ctx: LoopContext): Promise<void> {
           triggerWakeup(ctx);
           return;
         }
-      } catch {
-        /* retry */
-      }
+      } catch {}
     }
   })();
 
   try {
+    await run();
+  } finally {
+    ctx.stopRequested.value = true;
+    triggerWakeup(ctx);
+    pollController.abort();
+    await stopPoller.catch(() => {});
+    for (const handle of ctx.activeWorkers.values()) {
+      await safeDisposeAgent(handle.sdkAgent);
+    }
+  }
+}
+
+async function claimsOrchestrationLoop(ctx: LoopContext): Promise<void> {
+  await withStopPoller(ctx, async () => {
     while (true) {
       if (await applyStopIfRequested(ctx)) return;
 
@@ -2413,15 +2422,7 @@ async function claimsOrchestrationLoop(ctx: LoopContext): Promise<void> {
       }
       if (await applyStopIfRequested(ctx)) return;
     }
-  } finally {
-    ctx.stopRequested.value = true;
-    triggerWakeup(ctx);
-    pollController.abort();
-    await stopPoller.catch(() => {});
-    for (const handle of ctx.activeWorkers.values()) {
-      await safeDisposeAgent(handle.sdkAgent);
-    }
-  }
+  });
 }
 
 async function orchestrationLoop(ctx: LoopContext): Promise<void> {
@@ -2429,38 +2430,7 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
     console.info(`Run ${ctx.runId} is already stopped; skipping orchestration loop`);
     return;
   }
-  ctx.wakeup = createWakeup();
-  try {
-    const existing = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-    if (existing) {
-      ctx.stopRequested.value = true;
-    }
-  } catch {
-    /* ignore; the poller will retry */
-  }
-  const pollController = new AbortController();
-  const stopPoller = (async () => {
-    while (!ctx.stopRequested.value) {
-      try {
-        await delay(STOP_POLL_INTERVAL_MS, undefined, { signal: pollController.signal });
-      } catch {
-        return;
-      }
-      if (ctx.stopRequested.value) return;
-      try {
-        const content = await ctx.repoStore.readFile(ctx.runId, "stop-requested.json");
-        if (content) {
-          ctx.stopRequested.value = true;
-          triggerWakeup(ctx);
-          return;
-        }
-      } catch {
-        /* retry next tick */
-      }
-    }
-  })();
-
-  try {
+  await withStopPoller(ctx, async () => {
     while (true) {
       if (!ctx.stopRequested.value) {
         try {
@@ -2481,20 +2451,9 @@ async function orchestrationLoop(ctx: LoopContext): Promise<void> {
       await writeProgress(ctx);
       if (await checkCompletion(ctx)) return;
       if (await checkFailure(ctx)) return;
-      const wakeController = new AbortController();
-      const timer = delay(MAX_WAKEUP_INTERVAL_MS, undefined, { signal: wakeController.signal }).catch(() => {});
-      await Promise.race([ctx.wakeup.promise, timer]);
-      wakeController.abort();
+      await waitForWakeup(ctx);
     }
-  } finally {
-    ctx.stopRequested.value = true;
-    triggerWakeup(ctx);
-    pollController.abort();
-    await stopPoller.catch(() => {});
-    for (const handle of ctx.activeWorkers.values()) {
-      await safeDisposeAgent(handle.sdkAgent);
-    }
-  }
+  });
 }
 
 export async function runOrchestration(runId: string, agentClient: AgentClient, repoStore: RepoStoreClient): Promise<void> {
