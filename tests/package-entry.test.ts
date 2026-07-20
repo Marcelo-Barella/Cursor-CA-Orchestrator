@@ -5,4 +5,9 @@ describe("package entry", () => {
   it("exports launch helper symbol", () => {
     expect(orch.launchOrchestrationRun).toBeTypeOf("function");
   });
+
+  it("exports mirror helpers for library consumers", () => {
+    expect(orch.mirrorTasksFromOrchestrationState).toBeTypeOf("function");
+    expect(orch.readBootstrapSnapshot).toBeTypeOf("function");
+  });
 });

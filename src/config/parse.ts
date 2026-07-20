@@ -173,7 +173,7 @@ export function toYaml(config: OrchestratorConfig): string {
       if (t.timeout_minutes !== 30) td.timeout_minutes = t.timeout_minutes;
       if (t.create_repo) td.create_repo = t.create_repo;
       if (t.repo_config !== null) td.repo_config = t.repo_config;
-      if (t.allowed_paths.length) td.allowed_paths = t.allowed_paths;
+      if (t.allowed_paths?.length) td.allowed_paths = t.allowed_paths;
       return td;
     });
   }

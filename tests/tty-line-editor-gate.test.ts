@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   bufferEditLines,
   cursorEditRowAndCol,
+  editCursorPhysicalOffsetUp,
   encodeHistoryEntry,
   extractSlashQueryPrefix,
+  lineWrapPhysicalRows,
   parseHistoryFileText,
   parseKeysChunk,
   shouldShowSlashSuggestions,
+  totalEditPhysicalRows,
+  totalEditPhysicalRowsFromLineIndex,
+  totalSuggestionPhysicalRows,
 } from "../src/lib/repl/tty-line-editor.js";
+import { tui } from "../src/tui/style.js";
 
 describe("tty-line-editor slash gate", () => {
   it("shows suggestions for slash only or slash plus spaces before cursor", () => {
@@ -179,5 +185,33 @@ describe("multiline prompt layout helpers", () => {
     expect(cursorEditRowAndCol("a\nb", 1)).toEqual({ row: 0, col: 3 });
     expect(cursorEditRowAndCol("a\nb", 2)).toEqual({ row: 1, col: 2 });
     expect(cursorEditRowAndCol("a\nb", 3)).toEqual({ row: 1, col: 3 });
+  });
+});
+
+describe("wrap-aware physical row layout", () => {
+  it("counts wrapped rows from visible width, ignoring ANSI styling", () => {
+    const styled = `${tui.bold("abcd")}ef`;
+    expect(lineWrapPhysicalRows(styled, 4)).toBe(2);
+    expect(lineWrapPhysicalRows(styled, 10)).toBe(1);
+  });
+
+  it("sums edit block rows including multiline prefixes", () => {
+    const lines = ["abcdef", "xy"];
+    expect(totalEditPhysicalRows(lines, 4)).toBe(3);
+  });
+
+  it("offsets cursor up through wrapped first line and prior lines", () => {
+    const lines = ["abcdef", "zzzzzz"];
+    expect(editCursorPhysicalOffsetUp(lines, 1, 6, 4)).toBe(3);
+  });
+
+  it("counts physical rows from a line index for clearing below cursor", () => {
+    const lines = ["abcdef", "xy", "q"];
+    expect(totalEditPhysicalRowsFromLineIndex(lines, 1, 4)).toBe(2);
+  });
+
+  it("sums suggestion rows for slash popup height", () => {
+    const sug = [tui.bold("/repo"), "  pick a repository"];
+    expect(totalSuggestionPhysicalRows(sug, 8)).toBe(4);
   });
 });
