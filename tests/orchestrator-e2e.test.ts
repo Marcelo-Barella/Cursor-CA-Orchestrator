@@ -589,11 +589,10 @@ function installV3GithubMock(tracker: {
   pulls: number;
   merges: string[];
   createdRefs: Set<string>;
-  refLookups?: string[];
+  refLookups: string[];
 }): void {
   unmockedFetch = globalThis.fetch;
   tracker.createdRefs.add("main");
-  if (!tracker.refLookups) tracker.refLookups = [];
   globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = (init?.method ?? "GET").toUpperCase();
@@ -609,7 +608,7 @@ function installV3GithubMock(tracker: {
     if (url.includes("/git/ref/heads/")) {
       const tail = url.split("/git/ref/heads/")[1] ?? "";
       const decoded = decodeURIComponent(tail);
-      tracker.refLookups!.push(`GET ${decoded}`);
+      tracker.refLookups.push(`GET ${decoded}`);
       if (tracker.createdRefs.has(decoded)) {
         return new Response(JSON.stringify({ object: { sha: "0123456789abcdef0123456789abcdef01234567" } }), {
           status: 200,
@@ -626,7 +625,7 @@ function installV3GithubMock(tracker: {
       const ref = (body.ref ?? "").replace(/^refs\/heads\//, "");
       if (ref) {
         tracker.createdRefs.add(ref);
-        tracker.refLookups!.push(`POST ${ref}`);
+        tracker.refLookups.push(`POST ${ref}`);
       }
       return new Response(JSON.stringify({ ref: body.ref }), {
         status: 201,
@@ -764,9 +763,9 @@ describe("runOrchestration v3 claims path", () => {
     expect(fixTask!.allowed_paths).toEqual(["src/a/foo.ts"]);
 
     const fixBranch = `cursor-orch/${runId}/fix-iter-1-code_quality`;
-    const postIdx = tracker.refLookups!.findIndex((l) => l === `POST ${fixBranch}`);
+    const postIdx = tracker.refLookups.findIndex((l) => l === `POST ${fixBranch}`);
     expect(postIdx).toBeGreaterThan(0);
-    const getsBeforeFixPost = tracker.refLookups!
+    const getsBeforeFixPost = tracker.refLookups
       .slice(0, postIdx)
       .filter((l) => l.startsWith("GET "));
     expect(getsBeforeFixPost.at(-1)).toBe(`GET ${runBranch}`);
