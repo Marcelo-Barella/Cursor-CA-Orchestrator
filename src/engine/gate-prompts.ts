@@ -8,10 +8,11 @@ export type BuildGatePromptInput = {
   runBranch: string;
   bootstrapOwner: string;
   bootstrapRepo: string;
+  repoAlias?: string;
 };
 
 export function buildGatePrompt(input: BuildGatePromptInput): string {
-  const artifactPath = gateResultBoardPath(input.gate);
+  const artifactPath = gateResultBoardPath(input.gate, input.repoAlias);
   const common = [
     `Gate: ${input.gate}`,
     `Product repo: ${input.repoUrl}`,
