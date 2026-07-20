@@ -9,7 +9,6 @@ export type FixPlanBuildResult =
 type FixEntry = { gate: string; paths: string[]; summary: string; findingsText: string };
 
 function makeFixTask(
-  iteration: number,
   repoAlias: string,
   taskId: string,
   prompt: string,
@@ -55,7 +54,6 @@ export function buildFixTasks(input: {
   for (const entry of withPaths) {
     tasks.push(
       makeFixTask(
-        input.iteration,
         input.repoAlias,
         `fix-iter-${input.iteration}-${entry.gate}`,
         `Fix gate ${entry.gate} failures.\nSummary: ${entry.summary}\nFindings:\n${entry.findingsText}`,
@@ -68,7 +66,6 @@ export function buildFixTasks(input: {
     const entry = withoutPaths[0]!;
     tasks.push(
       makeFixTask(
-        input.iteration,
         input.repoAlias,
         `fix-iter-${input.iteration}-${entry.gate}`,
         `Fix gate ${entry.gate} failures.\nSummary: ${entry.summary}\nFindings:\n${entry.findingsText}`,
@@ -79,7 +76,6 @@ export function buildFixTasks(input: {
     const findingsText = withoutPaths.map((e) => `## ${e.gate}\n${e.findingsText}`).join("\n");
     tasks.push(
       makeFixTask(
-        input.iteration,
         input.repoAlias,
         `fix-iter-${input.iteration}-merged`,
         `Fix multiple gate failures without path claims.\n${findingsText}`,

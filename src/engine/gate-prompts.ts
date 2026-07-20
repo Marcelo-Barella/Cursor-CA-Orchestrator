@@ -1,7 +1,7 @@
 import type { GateId } from "./iteration-policy.js";
 import { gateResultBoardPath } from "./gates.js";
 
-export type BuildGatePromptInput = {
+type BuildGatePromptInput = {
   gate: GateId;
   runId: string;
   repoUrl: string;
