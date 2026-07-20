@@ -1919,7 +1919,14 @@ async function runIntegratePhase(ctx: LoopContext): Promise<void> {
   for (const task of ctx.config.tasks) {
     if (task.create_repo) continue;
     const agent = ctx.state.agents[task.id];
-    if (!agent || agent.status !== "finished" || !agent.branch_name) continue;
+    if (!agent || agent.status !== "finished") continue;
+    if (!agent.branch_name) {
+      ctx.state.error = `Task '${task.id}' finished without branch_name; cannot fan-in`;
+      ctx.state.status = "failed";
+      ctx.state.phase = "failed";
+      await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+      return;
+    }
     const rc = ctx.config.repositories[task.repo];
     if (!rc) continue;
     const ownerRepo = parseGithubOwnerRepo(rc.url);
@@ -2257,7 +2264,14 @@ async function runReplanPhase(ctx: LoopContext): Promise<void> {
     return;
   }
 
-  await runPlanningPhase(ctx.config, ctx.runId, ctx.agentClient, ctx.repoStore, ctx.apiKey);
+  const planningResult = await runPlanningPhase(ctx.config, ctx.runId, ctx.agentClient, ctx.repoStore, ctx.apiKey);
+  if (!planningResult.ok) {
+    ctx.state.error = planningResult.error;
+    ctx.state.status = "failed";
+    ctx.state.phase = "failed";
+    await syncToRepo(ctx.repoStore, ctx.runId, ctx.state);
+    return;
+  }
   validateConfig(ctx.config);
   assertDisjointClaims(ctx.config.tasks);
   reconcileAgentsFromConfig(ctx.state, ctx.config);
