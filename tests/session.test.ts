@@ -24,6 +24,7 @@ describe("Session", () => {
       timeout_minutes: 30,
       create_repo: false,
       repo_config: null,
+      allowed_paths: [],
     });
 
     session.resetSessionToDefaults();

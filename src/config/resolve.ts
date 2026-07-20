@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
 import { normalizeModelFromYaml } from "../lib/model-selection.js";
+import { DEFAULT_MODEL_ID, DEFAULT_MAX_ITERATIONS } from "./constants.js";
 import { parseConfig } from "./parse.js";
 import type {
   BranchLayout,
@@ -739,6 +740,88 @@ function resolveBoolValue(opts: {
   return selectWithConflict(opts.fieldName, candidates, opts.findings);
 }
 
+function parsePositiveInt(value: string): number | null {
+  const n = Number(value.trim());
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return n;
+}
+
+function resolvePositiveIntValue(opts: {
+  fieldName: string;
+  defaultValue: number;
+  envName: string;
+  projectRaw: Record<string, unknown> | null;
+  projectKeyPath: string[];
+  projectRef: string;
+  sessionRaw: Record<string, unknown> | null;
+  sessionKeyPath: string[];
+  sessionRef: string;
+  findings: DiagnosticFinding[];
+}): ResolvedValue {
+  const candidates: ResolvedValue[] = [];
+  const envRaw = process.env[opts.envName];
+  if (envRaw !== undefined) {
+    if (envRaw.trim()) {
+      const parsed = parsePositiveInt(envRaw);
+      if (parsed === null) {
+        opts.findings.push(
+          finding({
+            code: "CFG_VALUE_INVALID",
+            severity: "error",
+            category: "environment",
+            message: `Invalid positive integer in ${opts.envName}.`,
+            field: opts.fieldName,
+            source: "env",
+            source_ref: opts.envName,
+            expected: "positive integer",
+            actual: envRaw,
+            why_it_failed: "Positive integer environment value could not be parsed.",
+            fix: `Set \`${opts.envName}\` to a positive integer.`,
+            is_blocking: true,
+            suggested_commands: [`export ${opts.envName}=10`, "cursor-orch config doctor --strict"],
+            docs_ref: "README#onboarding-clone-to-first-run",
+          }),
+        );
+      } else {
+        candidates.push({ value: parsed, source: "env", source_ref: opts.envName });
+      }
+    }
+  }
+  const [projectValue, projectExists] = getNested(opts.projectRaw, opts.projectKeyPath);
+  if (projectExists) {
+    if (typeof projectValue === "number" && Number.isInteger(projectValue) && projectValue > 0) {
+      candidates.push({ value: projectValue, source: "project", source_ref: opts.projectRef });
+    } else {
+      opts.findings.push(
+        finding({
+          code: "CFG_VALUE_INVALID",
+          severity: "error",
+          category: "config",
+          message: `Invalid positive integer for ${opts.fieldName} in project config.`,
+          field: opts.fieldName,
+          source: "project",
+          source_ref: opts.projectRef,
+          expected: "positive integer",
+          actual: String(projectValue),
+          why_it_failed: "Project configuration uses incorrect type or non-positive value.",
+          fix: `Set \`${opts.fieldName}\` to a positive integer in config file.`,
+          is_blocking: true,
+          suggested_commands: ["cursor-orch config doctor --strict"],
+          docs_ref: "README#onboarding-clone-to-first-run",
+        }),
+      );
+    }
+  }
+  const [sessionValue, sessionExists] = getNested(opts.sessionRaw, opts.sessionKeyPath);
+  if (sessionExists) {
+    if (typeof sessionValue === "number" && Number.isInteger(sessionValue) && sessionValue > 0) {
+      candidates.push({ value: sessionValue, source: "session", source_ref: opts.sessionRef });
+    }
+  }
+  candidates.push({ value: opts.defaultValue, source: "default", source_ref: `default:${opts.fieldName}` });
+  return selectWithConflict(opts.fieldName, candidates, opts.findings);
+}
+
 function resolveRequiredSecret(name: string, findings: DiagnosticFinding[]): ResolvedValue {
   if (!(name in process.env)) {
     findings.push(
@@ -957,7 +1040,7 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
 
   const model = resolveModelValue({
     fieldName: "model",
-    defaultValue: "composer-2",
+    defaultValue: DEFAULT_MODEL_ID,
     flagValue: null,
     flagRef: "",
     envName: "CURSOR_ORCH_MODEL",
@@ -1069,6 +1152,20 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
   const [tasks, tasksSource] = resolveTasks(projectConfig, projectRaw, sessionConfig, sessionRaw, configPathRef);
   provenance.tasks = tasksSource;
 
+  const maxIterations = resolvePositiveIntValue({
+    fieldName: "max_iterations",
+    defaultValue: DEFAULT_MAX_ITERATIONS,
+    envName: "CURSOR_ORCH_MAX_ITERATIONS",
+    projectRaw,
+    projectKeyPath: ["max_iterations"],
+    projectRef: `${configPathRef}:max_iterations`,
+    sessionRaw,
+    sessionKeyPath: ["max_iterations"],
+    sessionRef: "~/.cursor-orch/session.yaml:max_iterations",
+    findings,
+  });
+  provenance.max_iterations = maxIterations;
+
   const [delegation_map, delegationMapSource] = resolveDelegationMap(
     projectConfig,
     projectRaw,
@@ -1115,6 +1212,7 @@ export function resolveConfigPrecedence(configPathFlag: string | null | undefine
       branch_layout: String(branchLayout.value) as BranchLayout,
     },
     bootstrap_repo_name: String(bootstrapRepo.value),
+    max_iterations: Number(maxIterations.value),
     ...(mcp_servers !== undefined ? { mcp_servers } : {}),
     ...(inventory !== undefined ? { inventory } : {}),
   };

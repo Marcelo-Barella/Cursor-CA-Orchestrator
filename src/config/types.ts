@@ -21,6 +21,7 @@ export interface TaskConfig {
   timeout_minutes: number;
   create_repo: boolean;
   repo_config: Record<string, unknown> | null;
+  allowed_paths: string[];
 }
 
 export type BranchLayout = "consolidated" | "per_task";
@@ -103,6 +104,7 @@ export interface OrchestratorConfig {
   bootstrap_repo_name: string;
   mcp_servers?: Record<string, McpServerConfig>;
   inventory?: InventoryManifestV1 | null;
+  max_iterations: number;
 }
 
 export interface ResolvedValue {

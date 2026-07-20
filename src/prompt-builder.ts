@@ -9,6 +9,7 @@ export type WorkerPromptOpts = {
   runBranch?: string;
   launchRef?: string;
   perTaskBranch?: string;
+  claimsMode?: boolean;
 };
 
 export function buildWorkerPrompt(
@@ -17,14 +18,21 @@ export function buildWorkerPrompt(
   dependencyOutputs: Record<string, Record<string, unknown>>,
   opts?: WorkerPromptOpts,
 ): string {
+  const claimsMode = Boolean(opts?.claimsMode);
+  const gitSection = claimsMode
+    ? sectionGitClaims(opts?.runBranch, opts?.perTaskBranch)
+    : opts?.runBranch
+      ? sectionGitRunLine(opts.runBranch, opts.launchRef, opts.perTaskBranch)
+      : "";
   const sections = [
     WORKER_SYSTEM_PROMPT,
     sectionRunContext(runId),
     sectionTask(task),
+    claimsMode ? sectionClaims(task) : "",
     sectionDependencies(task, dependencyOutputs),
-    opts?.runBranch ? sectionGitRunLine(opts.runBranch, opts.launchRef, opts.perTaskBranch) : "",
+    gitSection,
     sectionOutputProtocol(task),
-    sectionRules(opts?.runBranch),
+    sectionRules(claimsMode ? undefined : opts?.runBranch, claimsMode ? opts?.perTaskBranch : undefined),
   ];
   return sections.filter(Boolean).join("\n\n");
 }
@@ -88,6 +96,29 @@ function sectionRepoCreationRunLine(exampleRunBranch: string): string {
 
 function sectionTask(task: TaskConfig): string {
   return `You are working on task "${task.id}" as part of an orchestrated multi-repo workflow.\n\nYOUR TASK:\n${task.prompt.trim()}`;
+}
+
+function sectionClaims(task: TaskConfig): string {
+  const paths = task.allowed_paths.length ? task.allowed_paths.join("\n- ") : "(none)";
+  return [
+    "PATH CLAIMS (allowed_paths):",
+    "Only modify files under these paths:",
+    `- ${paths}`,
+    "Do not edit files outside these claims.",
+  ].join("\n");
+}
+
+function sectionGitClaims(runBranch?: string, perTaskBranch?: string): string {
+  const branch = perTaskBranch ?? "(per-task branch)";
+  const lines = [
+    "GIT TARGET (claims + fan-in workflow):",
+    `Commit and push all code changes to your per-task branch "${branch}" only.`,
+    "Do not open a PR; the orchestrator opens one PR after fan-in.",
+  ];
+  if (runBranch) {
+    lines.push(`Do not push to the run branch "${runBranch}" (ends with /run); the orchestrator fans your task branch into it.`);
+  }
+  return lines.join("\n");
 }
 
 function sectionGitRunLine(runBranch: string, launchRef?: string, perTaskBranch?: string): string {
@@ -163,7 +194,16 @@ Edit the JSON before reporting:
 - If you are blocked, set "status" to "blocked" and "blocked_reason" to a specific explanation.`;
 }
 
-function sectionRules(runLineBranch?: string): string {
+function sectionRules(runLineBranch?: string, claimsPerTaskBranch?: string): string {
+  if (claimsPerTaskBranch) {
+    return `RULES:
+- Focus only on your assigned task. Do not modify unrelated code.
+- Stay within your allowed_paths claims.
+- If you are blocked, report it using the output JSON (both channels) with status "blocked" and a specific blocked_reason.
+- Do not attempt to communicate with other agents. Report only via the artifact + final assistant JSON block described above.
+- Do not open a PR.
+# MANDATORY: Commit and push your code changes to branch "${claimsPerTaskBranch}" on the task repository before reporting completion. Do NOT push to a /run branch. Do NOT push \`${WORKER_OUTPUT_ARTIFACT_PATH}\`.`;
+  }
   if (runLineBranch) {
     return `RULES:
 - Focus only on your assigned task. Do not modify unrelated code.

@@ -19,10 +19,12 @@ describe("state", () => {
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "x", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const state = createInitialState(config, "run1");
     const s = serialize(state);
@@ -82,10 +84,12 @@ describe("state", () => {
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "x", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const state = createInitialState(config, "run1");
     state.agents.a!.retry_count = 1;
@@ -111,10 +115,12 @@ describe("state", () => {
           timeout_minutes: 30,
           create_repo: false,
           repo_config: null,
+          allowed_paths: [],
         },
       ],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "x", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const state = createInitialState(config, "run1");
     state.delegation_phase_index = 2;
@@ -175,6 +181,53 @@ describe("state", () => {
 
     expect(files["run1/events.jsonl"]!.trim().split("\n")).toHaveLength(2);
     expect(files["run1/events.jsonl"]).toContain('"event_type":"task_finished"');
+  });
+
+  it("round-trips phase and iteration", () => {
+    const config: OrchestratorConfig = {
+      name: "n",
+      model: { id: "m" },
+      prompt: "",
+      repositories: {},
+      tasks: [
+        {
+          id: "a",
+          repo: "r",
+          prompt: "p",
+          model: null,
+          depends_on: [],
+          timeout_minutes: 30,
+          create_repo: false,
+          repo_config: null,
+          allowed_paths: [],
+        },
+      ],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "x", branch_layout: "consolidated" },
+      bootstrap_repo_name: "b",
+      max_iterations: 10,
+    };
+    const state = createInitialState(config, "run1");
+    expect(state.phase).toBe("plan");
+    expect(state.iteration).toBe(0);
+    expect(state.gates_failed_after_fix).toEqual([]);
+    state.phase = "gate";
+    state.iteration = 2;
+    state.gates_failed_after_fix = ["code_quality"];
+    const again = deserialize(serialize(state));
+    expect(again.phase).toBe("gate");
+    expect(again.iteration).toBe(2);
+    expect(again.gates_failed_after_fix).toEqual(["code_quality"]);
+  });
+
+  it("deserializes legacy state without phase", () => {
+    const legacy = deserialize(JSON.stringify({
+      orchestration_id: "r",
+      run_id: "r",
+      status: "running",
+      agents: {},
+    }));
+    expect(legacy.phase).toBe("plan");
+    expect(legacy.iteration).toBe(0);
   });
 
   it("rotates events.jsonl when append would exceed MAX_EVENTS_BYTES", async () => {

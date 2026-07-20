@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
+import { DEFAULT_MODEL_ID } from "./config/constants.js";
 import type { McpServerConfig, ModelSelectionConfig } from "./config/types.js";
 import { copyToClipboard } from "./lib/clipboard.js";
 import { fetchModelsCatalog } from "./lib/models-catalog.js";
@@ -99,7 +100,7 @@ export function promptSetCommandText(prompt: string): string {
 
 export function setupSummaryLines(session: Session): string[] {
   const cfg = session.config;
-  const modelLine = formatModelSummary(cfg.model.id.trim() ? cfg.model : { id: "composer-2" });
+  const modelLine = formatModelSummary(cfg.model.id.trim() ? cfg.model : { id: DEFAULT_MODEL_ID });
   const prompt = promptPreview(cfg.prompt, 120);
   const name = cfg.name || "<empty>";
   const repoCount = Object.keys(cfg.repositories).length;

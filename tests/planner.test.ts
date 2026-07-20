@@ -13,6 +13,7 @@ describe("planner", () => {
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const json = JSON.stringify({
       tasks: [
@@ -40,6 +41,7 @@ describe("planner", () => {
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const json = JSON.stringify({
       delegation_map: {
@@ -78,6 +80,7 @@ describe("planner", () => {
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const json = JSON.stringify({
       delegation_map: {
@@ -115,6 +118,7 @@ describe("planner", () => {
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const json = JSON.stringify({
       delegation_map: {
@@ -148,6 +152,7 @@ describe("planner", () => {
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const json = JSON.stringify({
       tasks: [
@@ -174,6 +179,7 @@ describe("planner", () => {
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const json = JSON.stringify({
       tasks: [
@@ -185,6 +191,7 @@ describe("planner", () => {
           timeout_minutes: 30,
           create_repo: true,
           repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+          allowed_paths: [],
         },
         {
           id: "create-frontend-repo",
@@ -194,6 +201,7 @@ describe("planner", () => {
           timeout_minutes: 30,
           create_repo: true,
           repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+          allowed_paths: [],
         },
         {
           id: "ui-financial-core-and-dashboards",
@@ -219,6 +227,7 @@ describe("planner", () => {
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const json = JSON.stringify({
       tasks: [
@@ -230,6 +239,7 @@ describe("planner", () => {
           timeout_minutes: 30,
           create_repo: true,
           repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+          allowed_paths: [],
         },
         {
           id: "create-repo-tideglass-web",
@@ -239,6 +249,7 @@ describe("planner", () => {
           timeout_minutes: 30,
           create_repo: true,
           repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+          allowed_paths: [],
         },
         {
           id: "tideglass-web-generated-client-only-integration",
@@ -264,6 +275,7 @@ describe("planner", () => {
       tasks: [],
       target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
       bootstrap_repo_name: "b",
+      max_iterations: 10,
     };
     const json = JSON.stringify({
       tasks: [
@@ -275,6 +287,7 @@ describe("planner", () => {
           timeout_minutes: 30,
           create_repo: true,
           repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+          allowed_paths: [],
         },
         {
           id: "create-b",
@@ -284,6 +297,7 @@ describe("planner", () => {
           timeout_minutes: 30,
           create_repo: true,
           repo_config: { url_template: "https://github.com/{owner}/{repo_name}", ref: "main" },
+          allowed_paths: [],
         },
         {
           id: "orphan-impl",
@@ -295,5 +309,36 @@ describe("planner", () => {
       ],
     });
     expect(() => parseTaskPlan(json, config)).toThrow(/Set "repo" to the id of the create_repo task/);
+  });
+
+  it("parseTaskPlan reads allowed_paths", () => {
+    const baseConfig: OrchestratorConfig = {
+      name: "n",
+      model: { id: "m" },
+      prompt: "",
+      repositories: { svc: { url: "https://github.com/acme/svc", ref: "main" } },
+      tasks: [],
+      target: { auto_create_pr: true, consolidate_prs: true, branch_prefix: "p", branch_layout: "consolidated" },
+      bootstrap_repo_name: "b",
+      max_iterations: 10,
+    };
+    const tasks = parseTaskPlan(
+      JSON.stringify({
+        tasks: [
+          {
+            id: "a",
+            repo: "https://github.com/acme/svc",
+            prompt: "x",
+            depends_on: [],
+            timeout_minutes: 30,
+            create_repo: false,
+            repo_config: null,
+            allowed_paths: ["src/api"],
+          },
+        ],
+      }),
+      baseConfig,
+    );
+    expect(tasks[0]!.allowed_paths).toEqual(["src/api"]);
   });
 });

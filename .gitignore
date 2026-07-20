@@ -10,3 +10,5 @@ coordination/
 artifacts/
 uv.lock
 docs/superpowers/
+
+.worktrees/
